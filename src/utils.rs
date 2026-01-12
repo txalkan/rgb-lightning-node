@@ -19,11 +19,10 @@ use lightning::{
 use lightning_persister::fs_store::FilesystemStore;
 use magic_crypt::{new_magic_crypt, MagicCryptTrait};
 use rgb_lib::{bdk_wallet::keys::bip39::Mnemonic, BitcoinNetwork, ContractId};
-use sea_orm::DatabaseConnection;
+use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use std::{
     collections::HashSet,
     fmt::Write,
-    fs,
     net::{SocketAddr, TcpStream, ToSocketAddrs},
     path::Path,
     path::PathBuf,
@@ -171,8 +170,24 @@ impl Writeable for UserOnionMessageContents {
     }
 }
 
-pub(crate) fn check_already_initialized(mnemonic_path: &Path) -> Result<(), APIError> {
-    if mnemonic_path.exists() {
+pub(crate) async fn check_already_initialized(db: &DatabaseConnection) -> Result<(), APIError> {
+    let create_table_stmt = Statement::from_string(
+        sea_orm::DatabaseBackend::Sqlite,
+        "CREATE TABLE IF NOT EXISTS mnemonic (id INTEGER PRIMARY KEY, encrypted_mnemonic TEXT NOT NULL)".to_string(),
+    );
+    db.execute(create_table_stmt)
+        .await
+        .map_err(|e| APIError::DatabaseError(format!("Failed to create mnemonic table: {}", e)))?;
+
+    let stmt = Statement::from_string(
+        sea_orm::DatabaseBackend::Sqlite,
+        "SELECT id FROM mnemonic WHERE id = 1".to_string(),
+    );
+    let result = db.query_one(stmt).await.map_err(|e| {
+        APIError::DatabaseError(format!("Failed to check mnemonic existence: {}", e))
+    })?;
+
+    if result.is_some() {
         return Err(APIError::AlreadyInitialized);
     }
     Ok(())
@@ -187,12 +202,31 @@ pub(crate) fn check_password_strength(password: String) -> Result<(), APIError> 
     Ok(())
 }
 
-pub(crate) fn check_password_validity(
+pub(crate) async fn check_password_validity(
     password: &str,
-    storage_dir_path: &Path,
+    db: &DatabaseConnection,
 ) -> Result<Mnemonic, APIError> {
-    let mnemonic_path = get_mnemonic_path(storage_dir_path);
-    if let Ok(encrypted_mnemonic) = fs::read_to_string(mnemonic_path) {
+    let create_table_stmt = Statement::from_string(
+        sea_orm::DatabaseBackend::Sqlite,
+        "CREATE TABLE IF NOT EXISTS mnemonic (id INTEGER PRIMARY KEY, encrypted_mnemonic TEXT NOT NULL)".to_string(),
+    );
+    db.execute(create_table_stmt)
+        .await
+        .map_err(|e| APIError::DatabaseError(format!("Failed to create mnemonic table: {}", e)))?;
+
+    let stmt = Statement::from_string(
+        sea_orm::DatabaseBackend::Sqlite,
+        "SELECT encrypted_mnemonic FROM mnemonic WHERE id = 1".to_string(),
+    );
+    let result = db
+        .query_one(stmt)
+        .await
+        .map_err(|e| APIError::DatabaseError(format!("Failed to read mnemonic: {}", e)))?;
+
+    if let Some(row) = result {
+        let encrypted_mnemonic: String = row.try_get_by_index(0).map_err(|e| {
+            APIError::DatabaseError(format!("Failed to get mnemonic from row: {}", e))
+        })?;
         let mcrypt = new_magic_crypt!(password, 256);
         let mnemonic_str = mcrypt
             .decrypt_base64_to_string(encrypted_mnemonic)
@@ -221,27 +255,27 @@ pub(crate) fn check_port_is_available(port: u16) -> Result<(), AppError> {
     Ok(())
 }
 
-pub(crate) fn get_mnemonic_path(storage_dir_path: &Path) -> PathBuf {
-    storage_dir_path.join("mnemonic")
-}
-
-pub(crate) fn encrypt_and_save_mnemonic(
+pub(crate) async fn encrypt_and_save_mnemonic(
     password: String,
     mnemonic: String,
-    mnemonic_path: &Path,
+    db: &DatabaseConnection,
 ) -> Result<(), APIError> {
     let mcrypt = new_magic_crypt!(password, 256);
     let encrypted_mnemonic = mcrypt.encrypt_str_to_base64(mnemonic);
-    match fs::write(mnemonic_path, encrypted_mnemonic) {
-        Ok(()) => {
-            tracing::info!("Created a new wallet");
-            Ok(())
-        }
-        Err(e) => Err(APIError::FailedKeysCreation(
-            mnemonic_path.to_string_lossy().to_string(),
-            e.to_string(),
-        )),
-    }
+
+    let create_table_stmt = Statement::from_string(sea_orm::DatabaseBackend::Sqlite, "CREATE TABLE IF NOT EXISTS mnemonic (id INTEGER PRIMARY KEY, encrypted_mnemonic TEXT NOT NULL)".to_string());
+    db.execute(create_table_stmt)
+        .await
+        .map_err(|e| APIError::DatabaseError(format!("Failed to create mnemonic table: {}", e)))?;
+
+    let sql = format!("INSERT INTO mnemonic (id, encrypted_mnemonic) VALUES (1, '{}') ON CONFLICT(id) DO UPDATE SET encrypted_mnemonic = excluded.encrypted_mnemonic", encrypted_mnemonic.replace("'", "''"));
+    let stmt = Statement::from_string(sea_orm::DatabaseBackend::Sqlite, sql);
+    db.execute(stmt)
+        .await
+        .map_err(|e| APIError::FailedKeysCreation("database".to_string(), e.to_string()))?;
+
+    tracing::info!("Created a new wallet");
+    Ok(())
 }
 
 pub(crate) async fn connect_peer_if_necessary(

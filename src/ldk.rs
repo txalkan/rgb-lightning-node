@@ -58,7 +58,7 @@ use rgb_lib::{
     utils::{get_account_data, recipient_id_from_script_buf, script_buf_from_recipient_id},
     wallet::{
         rust_only::{check_indexer_url, AssetColoringInfo, ColoringInfo},
-        DatabaseType, Recipient, TransportEndpoint, Wallet as RgbLibWallet, WalletData,
+        DatabaseType, Online, Recipient, TransportEndpoint, Wallet as RgbLibWallet, WalletData,
         WitnessData,
     },
     AssetSchema, Assignment, BitcoinNetwork, ConsignmentExt, ContractId, FileContent, RgbTransfer,
@@ -2079,8 +2079,9 @@ pub(crate) async fn start_ldk(
         .clone()
         .to_string_lossy()
         .to_string();
-    let mut rgb_wallet = tokio::task::spawn_blocking(move || {
-        RgbLibWallet::new(WalletData {
+    let indexer_url_str = indexer_url.to_string();
+    let (rgb_wallet, rgb_online) = tokio::task::spawn_blocking(move || {
+        let mut wallet = RgbLibWallet::new(WalletData {
             data_dir,
             bitcoin_network,
             database_type: DatabaseType::Sqlite,
@@ -2092,11 +2093,16 @@ pub(crate) async fn start_ldk(
             vanilla_keychain: None,
             supported_schemas: vec![AssetSchema::Nia, AssetSchema::Cfa, AssetSchema::Uda],
         })
-        .expect("valid rgb-lib wallet")
+        .expect("valid rgb-lib wallet");
+
+        let online = wallet.go_online(false, indexer_url_str)?;
+
+        Ok::<(RgbLibWallet, Online), rgb_lib::Error>((wallet, online))
     })
     .await
-    .unwrap();
-    let rgb_online = rgb_wallet.go_online(false, indexer_url.to_string())?;
+    .unwrap()
+    .map_err(|e| APIError::Unexpected(format!("Unmapped rgb-lib error: {:?}", e)))?;
+
     fs::write(
         static_state.storage_dir_path.join(WALLET_FINGERPRINT_FNAME),
         account_xpub_colored.fingerprint().to_string(),

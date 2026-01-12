@@ -75,6 +75,9 @@ pub enum APIError {
     #[error("Unable to create keys seed file {0}: {1}")]
     FailedKeysCreation(String, String),
 
+    #[error("Database error: {0}")]
+    DatabaseError(String),
+
     #[error("Failed to open channel: {0}")]
     FailedOpenChannel(String),
 
@@ -426,6 +429,7 @@ impl IntoResponse for APIError {
             | APIError::FailedPayment(_)
             | APIError::FailedPeerDisconnection(_)
             | APIError::FailedSendingOnionMessage(_)
+            | APIError::DatabaseError(_)
             | APIError::IO(_)
             | APIError::Unexpected(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,

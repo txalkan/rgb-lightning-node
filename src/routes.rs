@@ -84,7 +84,7 @@ use crate::ldk::{start_ldk, stop_ldk, LdkBackgroundServices, MIN_CHANNEL_CONFIRM
 use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{
     check_already_initialized, check_channel_id, check_password_strength, check_password_validity,
-    encrypt_and_save_mnemonic, get_max_local_rgb_amount, get_mnemonic_path, get_route, hex_str,
+    encrypt_and_save_mnemonic, get_max_local_rgb_amount, get_route, hex_str,
     hex_str_to_compressed_pubkey, hex_str_to_vec, validate_and_parse_payment_hash,
     validate_and_parse_payment_preimage, UnlockedAppState, UserOnionMessageContents,
 };
@@ -1377,8 +1377,7 @@ pub(crate) async fn backup(
     no_cancel(async move {
         let _guard = state.check_locked().await?;
 
-        let _mnemonic =
-            check_password_validity(&payload.password, &state.static_state.storage_dir_path)?;
+        let _mnemonic = check_password_validity(&payload.password, &state.static_state.db).await?;
 
         do_backup(
             &state.static_state.storage_dir_path,
@@ -1425,13 +1424,14 @@ pub(crate) async fn change_password(
         check_password_strength(payload.new_password.clone())?;
 
         let mnemonic =
-            check_password_validity(&payload.old_password, &state.static_state.storage_dir_path)?;
+            check_password_validity(&payload.old_password, &state.static_state.db).await?;
 
         encrypt_and_save_mnemonic(
             payload.new_password,
             mnemonic.to_string(),
-            &get_mnemonic_path(&state.static_state.storage_dir_path),
-        )?;
+            &state.static_state.db,
+        )
+        .await?;
 
         Ok(Json(EmptyResponse {}))
     })
@@ -1761,14 +1761,14 @@ pub(crate) async fn init(
 
         check_password_strength(payload.password.clone())?;
 
-        let mnemonic_path = get_mnemonic_path(&state.static_state.storage_dir_path);
-        check_already_initialized(&mnemonic_path)?;
+        check_already_initialized(&state.static_state.db).await?;
 
         let keys = generate_keys(state.static_state.network);
 
         let mnemonic = keys.mnemonic;
 
-        encrypt_and_save_mnemonic(payload.password, mnemonic.clone(), &mnemonic_path)?;
+        encrypt_and_save_mnemonic(payload.password, mnemonic.clone(), &state.static_state.db)
+            .await?;
 
         Ok(Json(InitResponse { mnemonic }))
     })
@@ -2823,6 +2823,11 @@ pub(crate) async fn lock(
                 state.update_changing_state(true);
                 drop(unlocked_state);
             }
+            Err(APIError::LockedNode) => {
+                // Node is already locked, which is the desired state
+                tracing::info!("Node is already locked");
+                return Ok(Json(EmptyResponse {}));
+            }
             Err(e) => {
                 state.update_changing_state(false);
                 return Err(e);
@@ -3532,8 +3537,7 @@ pub(crate) async fn restore(
     no_cancel(async move {
         let _unlocked_state = state.check_locked().await?;
 
-        let mnemonic_path = get_mnemonic_path(&state.static_state.storage_dir_path);
-        check_already_initialized(&mnemonic_path)?;
+        check_already_initialized(&state.static_state.db).await?;
 
         restore_backup(
             Path::new(&payload.backup_path),
@@ -3541,8 +3545,7 @@ pub(crate) async fn restore(
             &state.static_state.storage_dir_path,
         )?;
 
-        let _mnemonic =
-            check_password_validity(&payload.password, &state.static_state.storage_dir_path)?;
+        let _mnemonic = check_password_validity(&payload.password, &state.static_state.db).await?;
 
         Ok(Json(EmptyResponse {}))
     })
@@ -4005,16 +4008,14 @@ pub(crate) async fn unlock(
             }
         }
 
-        let mnemonic = match check_password_validity(
-            &payload.password,
-            &state.static_state.storage_dir_path,
-        ) {
-            Ok(mnemonic) => mnemonic,
-            Err(e) => {
-                state.update_changing_state(false);
-                return Err(e);
-            }
-        };
+        let mnemonic =
+            match check_password_validity(&payload.password, &state.static_state.db).await {
+                Ok(mnemonic) => mnemonic,
+                Err(e) => {
+                    state.update_changing_state(false);
+                    return Err(e);
+                }
+            };
 
         tracing::debug!("Starting LDK...");
         let (new_ldk_background_services, new_unlocked_app_state) =
