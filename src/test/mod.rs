@@ -17,6 +17,7 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tracing_test::traced_test;
 
+use crate::args::DatabaseType;
 use crate::error::APIErrorResponse;
 use crate::ldk::FEE_RATE;
 use crate::routes::{
@@ -27,7 +28,8 @@ use crate::routes::{
     DisconnectPeerRequest, EmptyResponse, FailTransfersRequest, FailTransfersResponse,
     GetAssetMediaRequest, GetAssetMediaResponse, GetChannelIdRequest, GetChannelIdResponse,
     GetPaymentRequest, GetPaymentResponse, GetSwapRequest, GetSwapResponse, HTLCStatus,
-    InitRequest, InitResponse, InvoiceStatus, InvoiceStatusRequest, InvoiceStatusResponse,
+    InitRequest, InitResponse, InvoiceCancelRequest, InvoiceHodlRequest, InvoiceHodlResponse,
+    InvoiceSettleRequest, InvoiceStatus, InvoiceStatusRequest, InvoiceStatusResponse,
     IssueAssetCFARequest, IssueAssetCFAResponse, IssueAssetNIARequest, IssueAssetNIAResponse,
     IssueAssetUDARequest, IssueAssetUDAResponse, KeysendRequest, KeysendResponse, LNInvoiceRequest,
     LNInvoiceResponse, ListAssetsRequest, ListAssetsResponse, ListChannelsResponse,
@@ -66,6 +68,8 @@ impl Default for UserArgs {
             ldk_peer_listening_port: 9735,
             max_media_upload_size_mb: 3,
             root_public_key: None,
+            database_type: DatabaseType::Sqlite,
+            database_url: None,
         }
     }
 }
@@ -547,6 +551,61 @@ async fn invoice_status(node_address: SocketAddr, invoice: &str) -> InvoiceStatu
         .await
         .unwrap()
         .status
+}
+
+async fn invoice_hodl(
+    node_address: SocketAddr,
+    amt_msat: Option<u64>,
+    expiry_sec: u32,
+    payment_hash: String,
+) -> InvoiceHodlResponse {
+    println!("creating HODL invoice on node {node_address}");
+    let payload = InvoiceHodlRequest {
+        amt_msat,
+        expiry_sec,
+        asset_id: None,
+        asset_amount: None,
+        payment_hash,
+        external_ref: None,
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/invoice/hodl"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    _check_response_is_ok(res)
+        .await
+        .json::<InvoiceHodlResponse>()
+        .await
+        .unwrap()
+}
+
+async fn invoice_settle(node_address: SocketAddr, payment_hash: String, payment_preimage: String) {
+    println!("settling HODL invoice {payment_hash} on node {node_address}");
+    let payload = InvoiceSettleRequest {
+        payment_hash,
+        payment_preimage,
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/invoice/settle"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    _check_response_is_ok(res).await;
+}
+
+async fn invoice_cancel(node_address: SocketAddr, payment_hash: String) {
+    println!("cancelling HODL invoice {payment_hash} on node {node_address}");
+    let payload = InvoiceCancelRequest { payment_hash };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/invoice/cancel"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    _check_response_is_ok(res).await;
 }
 
 async fn issue_asset_cfa(node_address: SocketAddr, file_path: Option<&str>) -> AssetCFA {
@@ -1804,8 +1863,11 @@ mod close_force_other_side;
 mod close_force_standard;
 mod concurrent_btc_payments;
 mod concurrent_openchannel;
+mod database_connection;
+mod database_lock_unlock;
 mod fail_transfers;
 mod getchannelid;
+mod hodl_invoice;
 mod htlc_amount_checks;
 mod invoice;
 mod issue;

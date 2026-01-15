@@ -75,6 +75,9 @@ pub enum APIError {
     #[error("Unable to create keys seed file {0}: {1}")]
     FailedKeysCreation(String, String),
 
+    #[error("Database error: {0}")]
+    DatabaseError(String),
+
     #[error("Failed to open channel: {0}")]
     FailedOpenChannel(String),
 
@@ -162,6 +165,9 @@ pub enum APIError {
     #[error("Invalid payment hash: {0}")]
     InvalidPaymentHash(String),
 
+    #[error("Payment hash already used")]
+    PaymentHashAlreadyUsed,
+
     #[error("Invalid payment secret")]
     InvalidPaymentSecret,
 
@@ -210,6 +216,18 @@ pub enum APIError {
     #[error("Invalid transport endpoints: {0}")]
     InvalidTransportEndpoints(String),
 
+    #[error("Invoice is expired")]
+    InvoiceExpired,
+
+    #[error("HTLC claim deadline exceeded")]
+    ClaimDeadlineExceeded,
+
+    #[error("Invoice is not marked as HODL")]
+    InvoiceNotHodl,
+
+    #[error("No claimable HTLC found for this invoice")]
+    InvoiceNotClaimable,
+
     #[error("IO error: {0}")]
     IO(#[from] std::io::Error),
 
@@ -233,6 +251,9 @@ pub enum APIError {
 
     #[error("Unable to find payment preimage, be sure you've provided the correct swap info")]
     MissingSwapPaymentPreimage,
+
+    #[error("Invalid payment preimage")]
+    InvalidPaymentPreimage,
 
     #[error("Network error: {0}")]
     Network(String),
@@ -408,6 +429,7 @@ impl IntoResponse for APIError {
             | APIError::FailedPayment(_)
             | APIError::FailedPeerDisconnection(_)
             | APIError::FailedSendingOnionMessage(_)
+            | APIError::DatabaseError(_)
             | APIError::IO(_)
             | APIError::Unexpected(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -437,13 +459,16 @@ impl IntoResponse for APIError {
             | APIError::InvalidOnionData(_)
             | APIError::InvalidPassword(_)
             | APIError::InvalidPaymentHash(_)
+            | APIError::PaymentHashAlreadyUsed
             | APIError::InvalidPaymentSecret
+            | APIError::InvalidPaymentPreimage
             | APIError::InvalidPeerInfo(_)
             | APIError::InvalidPrecision(_)
             | APIError::InvalidPubkey
             | APIError::InvalidRecipientData(_)
             | APIError::InvalidRecipientID
             | APIError::InvalidRecipientNetwork
+            | APIError::InvoiceExpired
             | APIError::InvalidSwap(_)
             | APIError::InvalidSwapString(_, _)
             | APIError::InvalidTicker(_)
@@ -454,6 +479,7 @@ impl IntoResponse for APIError {
             | APIError::MediaFileNotProvided
             | APIError::MissingSwapPaymentPreimage
             | APIError::OutputBelowDustLimit
+            | APIError::ClaimDeadlineExceeded
             | APIError::UnsupportedBackupVersion { .. } => {
                 (StatusCode::BAD_REQUEST, self.to_string(), self.name())
             }
@@ -499,6 +525,9 @@ impl IntoResponse for APIError {
             | APIError::UnsupportedTransportType => {
                 (StatusCode::FORBIDDEN, self.to_string(), self.name())
             }
+            APIError::InvoiceNotHodl | APIError::InvoiceNotClaimable => {
+                (StatusCode::FORBIDDEN, self.to_string(), self.name())
+            }
             APIError::Network(_) | APIError::NoValidTransportEndpoint => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 self.to_string(),
@@ -526,6 +555,9 @@ impl IntoResponse for APIError {
 /// The error variants returned by the app
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
+
     #[error("The provided authentication args are invalid")]
     InvalidAuthenticationArgs,
 
@@ -540,4 +572,7 @@ pub enum AppError {
 
     #[error("Port {0} is unavailable")]
     UnavailablePort(u16),
+
+    #[error("Database connection error: {0}")]
+    DatabaseConnection(String),
 }

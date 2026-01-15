@@ -1,4 +1,6 @@
 use amplify::s;
+use bitcoin::hashes::sha256::Hash as Sha256;
+use bitcoin::hashes::Hash;
 use bitcoin::io;
 use bitcoin::secp256k1::PublicKey;
 use futures::Future;
@@ -9,6 +11,7 @@ use lightning::routing::router::{
     DEFAULT_MAX_TOTAL_CLTV_EXPIRY_DELTA, MAX_PATH_LENGTH_ESTIMATE,
 };
 use lightning::{
+    ln::{PaymentHash, PaymentPreimage},
     onion_message::packet::OnionMessageContents,
     sign::KeysManager,
     util::ser::{Writeable, Writer},
@@ -16,10 +19,10 @@ use lightning::{
 use lightning_persister::fs_store::FilesystemStore;
 use magic_crypt::{new_magic_crypt, MagicCryptTrait};
 use rgb_lib::{bdk_wallet::keys::bip39::Mnemonic, BitcoinNetwork, ContractId};
+use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use std::{
     collections::HashSet,
     fmt::Write,
-    fs,
     net::{SocketAddr, TcpStream, ToSocketAddrs},
     path::Path,
     path::PathBuf,
@@ -34,13 +37,13 @@ use crate::ldk::{ChannelIdsMap, Router};
 use crate::rgb::{get_rgb_channel_info_optional, RgbLibWalletWrapper};
 use crate::routes::{DEFAULT_FINAL_CLTV_EXPIRY_DELTA, HTLC_MIN_MSAT};
 use crate::{
-    args::UserArgs,
+    args::{DatabaseType, UserArgs},
     disk::FilesystemLogger,
     error::{APIError, AppError},
     ldk::{
-        BumpTxEventHandler, ChainMonitor, ChannelManager, InboundPaymentInfoStorage,
-        LdkBackgroundServices, NetworkGraph, OnionMessenger, OutboundPaymentInfoStorage,
-        OutputSweeper, PeerManager, SwapMap,
+        BumpTxEventHandler, ChainMonitor, ChannelManager, ClaimablePaymentStorage,
+        InboundPaymentInfoStorage, InvoiceMetadataStorage, LdkBackgroundServices, NetworkGraph,
+        OnionMessenger, OutboundPaymentInfoStorage, OutputSweeper, PeerManager, SwapMap,
     },
 };
 
@@ -90,11 +93,14 @@ pub(crate) struct StaticState {
     pub(crate) ldk_data_dir: PathBuf,
     pub(crate) logger: Arc<FilesystemLogger>,
     pub(crate) max_media_upload_size_mb: u16,
+    pub(crate) db: DatabaseConnection,
 }
 
 pub(crate) struct UnlockedAppState {
     pub(crate) channel_manager: Arc<ChannelManager>,
     pub(crate) inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
+    pub(crate) invoice_metadata: Arc<Mutex<InvoiceMetadataStorage>>,
+    pub(crate) claimable_htlcs: Arc<Mutex<ClaimablePaymentStorage>>,
     pub(crate) keys_manager: Arc<KeysManager>,
     pub(crate) network_graph: Arc<NetworkGraph>,
     pub(crate) chain_monitor: Arc<ChainMonitor>,
@@ -116,6 +122,14 @@ pub(crate) struct UnlockedAppState {
 impl UnlockedAppState {
     pub(crate) fn get_inbound_payments(&self) -> MutexGuard<'_, InboundPaymentInfoStorage> {
         self.inbound_payments.lock().unwrap()
+    }
+
+    pub(crate) fn get_invoice_metadata(&self) -> MutexGuard<'_, InvoiceMetadataStorage> {
+        self.invoice_metadata.lock().unwrap()
+    }
+
+    pub(crate) fn get_claimable_htlcs(&self) -> MutexGuard<'_, ClaimablePaymentStorage> {
+        self.claimable_htlcs.lock().unwrap()
     }
 
     pub(crate) fn get_outbound_payments(&self) -> MutexGuard<'_, OutboundPaymentInfoStorage> {
@@ -156,8 +170,24 @@ impl Writeable for UserOnionMessageContents {
     }
 }
 
-pub(crate) fn check_already_initialized(mnemonic_path: &Path) -> Result<(), APIError> {
-    if mnemonic_path.exists() {
+pub(crate) async fn check_already_initialized(db: &DatabaseConnection) -> Result<(), APIError> {
+    let create_table_stmt = Statement::from_string(
+        sea_orm::DatabaseBackend::Sqlite,
+        "CREATE TABLE IF NOT EXISTS mnemonic (id INTEGER PRIMARY KEY, encrypted_mnemonic TEXT NOT NULL)".to_string(),
+    );
+    db.execute(create_table_stmt)
+        .await
+        .map_err(|e| APIError::DatabaseError(format!("Failed to create mnemonic table: {}", e)))?;
+
+    let stmt = Statement::from_string(
+        sea_orm::DatabaseBackend::Sqlite,
+        "SELECT id FROM mnemonic WHERE id = 1".to_string(),
+    );
+    let result = db.query_one(stmt).await.map_err(|e| {
+        APIError::DatabaseError(format!("Failed to check mnemonic existence: {}", e))
+    })?;
+
+    if result.is_some() {
         return Err(APIError::AlreadyInitialized);
     }
     Ok(())
@@ -172,12 +202,31 @@ pub(crate) fn check_password_strength(password: String) -> Result<(), APIError> 
     Ok(())
 }
 
-pub(crate) fn check_password_validity(
+pub(crate) async fn check_password_validity(
     password: &str,
-    storage_dir_path: &Path,
+    db: &DatabaseConnection,
 ) -> Result<Mnemonic, APIError> {
-    let mnemonic_path = get_mnemonic_path(storage_dir_path);
-    if let Ok(encrypted_mnemonic) = fs::read_to_string(mnemonic_path) {
+    let create_table_stmt = Statement::from_string(
+        sea_orm::DatabaseBackend::Sqlite,
+        "CREATE TABLE IF NOT EXISTS mnemonic (id INTEGER PRIMARY KEY, encrypted_mnemonic TEXT NOT NULL)".to_string(),
+    );
+    db.execute(create_table_stmt)
+        .await
+        .map_err(|e| APIError::DatabaseError(format!("Failed to create mnemonic table: {}", e)))?;
+
+    let stmt = Statement::from_string(
+        sea_orm::DatabaseBackend::Sqlite,
+        "SELECT encrypted_mnemonic FROM mnemonic WHERE id = 1".to_string(),
+    );
+    let result = db
+        .query_one(stmt)
+        .await
+        .map_err(|e| APIError::DatabaseError(format!("Failed to read mnemonic: {}", e)))?;
+
+    if let Some(row) = result {
+        let encrypted_mnemonic: String = row.try_get_by_index(0).map_err(|e| {
+            APIError::DatabaseError(format!("Failed to get mnemonic from row: {}", e))
+        })?;
         let mcrypt = new_magic_crypt!(password, 256);
         let mnemonic_str = mcrypt
             .decrypt_base64_to_string(encrypted_mnemonic)
@@ -206,27 +255,27 @@ pub(crate) fn check_port_is_available(port: u16) -> Result<(), AppError> {
     Ok(())
 }
 
-pub(crate) fn get_mnemonic_path(storage_dir_path: &Path) -> PathBuf {
-    storage_dir_path.join("mnemonic")
-}
-
-pub(crate) fn encrypt_and_save_mnemonic(
+pub(crate) async fn encrypt_and_save_mnemonic(
     password: String,
     mnemonic: String,
-    mnemonic_path: &Path,
+    db: &DatabaseConnection,
 ) -> Result<(), APIError> {
     let mcrypt = new_magic_crypt!(password, 256);
     let encrypted_mnemonic = mcrypt.encrypt_str_to_base64(mnemonic);
-    match fs::write(mnemonic_path, encrypted_mnemonic) {
-        Ok(()) => {
-            tracing::info!("Created a new wallet");
-            Ok(())
-        }
-        Err(e) => Err(APIError::FailedKeysCreation(
-            mnemonic_path.to_string_lossy().to_string(),
-            e.to_string(),
-        )),
-    }
+
+    let create_table_stmt = Statement::from_string(sea_orm::DatabaseBackend::Sqlite, "CREATE TABLE IF NOT EXISTS mnemonic (id INTEGER PRIMARY KEY, encrypted_mnemonic TEXT NOT NULL)".to_string());
+    db.execute(create_table_stmt)
+        .await
+        .map_err(|e| APIError::DatabaseError(format!("Failed to create mnemonic table: {}", e)))?;
+
+    let sql = format!("INSERT INTO mnemonic (id, encrypted_mnemonic) VALUES (1, '{}') ON CONFLICT(id) DO UPDATE SET encrypted_mnemonic = excluded.encrypted_mnemonic", encrypted_mnemonic.replace("'", "''"));
+    let stmt = Statement::from_string(sea_orm::DatabaseBackend::Sqlite, sql);
+    db.execute(stmt)
+        .await
+        .map_err(|e| APIError::FailedKeysCreation("database".to_string(), e.to_string()))?;
+
+    tracing::info!("Created a new wallet");
+    Ok(())
 }
 
 pub(crate) async fn connect_peer_if_necessary(
@@ -345,12 +394,39 @@ pub(crate) fn parse_peer_info(
     Ok((pubkey.unwrap(), peer_addr))
 }
 
+fn get_database_url(
+    db_type: &DatabaseType,
+    db_url: Option<&str>,
+    storage_dir: &Path,
+) -> Result<String, AppError> {
+    match db_type {
+        DatabaseType::Sqlite => {
+            let db_path = storage_dir.join("db.sqlite");
+            Ok(format!("sqlite://{}?mode=rwc", db_path.display()))
+        }
+        DatabaseType::Mysql | DatabaseType::Postgresql => db_url
+            .ok_or(AppError::ConfigError(
+                "Database URL required for mysql/postgresql".to_string(),
+            ))
+            .map(|s| s.to_string()),
+    }
+}
+
 pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppError> {
     // Initialize the Logger (creates ldk_data_dir and its logs directory)
     let ldk_data_dir = args.storage_dir_path.join(LDK_DIR);
     let logger = Arc::new(FilesystemLogger::new(ldk_data_dir.clone()));
 
     let cancel_token = CancellationToken::new();
+
+    let database_url = get_database_url(
+        &args.database_type,
+        args.database_url.as_deref(),
+        &args.storage_dir_path,
+    )?;
+    let db = sea_orm::Database::connect(&database_url)
+        .await
+        .map_err(|e| AppError::DatabaseConnection(format!("Failed to connect: {}", e)))?;
 
     let static_state = Arc::new(StaticState {
         ldk_peer_listening_port: args.ldk_peer_listening_port,
@@ -359,6 +435,7 @@ pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppEr
         ldk_data_dir,
         logger,
         max_media_upload_size_mb: args.max_media_upload_size_mb,
+        db,
     });
 
     let app_state = Arc::new(AppState {
@@ -444,4 +521,47 @@ pub(crate) fn get_route(
     );
 
     route.ok()
+}
+
+/// Validates a hex-encoded payment hash string and converts it to a PaymentHash.
+/// Returns an error if the string is invalid, empty, or not exactly 32 bytes.
+pub(crate) fn validate_and_parse_payment_hash(
+    payment_hash_str: &str,
+) -> Result<PaymentHash, APIError> {
+    if payment_hash_str.is_empty() {
+        return Err(APIError::InvalidPaymentHash("missing payment_hash".into()));
+    }
+    let hash_vec = hex_str_to_vec(payment_hash_str)
+        .ok_or_else(|| APIError::InvalidPaymentHash(payment_hash_str.to_string()))?;
+    if hash_vec.len() != 32 {
+        return Err(APIError::InvalidPaymentHash(payment_hash_str.to_string()));
+    }
+    let hash_bytes: [u8; 32] = hash_vec
+        .try_into()
+        .map_err(|_| APIError::InvalidPaymentHash(payment_hash_str.to_string()))?;
+    Ok(PaymentHash(hash_bytes))
+}
+
+/// Validates a hex-encoded payment preimage string, converts it to a PaymentPreimage,
+/// and verifies that it matches the provided payment hash.
+/// Returns an error if the string is invalid, not exactly 32 bytes, or doesn't match the hash.
+pub(crate) fn validate_and_parse_payment_preimage(
+    payment_preimage_str: &str,
+    payment_hash: &PaymentHash,
+) -> Result<PaymentPreimage, APIError> {
+    let preimage_vec =
+        hex_str_to_vec(payment_preimage_str).ok_or_else(|| APIError::InvalidPaymentPreimage)?;
+    if preimage_vec.len() != 32 {
+        return Err(APIError::InvalidPaymentPreimage);
+    }
+    let preimage = PaymentPreimage(
+        preimage_vec
+            .try_into()
+            .map_err(|_| APIError::InvalidPaymentPreimage)?,
+    );
+    let computed_hash = PaymentHash(Sha256::hash(&preimage.0).to_byte_array());
+    if computed_hash != *payment_hash {
+        return Err(APIError::InvalidPaymentPreimage);
+    }
+    Ok(preimage)
 }
