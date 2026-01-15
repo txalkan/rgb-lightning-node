@@ -1864,6 +1864,7 @@ mod close_force_standard;
 mod concurrent_btc_payments;
 mod concurrent_openchannel;
 mod database_connection;
+mod database_lock_unlock;
 mod fail_transfers;
 mod getchannelid;
 mod hodl_invoice;
