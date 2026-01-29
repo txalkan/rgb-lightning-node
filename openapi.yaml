@@ -2234,10 +2234,9 @@ components:
           example: rgb:CJkb4YZw-jRiz2sk-~PARPio-wtVYI1c-XAEYCqO-wTfvRZ8
         assignment:
           $ref: '#/components/schemas/Assignment'
-          description: Optional assignment type and value
         duration_seconds:
           type: integer
-          description: Optional invoice expiration in seconds (default: 86400)
+          description: Optional invoice expiration in seconds
           example: 86400
         min_confirmations:
           type: integer
@@ -2247,7 +2246,7 @@ components:
           example: 1
         htlc_p2tr_script_pubkey:
           type: string
-          description: HTLC P2TR scriptPubKey in hex format (34 bytes: OP_1 + OP_PUSHBYTES_32 + 32-byte x-only pubkey)
+          description: HTLC P2TR scriptPubKey in hex format
           example: "51200f0c8db753acbd17343a39c2f3f4e35e4be6da749f9e35137ab220e7b238a667"
         t_lock:
           type: integer
