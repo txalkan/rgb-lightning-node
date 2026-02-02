@@ -1,6 +1,9 @@
+use crate::routes::BitcoinNetwork as ApiBitcoinNetwork;
 use amplify::s;
 use biscuit_auth::{builder::date, macros::*, KeyPair};
 use bitcoin::hashes::{sha256::Hash as Sha256, Hash};
+use bitcoin::secp256k1::{rand::rngs::OsRng, Keypair as SecpKeyPair, Secp256k1, XOnlyPublicKey};
+use bitcoin::ScriptBuf;
 use chrono::{DateTime, Local, Utc};
 use electrum_client::ElectrumApi;
 use lazy_static::lazy_static;
@@ -8,6 +11,7 @@ use lightning_invoice::Bolt11Invoice;
 use once_cell::sync::Lazy;
 use rand::RngCore;
 use reqwest::{Response, StatusCode};
+use rgb_lib::utils::recipient_id_from_script_buf;
 use rgb_lib::BitcoinNetwork;
 use serde::Serialize;
 use std::net::SocketAddr;
@@ -40,10 +44,11 @@ use crate::routes::{
     ListSwapsResponse, ListTransactionsRequest, ListTransactionsResponse, ListTransfersRequest,
     ListTransfersResponse, ListUnspentsRequest, ListUnspentsResponse, MakerExecuteRequest,
     MakerInitRequest, MakerInitResponse, NetworkInfoResponse, NodeInfoResponse, OpenChannelRequest,
-    OpenChannelResponse, Payment, Peer, PostAssetMediaResponse, RefreshRequest, RestoreRequest,
-    RevokeTokenRequest, RgbInvoiceRequest, RgbInvoiceResponse, SendAssetRequest, SendAssetResponse,
-    SendBtcRequest, SendBtcResponse, SendPaymentRequest, SendPaymentResponse, Swap, SwapStatus,
-    TakerRequest, Transaction, Transfer, UnlockRequest, Unspent, WitnessData, HTLC_MIN_MSAT,
+    OpenChannelResponse, Payment, Peer, PostAssetMediaResponse, RecipientType, RefreshRequest,
+    RestoreRequest, RevokeTokenRequest, RgbInvoiceHtlcRequest, RgbInvoiceRequest,
+    RgbInvoiceResponse, SendAssetRequest, SendAssetResponse, SendBtcRequest, SendBtcResponse,
+    SendPaymentRequest, SendPaymentResponse, Swap, SwapStatus, TakerRequest, Transaction, Transfer,
+    UnlockRequest, Unspent, WitnessData, HTLC_MIN_MSAT,
 };
 use crate::utils::{
     hex_str, hex_str_to_vec, validate_and_parse_payment_hash, ELECTRUM_URL_REGTEST, LDK_DIR,
@@ -1440,6 +1445,42 @@ async fn rgb_invoice_with_assignment(
         .unwrap()
 }
 
+async fn rgb_invoice_htlc(
+    node_address: SocketAddr,
+    asset_id: Option<String>,
+    assignment: Option<Assignment>,
+    duration_seconds: Option<u32>,
+    htlc_p2tr_script_pubkey: String,
+    t_lock: u32,
+) -> RgbInvoiceResponse {
+    println!(
+        "generating RGB HTLC invoice{} for node {node_address}",
+        asset_id
+            .as_ref()
+            .map(|id| format!(" for asset {id}"))
+            .unwrap_or_default()
+    );
+    let payload = RgbInvoiceHtlcRequest {
+        asset_id,
+        assignment,
+        duration_seconds,
+        min_confirmations: 1,
+        htlc_p2tr_script_pubkey,
+        t_lock,
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/rgbinvoicehtlc"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    _check_response_is_ok(res)
+        .await
+        .json::<RgbInvoiceResponse>()
+        .await
+        .unwrap()
+}
+
 async fn send_asset(
     node_address: SocketAddr,
     asset_id: &str,
@@ -1923,6 +1964,7 @@ mod payment;
 mod refuse_high_fees;
 mod restart;
 mod send_receive;
+mod submarine_rgb;
 mod swap_assets_liquidity_both_ways;
 mod swap_reverse_same_channel;
 mod swap_roundtrip_assets;
