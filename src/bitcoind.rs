@@ -2,6 +2,7 @@ use base64::{engine::general_purpose, Engine as _};
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode;
 use bitcoin::hash_types::BlockHash;
+use bitcoin::Amount;
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::log_warn;
 use lightning::util::logger::Logger;
@@ -96,6 +97,28 @@ pub struct FeeResponse {
     pub errored: bool,
 }
 
+#[derive(serde::Deserialize)]
+struct ScanTxOutSetResponse {
+    pub unspents: Vec<ScanTxOutSetUnspent>,
+}
+
+#[derive(serde::Deserialize)]
+struct ScanTxOutSetUnspent {
+    pub txid: String,
+    pub vout: u32,
+    pub amount: f64,
+    #[serde(rename = "scriptPubKey")]
+    pub script_pubkey: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ScannedUtxo {
+    pub txid: bitcoin::Txid,
+    pub vout: u32,
+    pub value_sat: u64,
+    pub script_pubkey_hex: String,
+}
+
 impl TryInto<FeeResponse> for JsonResponse {
     type Error = std::io::Error;
     fn try_into(self) -> std::io::Result<FeeResponse> {
@@ -106,6 +129,14 @@ impl TryInto<FeeResponse> for JsonResponse {
                 (feerate_btc_per_kvbyte * 100_000_000.0 / 4.0).round() as u32
             }),
         })
+    }
+}
+
+impl TryInto<ScanTxOutSetResponse> for JsonResponse {
+    type Error = std::io::Error;
+    fn try_into(self) -> std::io::Result<ScanTxOutSetResponse> {
+        serde_json::from_value(self.0)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
     }
 }
 
@@ -301,6 +332,44 @@ impl BitcoindClient {
             .await
             .unwrap()
     }
+
+    pub async fn get_block_height(&self) -> std::io::Result<u32> {
+        let info = self
+            .bitcoind_rpc_client
+            .call_method::<BlockchainInfo>("getblockchaininfo", &[])
+            .await?;
+        u32::try_from(info.latest_height).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "block height too large")
+        })
+    }
+
+    pub(crate) async fn scan_utxos_for_address(
+        &self,
+        address: &str,
+    ) -> std::io::Result<Vec<ScannedUtxo>> {
+        let descriptor = format!("addr({})", address);
+        let params = [serde_json::json!("start"), serde_json::json!([descriptor])];
+        let res = self
+            .bitcoind_rpc_client
+            .call_method::<ScanTxOutSetResponse>("scantxoutset", &params)
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+        let mut utxos = Vec::new();
+        for unspent in res.unspents {
+            let txid = bitcoin::Txid::from_str(&unspent.txid)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+            let amount = Amount::from_btc(unspent.amount)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+            utxos.push(ScannedUtxo {
+                txid,
+                vout: unspent.vout,
+                value_sat: amount.to_sat(),
+                script_pubkey_hex: unspent.script_pubkey,
+            });
+        }
+        Ok(utxos)
+    }
 }
 
 impl FeeEstimator for BitcoindClient {
@@ -353,6 +422,6 @@ impl BroadcasterInterface for BitcoindClient {
 					print!("Warning, failed to broadcast a transaction, this is likely okay but may indicate an error: {err_str}\n> ");
 				}
 			}
-		});
+        });
     }
 }

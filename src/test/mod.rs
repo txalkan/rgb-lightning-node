@@ -2,8 +2,7 @@ use crate::routes::BitcoinNetwork as ApiBitcoinNetwork;
 use amplify::s;
 use biscuit_auth::{builder::date, macros::*, KeyPair};
 use bitcoin::hashes::{sha256::Hash as Sha256, Hash};
-use bitcoin::secp256k1::{rand::rngs::OsRng, Keypair as SecpKeyPair, Secp256k1, XOnlyPublicKey};
-use bitcoin::ScriptBuf;
+use bitcoin::secp256k1::{rand::rngs::OsRng, Keypair as SecpKeyPair, Secp256k1};
 use chrono::{DateTime, Local, Utc};
 use electrum_client::ElectrumApi;
 use lazy_static::lazy_static;
@@ -11,7 +10,6 @@ use lightning_invoice::Bolt11Invoice;
 use once_cell::sync::Lazy;
 use rand::RngCore;
 use reqwest::{Response, StatusCode};
-use rgb_lib::utils::recipient_id_from_script_buf;
 use rgb_lib::BitcoinNetwork;
 use serde::Serialize;
 use std::net::SocketAddr;
@@ -24,7 +22,7 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tracing_test::traced_test;
 
-use crate::disk::{read_claimable_htlcs, CLAIMABLE_HTLCS_FNAME};
+use crate::disk::{read_claimable_htlcs, read_htlc_tracker, CLAIMABLE_HTLCS_FNAME};
 use crate::error::{APIError, APIErrorResponse};
 use crate::ldk::FEE_RATE;
 use crate::routes::{
@@ -45,10 +43,10 @@ use crate::routes::{
     ListTransfersResponse, ListUnspentsRequest, ListUnspentsResponse, MakerExecuteRequest,
     MakerInitRequest, MakerInitResponse, NetworkInfoResponse, NodeInfoResponse, OpenChannelRequest,
     OpenChannelResponse, Payment, Peer, PostAssetMediaResponse, RecipientType, RefreshRequest,
-    RestoreRequest, RevokeTokenRequest, RgbInvoiceHtlcRequest, RgbInvoiceRequest,
-    RgbInvoiceResponse, SendAssetRequest, SendAssetResponse, SendBtcRequest, SendBtcResponse,
-    SendPaymentRequest, SendPaymentResponse, Swap, SwapStatus, TakerRequest, Transaction, Transfer,
-    UnlockRequest, Unspent, WitnessData, HTLC_MIN_MSAT,
+    RestoreRequest, RevokeTokenRequest, RgbInvoiceHtlcRequest, RgbInvoiceHtlcResponse,
+    RgbInvoiceRequest, RgbInvoiceResponse, SendAssetRequest, SendAssetResponse, SendBtcRequest,
+    SendBtcResponse, SendPaymentRequest, SendPaymentResponse, Swap, SwapStatus, TakerRequest,
+    Transaction, Transfer, UnlockRequest, Unspent, WitnessData, HTLC_MIN_MSAT,
 };
 use crate::utils::{
     hex_str, hex_str_to_vec, validate_and_parse_payment_hash, ELECTRUM_URL_REGTEST, LDK_DIR,
@@ -130,6 +128,14 @@ async fn post_and_check_error_response<T: Serialize>(
         .await
         .unwrap();
     check_response_is_nok(res, expected_status, expected_message, expected_name).await;
+}
+
+fn random_preimage_and_hash() -> (String, String) {
+    let mut preimage = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut preimage);
+    let preimage_hex = hex_str(&preimage);
+    let payment_hash = hex_str(&Sha256::hash(&preimage).to_byte_array());
+    (preimage_hex, payment_hash)
 }
 
 fn _fund_wallet(address: String) {
@@ -1450,9 +1456,10 @@ async fn rgb_invoice_htlc(
     asset_id: Option<String>,
     assignment: Option<Assignment>,
     duration_seconds: Option<u32>,
-    htlc_p2tr_script_pubkey: String,
-    t_lock: u32,
-) -> RgbInvoiceResponse {
+    payment_hash: String,
+    user_pubkey: String,
+    csv: u32,
+) -> RgbInvoiceHtlcResponse {
     println!(
         "generating RGB HTLC invoice{} for node {node_address}",
         asset_id
@@ -1465,8 +1472,9 @@ async fn rgb_invoice_htlc(
         assignment,
         duration_seconds,
         min_confirmations: 1,
-        htlc_p2tr_script_pubkey,
-        t_lock,
+        payment_hash,
+        user_pubkey,
+        csv,
     };
     let res = reqwest::Client::new()
         .post(format!("http://{node_address}/rgbinvoicehtlc"))
@@ -1476,7 +1484,7 @@ async fn rgb_invoice_htlc(
         .unwrap();
     _check_response_is_ok(res)
         .await
-        .json::<RgbInvoiceResponse>()
+        .json::<RgbInvoiceHtlcResponse>()
         .await
         .unwrap()
 }

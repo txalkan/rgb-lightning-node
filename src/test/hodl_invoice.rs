@@ -2,15 +2,6 @@ use super::*;
 
 const TEST_DIR_BASE: &str = "tmp/hodl_invoice/";
 
-/// Generate a random preimage and its corresponding payment hash.
-fn random_preimage_and_hash() -> (String, String) {
-    let mut preimage = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut preimage);
-    let preimage_hex = hex_str(&preimage);
-    let payment_hash = hex_str(&Sha256::hash(&preimage).to_byte_array());
-    (preimage_hex, payment_hash)
-}
-
 async fn setup_two_nodes_with_channel(
     test_dir_suffix: &str,
     port_offset: u16,

@@ -20,7 +20,7 @@ use lightning_persister::fs_store::FilesystemStore;
 use magic_crypt::{new_magic_crypt, MagicCryptTrait};
 use rgb_lib::{bdk_wallet::keys::bip39::Mnemonic, BitcoinNetwork, ContractId};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::Write,
     fs,
     net::{SocketAddr, TcpStream, ToSocketAddrs},
@@ -33,11 +33,15 @@ use std::{
 use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
 use tokio_util::sync::CancellationToken;
 
+use crate::bitcoind::ScannedUtxo;
+use crate::ldk::HtlcUtxoKind;
 use crate::ldk::{ChannelIdsMap, Router};
 use crate::rgb::{get_rgb_channel_info_optional, RgbLibWalletWrapper};
+use crate::routes::Assignment;
 use crate::routes::{DEFAULT_FINAL_CLTV_EXPIRY_DELTA, HTLC_MIN_MSAT};
 use crate::{
     args::UserArgs,
+    bitcoind::BitcoindClient,
     disk::FilesystemLogger,
     error::{APIError, AppError},
     ldk::{
@@ -113,9 +117,11 @@ pub(crate) struct UnlockedAppState {
     pub(crate) rgb_wallet_wrapper: Arc<RgbLibWalletWrapper>,
     pub(crate) router: Arc<Router>,
     pub(crate) output_sweeper: Arc<OutputSweeper>,
+    pub(crate) bitcoind_client: Arc<BitcoindClient>,
     pub(crate) rgb_send_lock: Arc<Mutex<bool>>,
     pub(crate) channel_ids_map: Arc<Mutex<ChannelIdsMap>>,
     pub(crate) proxy_endpoint: String,
+    pub(crate) lp_pubkey_xonly_hex: Option<String>,
 }
 
 impl UnlockedAppState {
@@ -199,6 +205,67 @@ pub(crate) fn check_password_validity(
     } else {
         Err(APIError::NotInitialized)
     }
+}
+
+pub(crate) struct HtlcUtxoClassification {
+    pub(crate) utxo_kind: HtlcUtxoKind,
+    pub(crate) assignment: Option<Assignment>,
+}
+
+pub(crate) fn classify_htlc_utxos_by_asset(
+    rgb_wallet_wrapper: &RgbLibWalletWrapper,
+    utxos: &[ScannedUtxo],
+    asset_id: Option<&str>,
+) -> Result<HashMap<(String, u32), HtlcUtxoClassification>, APIError> {
+    let _ = rgb_wallet_wrapper;
+    if asset_id.is_none() {
+        return Ok(utxos
+            .iter()
+            .map(|u| {
+                (
+                    (u.txid.to_string(), u.vout),
+                    HtlcUtxoClassification {
+                        utxo_kind: HtlcUtxoKind::Vanilla,
+                        assignment: None,
+                    },
+                )
+            })
+            .collect());
+    }
+
+    let _contract_id = ContractId::from_str(asset_id.unwrap())
+        .map_err(|e| APIError::InvalidAssetID(e.to_string()))?;
+    tracing::warn!(
+        "HTLC UTXO RGB classification is stubbed: HTLC outputs are not wallet-owned, \
+         so rgb-lib list_unspents cannot detect colored allocations here. \
+         Falling back to Vanilla classification for all HTLC UTXOs. \
+         TODO: use RGB runtime query over arbitrary outpoints."
+    );
+    let colored_map: HashMap<(String, u32), Option<Assignment>> = HashMap::new();
+
+    Ok(utxos
+        .iter()
+        .map(|u| {
+            let key = (u.txid.to_string(), u.vout);
+            if let Some(value) = colored_map.get(&key).cloned() {
+                (
+                    key,
+                    HtlcUtxoClassification {
+                        utxo_kind: HtlcUtxoKind::Colored,
+                        assignment: value,
+                    },
+                )
+            } else {
+                (
+                    key,
+                    HtlcUtxoClassification {
+                        utxo_kind: HtlcUtxoKind::Vanilla,
+                        assignment: None,
+                    },
+                )
+            }
+        })
+        .collect())
 }
 
 pub(crate) fn check_channel_id(channel_id_str: &str) -> Result<ChannelId, APIError> {

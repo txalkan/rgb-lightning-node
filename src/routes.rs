@@ -1,3 +1,5 @@
+use crate::ldk::{HtlcSpendableOutputDescriptor, HtlcTrackerEntry, HtlcUtxoKind};
+use amplify::hex::ToHex;
 use amplify::{map, s, Display};
 use axum::{
     extract::{Multipart, State},
@@ -7,8 +9,10 @@ use axum_extra::extract::WithRejection;
 use biscuit_auth::Biscuit;
 use bitcoin::hashes::sha256::{self, Hash as Sha256};
 use bitcoin::hashes::Hash;
-use bitcoin::secp256k1::{PublicKey, XOnlyPublicKey};
-use bitcoin::{Network, ScriptBuf};
+use bitcoin::script::PushBytesBuf;
+use bitcoin::secp256k1::{PublicKey, Secp256k1, XOnlyPublicKey};
+use bitcoin::taproot::{ControlBlock, LeafVersion, TaprootBuilder};
+use bitcoin::{Address, Network, ScriptBuf};
 use hex::DisplayHex;
 use lightning::ln::{channelmanager::OptionalOfferPaymentParams, types::ChannelId};
 use lightning::offers::offer::{self, Offer};
@@ -79,9 +83,10 @@ use crate::ldk::{start_ldk, stop_ldk, LdkBackgroundServices, MIN_CHANNEL_CONFIRM
 use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{
     check_already_initialized, check_channel_id, check_password_strength, check_password_validity,
-    encrypt_and_save_mnemonic, get_max_local_rgb_amount, get_mnemonic_path, get_route, hex_str,
-    hex_str_to_compressed_pubkey, hex_str_to_vec, validate_and_parse_payment_hash,
-    validate_and_parse_payment_preimage, UnlockedAppState, UserOnionMessageContents,
+    classify_htlc_utxos_by_asset, encrypt_and_save_mnemonic, get_max_local_rgb_amount,
+    get_mnemonic_path, get_route, hex_str, hex_str_to_compressed_pubkey, hex_str_to_vec,
+    validate_and_parse_payment_hash, validate_and_parse_payment_preimage, UnlockedAppState,
+    UserOnionMessageContents,
 };
 use crate::{
     backup::{do_backup, restore_backup},
@@ -283,7 +288,7 @@ impl From<RgbLibAssetUDA> for AssetUDA {
     }
 }
 
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize, Clone)]
 #[serde(tag = "type", content = "value")]
 pub(crate) enum Assignment {
     Fungible(u64),
@@ -989,8 +994,9 @@ pub(crate) struct RgbInvoiceHtlcRequest {
     pub(crate) assignment: Option<Assignment>,
     pub(crate) duration_seconds: Option<u32>,
     pub(crate) min_confirmations: u8,
-    pub(crate) htlc_p2tr_script_pubkey: String,
-    pub(crate) t_lock: u32,
+    pub(crate) payment_hash: String,
+    pub(crate) user_pubkey: String,
+    pub(crate) csv: u32,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -999,6 +1005,159 @@ pub(crate) struct RgbInvoiceResponse {
     pub(crate) invoice: String,
     pub(crate) expiration_timestamp: Option<i64>,
     pub(crate) batch_transfer_idx: i32,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct RgbInvoiceHtlcResponse {
+    pub(crate) recipient_id: String,
+    pub(crate) invoice: String,
+    pub(crate) expiration_timestamp: Option<i64>,
+    pub(crate) batch_transfer_idx: i32,
+    pub(crate) htlc_p2tr_script_pubkey: String,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct HtlcClaimRequest {
+    pub(crate) payment_hash: String,
+    pub(crate) preimage: String,
+}
+
+fn derive_deterministic_internal_key() -> Result<XOnlyPublicKey, APIError> {
+    const INTERNAL_KEY_CONSTANT: &[u8] = b"SUBMARINE_SWAP_HTLC_P2TR_INTERNAL_KEY_V0";
+    for attempt in 0..256u32 {
+        let mut data = INTERNAL_KEY_CONSTANT.to_vec();
+        if attempt > 0 {
+            data.extend_from_slice(&attempt.to_be_bytes());
+        }
+        let candidate = sha256::Hash::hash(&data).to_byte_array();
+        if let Ok(x) = XOnlyPublicKey::from_slice(&candidate) {
+            return Ok(x);
+        }
+    }
+    Err(APIError::InvalidHtlcParams(
+        "Failed to derive deterministic internal key".into(),
+    ))
+}
+
+struct HtlcTaprootInfo {
+    script_pubkey: ScriptBuf,
+    claim_script: ScriptBuf,
+    refund_script: ScriptBuf,
+    control_block: ControlBlock,
+    tapleaf_version: LeafVersion,
+}
+
+fn build_htlc_taproot_info(
+    payment_hash_hex: &str,
+    lp_xonly_hex: &str,
+    user_xonly_hex: &str,
+    t_lock: u32,
+) -> Result<HtlcTaprootInfo, APIError> {
+    let secp = Secp256k1::new();
+
+    let payment_hash = hex_str_to_vec(payment_hash_hex)
+        .ok_or_else(|| APIError::InvalidHtlcParams("Invalid payment_hash hex".into()))?;
+    let lp_xonly = XOnlyPublicKey::from_str(lp_xonly_hex)
+        .map_err(|_| APIError::InvalidHtlcParams("Invalid lp x-only pubkey".into()))?;
+    let user_xonly = XOnlyPublicKey::from_str(user_xonly_hex)
+        .map_err(|_| APIError::InvalidHtlcParams("Invalid user x-only pubkey".into()))?;
+
+    // Claim script: OP_SHA256 <H> OP_EQUALVERIFY <LP_xonly> OP_CHECKSIG
+    let claim_script =
+        bitcoin::script::Builder::new()
+            .push_opcode(bitcoin::opcodes::all::OP_SHA256)
+            .push_slice(PushBytesBuf::try_from(payment_hash).map_err(|_| {
+                APIError::InvalidHtlcParams("payment_hash not valid for push".into())
+            })?)
+            .push_opcode(bitcoin::opcodes::all::OP_EQUALVERIFY)
+            .push_slice(PushBytesBuf::try_from(lp_xonly.serialize().to_vec()).unwrap())
+            .push_opcode(bitcoin::opcodes::all::OP_CHECKSIG)
+            .into_script();
+
+    // Refund script: <t_lock> OP_CLTV OP_DROP <User_xonly> OP_CHECKSIG
+    let refund_script = bitcoin::script::Builder::new()
+        .push_int(t_lock as i64)
+        .push_opcode(bitcoin::opcodes::all::OP_CLTV)
+        .push_opcode(bitcoin::opcodes::all::OP_DROP)
+        .push_slice(PushBytesBuf::try_from(user_xonly.serialize().to_vec()).unwrap())
+        .push_opcode(bitcoin::opcodes::all::OP_CHECKSIG)
+        .into_script();
+
+    let internal_key = derive_deterministic_internal_key()?;
+
+    let spend_info = TaprootBuilder::new()
+        .add_leaf(1, claim_script.clone())
+        .map_err(|e| APIError::InvalidHtlcParams(format!("taproot builder error: {:?}", e)))?
+        .add_leaf(1, refund_script.clone())
+        .map_err(|e| APIError::InvalidHtlcParams(format!("taproot builder error: {:?}", e)))?
+        .finalize(&secp, internal_key)
+        .map_err(|e| APIError::InvalidHtlcParams(format!("taproot finalize error: {:?}", e)))?;
+
+    let tapleaf_version = LeafVersion::TapScript;
+    let control_block = spend_info
+        .control_block(&(claim_script.clone(), tapleaf_version))
+        .ok_or(APIError::InvalidHtlcParams(
+            "Failed to derive taproot control block".into(),
+        ))?;
+
+    Ok(HtlcTaprootInfo {
+        script_pubkey: ScriptBuf::new_p2tr_tweaked(spend_info.output_key()),
+        claim_script,
+        refund_script,
+        control_block,
+        tapleaf_version,
+    })
+}
+
+fn ensure_htlc_tracker_scripts(
+    entry: &mut HtlcTrackerEntry,
+    info: &HtlcTaprootInfo,
+) -> Result<(), APIError> {
+    let claim_hex = info.claim_script.as_bytes().to_hex();
+    match &entry.claim_tapscript_hex {
+        Some(existing) if existing != &claim_hex => {
+            return Err(APIError::InvalidHtlcParams(
+                "HTLC tracker claim script mismatch".into(),
+            ))
+        }
+        None => entry.claim_tapscript_hex = Some(claim_hex),
+        _ => {}
+    }
+
+    let refund_hex = info.refund_script.as_bytes().to_hex();
+    match &entry.refund_tapscript_hex {
+        Some(existing) if existing != &refund_hex => {
+            return Err(APIError::InvalidHtlcParams(
+                "HTLC tracker refund script mismatch".into(),
+            ))
+        }
+        None => entry.refund_tapscript_hex = Some(refund_hex),
+        _ => {}
+    }
+
+    let tapleaf_version = info.tapleaf_version.to_consensus();
+    match entry.tapleaf_version {
+        Some(existing) if existing != tapleaf_version => {
+            return Err(APIError::InvalidHtlcParams(
+                "HTLC tracker tapleaf version mismatch".into(),
+            ))
+        }
+        None => entry.tapleaf_version = Some(tapleaf_version),
+        _ => {}
+    }
+
+    let control_hex = info.control_block.serialize().to_hex();
+    match &entry.control_block_hex {
+        Some(existing) if existing != &control_hex => {
+            return Err(APIError::InvalidHtlcParams(
+                "HTLC tracker control block mismatch".into(),
+            ))
+        }
+        None => entry.control_block_hex = Some(control_hex),
+        _ => {}
+    }
+
+    Ok(())
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1937,6 +2096,126 @@ pub(crate) async fn hodl_invoice(
             invoice: invoice.to_string(),
             payment_secret: hex_str(&invoice.payment_secret().0),
         }))
+    })
+    .await
+}
+
+pub(crate) async fn htlc_claim(
+    State(state): State<Arc<AppState>>,
+    WithRejection(Json(payload), _): WithRejection<Json<HtlcClaimRequest>, APIError>,
+) -> Result<Json<EmptyResponse>, APIError> {
+    no_cancel(async move {
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
+
+        let payment_hash = validate_and_parse_payment_hash(payload.payment_hash.trim())?;
+        let preimage = validate_and_parse_payment_preimage(&payload.preimage, &payment_hash)?;
+        let payment_hash_hex = hex_str(&payment_hash.0);
+        let preimage_hex = hex_str(&preimage.0);
+
+        let mut tracker = disk::read_htlc_tracker(&state.static_state.ldk_data_dir);
+
+        let entry = tracker
+            .entries
+            .get_mut(&payment_hash)
+            .ok_or(APIError::InvalidHtlcParams(
+                "HTLC tracker entry not found".into(),
+            ))?;
+
+        if let Some(existing) = entry.preimage.as_ref() {
+            if !existing.eq_ignore_ascii_case(&preimage_hex) {
+                return Err(APIError::InvalidHtlcParams(
+                    "Preimage mismatch with tracker entry".into(),
+                ));
+            }
+        } else {
+            entry.preimage = Some(preimage_hex.clone());
+        }
+
+        let taproot_info = build_htlc_taproot_info(
+            &payment_hash_hex,
+            entry.lp_pubkey_xonly.trim(),
+            entry.user_pubkey_xonly.trim(),
+            entry.t_lock,
+        )?;
+        let computed_spk = taproot_info.script_pubkey.clone();
+        let computed_spk_hex = computed_spk.as_bytes().to_hex();
+        if computed_spk_hex != entry.htlc_script_pubkey {
+            return Err(APIError::InvalidHtlcParams(
+                "htlc_p2tr_script_pubkey mismatch".into(),
+            ));
+        }
+
+        let dest_addr = unlocked_state.rgb_get_address()?;
+        let dest_script = Address::from_str(&dest_addr)
+            .map_err(|_| APIError::InvalidHtlcParams("Invalid wallet address".into()))?
+            .assume_checked()
+            .script_pubkey();
+        let dest_script_hex = dest_script.as_bytes().to_hex();
+        let network: Network = state.static_state.network.into();
+        let htlc_address = Address::from_script(&computed_spk, network)
+            .map_err(|_| APIError::InvalidHtlcParams("Failed to derive HTLC address".into()))?;
+        let utxos = unlocked_state
+            .bitcoind_client
+            .scan_utxos_for_address(&htlc_address.to_string())
+            .await
+            .map_err(|e| APIError::FailedBitcoindConnection(e.to_string()))?;
+        if utxos.is_empty() {
+            return Err(APIError::InvalidHtlcParams(
+                "No HTLC UTXOs found at address".into(),
+            ));
+        }
+
+        let asset_id = entry.asset_id.clone();
+        let classification = classify_htlc_utxos_by_asset(
+            &unlocked_state.rgb_wallet_wrapper,
+            &utxos,
+            asset_id.as_deref(),
+        )?;
+
+        let mut descriptors = Vec::with_capacity(utxos.len());
+        for utxo in utxos {
+            if !utxo
+                .script_pubkey_hex
+                .eq_ignore_ascii_case(&computed_spk_hex)
+            {
+                tracing::warn!(
+                    "Skipping HTLC UTXO {}:{}; scriptPubKey mismatch",
+                    utxo.txid,
+                    utxo.vout
+                );
+                continue;
+            }
+            let class = classification
+                .get(&(utxo.txid.to_string(), utxo.vout))
+                .expect("classification entry should exist");
+            let descriptor_asset_id = if class.utxo_kind == HtlcUtxoKind::Colored {
+                asset_id.clone()
+            } else {
+                None
+            };
+            descriptors.push(HtlcSpendableOutputDescriptor::new(
+                utxo.txid,
+                utxo.vout,
+                utxo.value_sat,
+                class.utxo_kind.clone(),
+                dest_script_hex.clone(),
+                descriptor_asset_id,
+                class.assignment.clone(),
+            ));
+        }
+        if descriptors.is_empty() {
+            return Err(APIError::PaymentNotFound(
+                "No HTLC UTXOs matched expected script pubkey".into(),
+            ));
+        }
+        ensure_htlc_tracker_scripts(entry, &taproot_info)?;
+        entry.funding = descriptors;
+        entry.status = "ClaimRequested".to_string();
+
+        disk::write_htlc_tracker(&state.static_state.ldk_data_dir, &tracker);
+
+        Ok(Json(EmptyResponse {}))
     })
     .await
 }
@@ -3602,7 +3881,7 @@ pub(crate) async fn rgb_invoice(
 pub(crate) async fn rgb_invoice_htlc(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<RgbInvoiceHtlcRequest>, APIError>,
-) -> Result<Json<RgbInvoiceResponse>, APIError> {
+) -> Result<Json<RgbInvoiceHtlcResponse>, APIError> {
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
@@ -3611,46 +3890,42 @@ pub(crate) async fn rgb_invoice_htlc(
             return Err(APIError::OpenChannelInProgress);
         }
 
-        let assignment = payload.assignment.unwrap_or(Assignment::Any).into();
+        let assignment: RgbLibAssignment =
+            payload.assignment.clone().unwrap_or(Assignment::Any).into();
 
-        // Confirm that the HTLC P2TR script pubkey is OP_1 0x20 <32-byte key>
-        let script_pubkey_hex = payload.htlc_p2tr_script_pubkey.trim();
-        if script_pubkey_hex.is_empty() {
-            return Err(APIError::InvalidRecipientData(
-                "htlc_p2tr_script_pubkey cannot be empty".into(),
-            ));
-        }
+        let payment_hash = validate_and_parse_payment_hash(payload.payment_hash.trim())?;
+        let payment_hash_hex = hex_str(&payment_hash.0);
 
-        let key_vec = hex_str_to_vec(script_pubkey_hex)
-            .ok_or_else(|| {
-                APIError::InvalidRecipientData(format!(
-                    "Invalid hex encoding for htlc_p2tr_script_pubkey: {}",
-                    script_pubkey_hex
-                ))
-            })?;
-        if key_vec.len() != 34 {
-            return Err(APIError::InvalidRecipientData(format!(
-                "Invalid htlc_p2tr_script_pubkey length: expected 34 bytes (OP_1 + OP_PUSHBYTES_32 + 32-byte x-only pubkey), got {} bytes",
-                key_vec.len()
-            )));
-        }
+        let user_pk = PublicKey::from_str(payload.user_pubkey.trim())
+            .map_err(|_| APIError::InvalidHtlcParams("Invalid user compressed pubkey".into()))?;
+        let (user_xonly, _) = user_pk.x_only_public_key();
+        let lp_xonly_hex =
+            unlocked_state
+                .lp_pubkey_xonly_hex
+                .as_ref()
+                .ok_or(APIError::InvalidHtlcParams(
+                    "LP Taproot key unavailable (missing lp_pubkey_xonly_hex)".into(),
+                ))?;
+        let lp_xonly = XOnlyPublicKey::from_str(lp_xonly_hex).map_err(|_| {
+            APIError::InvalidHtlcParams("Invalid lp_pubkey_xonly_hex in node state".into())
+        })?;
 
-        // Validate prefix: OP_1 (0x51) + OP_PUSHBYTES_32 (0x20)
-        if key_vec[0] != 0x51 || key_vec[1] != 0x20 {
-            return Err(APIError::InvalidRecipientData(format!(
-                "Invalid htlc_p2tr_script_pubkey prefix: expected OP_1 (0x51) OP_PUSHBYTES_32 (0x20), got {:02x} {:02x}",
-                key_vec[0], key_vec[1]
-            )));
-        }
+        let current_height = unlocked_state
+            .bitcoind_client
+            .get_block_height()
+            .await
+            .map_err(|e| APIError::FailedBitcoindConnection(e.to_string()))?;
+        let t_lock = current_height
+            .checked_add(payload.csv)
+            .ok_or(APIError::InvalidHtlcParams("csv value too large".into()))?;
 
-        let pubkey_bytes = &key_vec[2..34];
-        if XOnlyPublicKey::from_slice(pubkey_bytes).is_err() {
-            return Err(APIError::InvalidRecipientData(
-                "Invalid htlc_p2tr_script_pubkey: invalid 32-byte x-only pubkey".into(),
-            ));
-        }
+        let lp_xonly_hex = lp_xonly.serialize().to_hex();
+        let user_xonly_hex = user_xonly.serialize().to_hex();
 
-        let htlc_p2tr_script_pubkey = ScriptBuf::from_bytes(key_vec);
+        let taproot_info =
+            build_htlc_taproot_info(&payment_hash_hex, &lp_xonly_hex, &user_xonly_hex, t_lock)?;
+
+        let htlc_p2tr_script_pubkey = taproot_info.script_pubkey.clone();
         if !htlc_p2tr_script_pubkey.is_p2tr() {
             return Err(APIError::InvalidRecipientData(
                 "Invalid htlc_p2tr_script_pubkey: script is not a valid P2TR script".into(),
@@ -3661,13 +3936,12 @@ pub(crate) async fn rgb_invoice_htlc(
             htlc_p2tr_script_pubkey.clone(),
             state.static_state.network,
         );
-        let beneficiary = XChainNet::<Beneficiary>::from_str(&recipient_id)
-            .map_err(|_| {
-                APIError::InvalidRecipientData(format!(
-                    "Failed to parse recipient_id from P2TR script: invalid recipient_id format '{}'",
-                    recipient_id
-                ))
-            })?;
+        let beneficiary = XChainNet::<Beneficiary>::from_str(&recipient_id).map_err(|_| {
+            APIError::InvalidRecipientData(format!(
+                "Failed to parse recipient_id from P2TR script: invalid recipient_id format '{}'",
+                recipient_id
+            ))
+        })?;
 
         let (contract_id, asset_schema) = if let Some(ref asset_id) = payload.asset_id {
             let contract_id = ContractId::from_str(asset_id)
@@ -3707,7 +3981,10 @@ pub(crate) async fn rgb_invoice_htlc(
             | (RgbLibAssignment::Any, Some(RgbLibAssetSchema::Cfa)) => {
                 invoice_builder = invoice_builder.set_assignment_name(RGB_STATE_ASSET_OWNER);
             }
-            (RgbLibAssignment::NonFungible | RgbLibAssignment::Any, Some(RgbLibAssetSchema::Uda)) => {
+            (
+                RgbLibAssignment::NonFungible | RgbLibAssignment::Any,
+                Some(RgbLibAssetSchema::Uda),
+            ) => {
                 invoice_builder = invoice_builder.set_assignment_name(RGB_STATE_ASSET_OWNER);
             }
             (RgbLibAssignment::ReplaceRight, Some(RgbLibAssetSchema::Ifa)) => {
@@ -3716,7 +3993,8 @@ pub(crate) async fn rgb_invoice_htlc(
             }
             (RgbLibAssignment::InflationRight(amt), Some(RgbLibAssetSchema::Ifa)) => {
                 invoice_builder = invoice_builder.set_amount_raw(*amt);
-                invoice_builder = invoice_builder.set_assignment_name(RGB_STATE_INFLATION_ALLOWANCE);
+                invoice_builder =
+                    invoice_builder.set_assignment_name(RGB_STATE_INFLATION_ALLOWANCE);
             }
             (RgbLibAssignment::Any, None | Some(RgbLibAssetSchema::Ifa)) => {}
             _ => return Err(APIError::InvalidAssignment),
@@ -3726,9 +4004,7 @@ pub(crate) async fn rgb_invoice_htlc(
             None
         } else {
             let created_at = get_current_timestamp() as i64;
-            let duration_seconds = payload
-                .duration_seconds
-                .unwrap_or(DURATION_RCV_TRANSFER) as i64;
+            let duration_seconds = payload.duration_seconds.unwrap_or(DURATION_RCV_TRANSFER) as i64;
             let expiry = created_at + duration_seconds;
             invoice_builder = invoice_builder.set_expiry_timestamp(expiry);
             Some(expiry)
@@ -3736,11 +4012,37 @@ pub(crate) async fn rgb_invoice_htlc(
 
         let invoice = invoice_builder.finish().to_string();
 
-        Ok(Json(RgbInvoiceResponse {
+        let htlc_spk_hex = htlc_p2tr_script_pubkey.as_bytes().to_hex();
+        let mut tracker = disk::read_htlc_tracker(&state.static_state.ldk_data_dir);
+        let mut entry = HtlcTrackerEntry {
+            payment_hash,
+            preimage: None,
+            lp_pubkey_xonly: lp_xonly_hex.clone(),
+            user_pubkey_xonly: user_xonly_hex.clone(),
+            htlc_script_pubkey: htlc_spk_hex.clone(),
+            recipient_id: recipient_id.clone(),
+            rgb_invoice: invoice.clone(),
+            claim_tapscript_hex: None,
+            refund_tapscript_hex: None,
+            tapleaf_version: None,
+            control_block_hex: None,
+            t_lock,
+            min_confirmations: payload.min_confirmations as u32,
+            funding: vec![],
+            status: "Created".to_string(),
+            asset_id: payload.asset_id.clone(),
+            assignment: payload.assignment.clone(),
+        };
+        ensure_htlc_tracker_scripts(&mut entry, &taproot_info)?;
+        tracker.entries.insert(payment_hash, entry);
+        disk::write_htlc_tracker(&state.static_state.ldk_data_dir, &tracker);
+
+        Ok(Json(RgbInvoiceHtlcResponse {
             recipient_id,
             invoice,
             expiration_timestamp,
             batch_transfer_idx: 0,
+            htlc_p2tr_script_pubkey: htlc_spk_hex,
         }))
     })
     .await

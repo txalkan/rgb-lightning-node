@@ -1,10 +1,16 @@
+use amplify::hex::ToHex;
 use amplify::{map, s};
+use bitcoin::bip32::DerivationPath;
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::psbt::{ExtractTxError, Psbt};
 use bitcoin::secp256k1::{All, PublicKey, Secp256k1};
-use bitcoin::{io, Amount, Network};
-use bitcoin::{BlockHash, TxOut};
+use bitcoin::sighash::{self, SighashCache, TapSighashType};
+use bitcoin::taproot::ControlBlock;
+use bitcoin::transaction;
+use bitcoin::{io, Amount, Network, PrivateKey};
+use bitcoin::{BlockHash, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
 use bitcoin_bech32::WitnessProgram;
+use lightning::chain::chaininterface::BroadcasterInterface;
 use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus};
 use lightning::chain::{BestBlock, Filter};
 use lightning::events::bump_transaction::{BumpTransactionEventHandler, Wallet};
@@ -13,6 +19,7 @@ use lightning::ln::channelmanager::{self, PaymentId, RecentPaymentDetails};
 use lightning::ln::channelmanager::{
     ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager,
 };
+use lightning::ln::msgs::DecodeError;
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::peer_handler::{
     IgnoringMessageHandler, MessageHandler, PeerManager as LdkPeerManager,
@@ -43,7 +50,7 @@ use lightning::util::persist::{
     KVStoreSync, MonitorUpdatingPersister, OUTPUT_SWEEPER_PERSISTENCE_KEY,
     OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE, OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
-use lightning::util::ser::{ReadableArgs, Writeable};
+use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 use lightning::util::sweep as ldk_sweep;
 use lightning::{chain, impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use lightning_background_processor::{process_events_async, GossipSync, NO_LIQUIDITY_MANAGER};
@@ -99,18 +106,21 @@ use crate::disk::{
 };
 use crate::error::APIError;
 use crate::rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional, RgbLibWalletWrapper};
-use crate::routes::{HTLCStatus, SwapStatus, UnlockRequest, DUST_LIMIT_MSAT};
+use crate::routes::{
+    Assignment as RlnAssignment, HTLCStatus, SwapStatus, UnlockRequest, DUST_LIMIT_MSAT,
+};
 use crate::swap::SwapData;
 use crate::utils::{
     check_port_is_available, connect_peer_if_necessary, do_connect_peer, get_current_timestamp,
-    hex_str, AppState, StaticState, UnlockedAppState, ELECTRUM_URL_MAINNET, ELECTRUM_URL_REGTEST,
-    ELECTRUM_URL_SIGNET, ELECTRUM_URL_TESTNET, ELECTRUM_URL_TESTNET4, PROXY_ENDPOINT_LOCAL,
-    PROXY_ENDPOINT_PUBLIC,
+    hex_str, hex_str_to_vec, AppState, StaticState, UnlockedAppState, ELECTRUM_URL_MAINNET,
+    ELECTRUM_URL_REGTEST, ELECTRUM_URL_SIGNET, ELECTRUM_URL_TESTNET, ELECTRUM_URL_TESTNET4,
+    PROXY_ENDPOINT_LOCAL, PROXY_ENDPOINT_PUBLIC,
 };
 
 pub(crate) const FEE_RATE: u64 = 7;
 pub(crate) const UTXO_SIZE_SAT: u32 = 32000;
 pub(crate) const MIN_CHANNEL_CONFIRMATIONS: u8 = 6;
+pub(crate) const HTLC_TRACKER_FNAME: &str = "htlc_tracker.json";
 
 pub(crate) struct LdkBackgroundServices {
     stop_processing: Arc<AtomicBool>,
@@ -721,6 +731,513 @@ pub(crate) struct RgbOutputSpender {
     fs_store: Arc<FilesystemStore>,
     txes: Arc<Mutex<OutputSpenderTxes>>,
     proxy_endpoint: String,
+    lp_taproot_wif: Option<String>,
+    bitcoind_client: Arc<BitcoindClient>,
+}
+
+impl RgbOutputSpender {
+    fn sweep_htlc_tracker(&self, secp_ctx: &Secp256k1<All>) {
+        let Some(wif) = self.lp_taproot_wif.as_ref() else {
+            tracing::warn!("HTLC sweep skipped: lp_taproot_wif missing");
+            return;
+        };
+        let privkey = match PrivateKey::from_wif(wif) {
+            Ok(k) => k,
+            Err(_) => {
+                tracing::warn!("HTLC sweep skipped: invalid lp_taproot_wif");
+                return;
+            }
+        };
+        let keypair = match bitcoin::secp256k1::Keypair::from_seckey_slice(
+            secp_ctx,
+            privkey.inner.as_ref(),
+        ) {
+            Ok(kp) => kp,
+            Err(_) => {
+                tracing::warn!("HTLC sweep skipped: failed to build keypair");
+                return;
+            }
+        };
+
+        let mut tracker = disk::read_htlc_tracker(&self.static_state.ldk_data_dir);
+        let mut updated = false;
+        let mut broadcast_txs: Vec<Transaction> = Vec::new();
+
+        for entry in tracker.entries.values_mut() {
+            if entry.status != "ClaimRequested" {
+                continue;
+            }
+            let Some(preimage_hex) = entry.preimage.as_ref() else {
+                tracing::warn!("HTLC sweep skipped: missing preimage");
+                continue;
+            };
+            let Some(preimage) = hex_str_to_vec(preimage_hex) else {
+                tracing::warn!("HTLC sweep skipped: invalid preimage hex");
+                continue;
+            };
+            let Some(claim_hex) = entry.claim_tapscript_hex.as_ref() else {
+                tracing::warn!("HTLC sweep skipped: missing claim tapscript");
+                continue;
+            };
+            let Some(claim_script_bytes) = hex_str_to_vec(claim_hex) else {
+                tracing::warn!("HTLC sweep skipped: invalid claim tapscript hex");
+                continue;
+            };
+            let Some(control_hex) = entry.control_block_hex.as_ref() else {
+                tracing::warn!("HTLC sweep skipped: missing control block");
+                continue;
+            };
+            let Some(control_block_bytes) = hex_str_to_vec(control_hex) else {
+                tracing::warn!("HTLC sweep skipped: invalid control block hex");
+                continue;
+            };
+            let Some(htlc_spk_bytes) = hex_str_to_vec(&entry.htlc_script_pubkey) else {
+                tracing::warn!("HTLC sweep skipped: invalid htlc script pubkey hex");
+                continue;
+            };
+
+            let claim_script = ScriptBuf::from_bytes(claim_script_bytes);
+            let control_block = match ControlBlock::decode(&control_block_bytes) {
+                Ok(cb) => cb,
+                Err(_) => {
+                    tracing::warn!("HTLC sweep skipped: invalid control block");
+                    continue;
+                }
+            };
+            let htlc_script_pubkey = ScriptBuf::from_bytes(htlc_spk_bytes);
+
+            let mut entry_broadcast = false;
+
+            // TODO: Send vanilla UTXOs to BTC-only wallet and Colored UTXOs to rgb-lib wallet + RGB state update
+            for desc in &entry.funding {
+                let Some(dest_script_bytes) = hex_str_to_vec(&desc.destination_script_hex) else {
+                    tracing::warn!("HTLC sweep skipped: invalid destination script hex");
+                    continue;
+                };
+                let dest_script = ScriptBuf::from_bytes(dest_script_bytes);
+
+                let fee_sat = (FEE_RATE as u64).saturating_mul(200);
+                let min_out = DUST_LIMIT_MSAT / 1000;
+                if desc.value_sat <= fee_sat + min_out as u64 {
+                    tracing::warn!("HTLC sweep skipped: output value too small");
+                    continue;
+                }
+                let output_value = desc.value_sat - fee_sat;
+
+                let mut tx = Transaction {
+                    version: transaction::Version::TWO,
+                    lock_time: LockTime::ZERO,
+                    input: vec![TxIn {
+                        previous_output: OutPoint {
+                            txid: desc.txid,
+                            vout: desc.vout,
+                        },
+                        script_sig: ScriptBuf::new(),
+                        sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                        witness: Witness::default(),
+                    }],
+                    output: vec![TxOut {
+                        value: Amount::from_sat(output_value),
+                        script_pubkey: dest_script,
+                    }],
+                };
+
+                let leaf_hash = claim_script.tapscript_leaf_hash();
+                let prevout = TxOut {
+                    value: Amount::from_sat(desc.value_sat),
+                    script_pubkey: htlc_script_pubkey.clone(),
+                };
+                let sighash = match SighashCache::new(&tx).taproot_script_spend_signature_hash(
+                    0,
+                    &sighash::Prevouts::All(&[prevout]),
+                    leaf_hash,
+                    TapSighashType::All,
+                ) {
+                    Ok(h) => h,
+                    Err(_) => {
+                        tracing::warn!("HTLC sweep skipped: taproot sighash failure");
+                        continue;
+                    }
+                };
+                let msg = bitcoin::secp256k1::Message::from(sighash);
+                let signature = secp_ctx.sign_schnorr(&msg, &keypair);
+                let final_sig = bitcoin::taproot::Signature {
+                    signature,
+                    sighash_type: TapSighashType::All,
+                };
+
+                let sig_ser = final_sig.serialize();
+                let control_ser = control_block.serialize();
+                tx.input[0].witness = Witness::from_slice(&[
+                    sig_ser.as_ref(),
+                    preimage.as_slice(),
+                    claim_script.as_bytes(),
+                    control_ser.as_slice(),
+                ]);
+
+                broadcast_txs.push(tx);
+                entry_broadcast = true;
+            }
+
+            if entry_broadcast {
+                entry.status = "SweepBroadcast".to_string();
+                updated = true;
+            }
+        }
+
+        if !broadcast_txs.is_empty() {
+            let tx_refs: Vec<&Transaction> = broadcast_txs.iter().collect();
+            self.bitcoind_client.broadcast_transactions(&tx_refs);
+        }
+
+        if updated {
+            disk::write_htlc_tracker(&self.static_state.ldk_data_dir, &tracker);
+        }
+    }
+}
+
+/// Per-UTXO HTLC sweep descriptor (written by the tracker; read by the sweeper).
+/// Invariant HTLC data (keys/scripts/preimage) is stored once on the tracker entry.
+#[derive(Debug, Clone)]
+pub(crate) struct HtlcSpendableOutputDescriptor {
+    txid: bitcoin::Txid,
+    vout: u32,
+    value_sat: u64,
+    utxo_kind: HtlcUtxoKind,
+    destination_script_hex: String,
+    asset_id: Option<String>,
+    assignment: Option<RlnAssignment>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HtlcUtxoKind {
+    Vanilla,
+    Colored,
+}
+
+impl HtlcUtxoKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            HtlcUtxoKind::Vanilla => "Vanilla",
+            HtlcUtxoKind::Colored => "Colored",
+        }
+    }
+
+    fn from_str(input: &str) -> Option<Self> {
+        match input {
+            "Vanilla" => Some(HtlcUtxoKind::Vanilla),
+            "Colored" => Some(HtlcUtxoKind::Colored),
+            _ => None,
+        }
+    }
+}
+
+impl HtlcSpendableOutputDescriptor {
+    #[cfg(test)]
+    pub(crate) fn utxo_kind(&self) -> HtlcUtxoKind {
+        self.utxo_kind
+    }
+
+    pub(crate) fn new(
+        txid: bitcoin::Txid,
+        vout: u32,
+        value_sat: u64,
+        utxo_kind: HtlcUtxoKind,
+        destination_script_hex: String,
+        asset_id: Option<String>,
+        assignment: Option<RlnAssignment>,
+    ) -> Self {
+        Self {
+            txid,
+            vout,
+            value_sat,
+            utxo_kind,
+            destination_script_hex,
+            asset_id,
+            assignment,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct HtlcTrackerStorage {
+    pub(crate) entries: LdkHashMap<PaymentHash, HtlcTrackerEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct HtlcTrackerEntry {
+    pub(crate) payment_hash: PaymentHash,
+    pub(crate) preimage: Option<String>,
+    pub(crate) lp_pubkey_xonly: String,
+    pub(crate) user_pubkey_xonly: String,
+    pub(crate) htlc_script_pubkey: String,
+    pub(crate) recipient_id: String,
+    pub(crate) rgb_invoice: String,
+    pub(crate) claim_tapscript_hex: Option<String>,
+    pub(crate) refund_tapscript_hex: Option<String>,
+    pub(crate) tapleaf_version: Option<u8>,
+    pub(crate) control_block_hex: Option<String>,
+    pub(crate) t_lock: u32,
+    pub(crate) min_confirmations: u32,
+    pub(crate) funding: Vec<HtlcSpendableOutputDescriptor>,
+    pub(crate) status: String,
+    pub(crate) asset_id: Option<String>,
+    pub(crate) assignment: Option<RlnAssignment>,
+}
+
+fn write_str_prefixed<W: Writer>(w: &mut W, s: &str) -> Result<(), io::Error> {
+    (s.len() as u16).write(w)?;
+    w.write_all(s.as_bytes())
+}
+
+fn read_str_prefixed<R: io::Read>(r: &mut R) -> Result<String, DecodeError> {
+    let len: u16 = Readable::read(r)?;
+    let mut buf = vec![0u8; len as usize];
+    r.read_exact(&mut buf)
+        .map_err(|e| DecodeError::Io(e.kind()))?;
+    String::from_utf8(buf).map_err(|_| DecodeError::InvalidValue)
+}
+
+fn write_assignment<W: Writer>(w: &mut W, assignment: &RlnAssignment) -> Result<(), io::Error> {
+    match assignment {
+        RlnAssignment::Fungible(v) => {
+            0u8.write(w)?;
+            v.write(w)?;
+        }
+        RlnAssignment::NonFungible => {
+            1u8.write(w)?;
+        }
+        RlnAssignment::InflationRight(v) => {
+            2u8.write(w)?;
+            v.write(w)?;
+        }
+        RlnAssignment::ReplaceRight => {
+            3u8.write(w)?;
+        }
+        RlnAssignment::Any => {
+            4u8.write(w)?;
+        }
+    }
+    Ok(())
+}
+
+fn read_assignment<R: io::Read>(r: &mut R) -> Result<RlnAssignment, DecodeError> {
+    let tag: u8 = Readable::read(r)?;
+    match tag {
+        0 => Ok(RlnAssignment::Fungible(Readable::read(r)?)),
+        1 => Ok(RlnAssignment::NonFungible),
+        2 => Ok(RlnAssignment::InflationRight(Readable::read(r)?)),
+        3 => Ok(RlnAssignment::ReplaceRight),
+        4 => Ok(RlnAssignment::Any),
+        _ => Err(DecodeError::InvalidValue),
+    }
+}
+
+fn write_assignment_opt<W: Writer>(
+    w: &mut W,
+    assignment: &Option<RlnAssignment>,
+) -> Result<(), io::Error> {
+    match assignment {
+        Some(a) => {
+            true.write(w)?;
+            write_assignment(w, a)?;
+        }
+        None => false.write(w)?,
+    }
+    Ok(())
+}
+
+fn read_assignment_opt<R: io::Read>(r: &mut R) -> Result<Option<RlnAssignment>, DecodeError> {
+    if Readable::read(r)? {
+        Ok(Some(read_assignment(r)?))
+    } else {
+        Ok(None)
+    }
+}
+
+impl Writeable for HtlcSpendableOutputDescriptor {
+    fn write<W: Writer>(&self, w: &mut W) -> Result<(), io::Error> {
+        self.txid.write(w)?;
+        self.vout.write(w)?;
+        self.value_sat.write(w)?;
+        write_str_prefixed(w, self.utxo_kind.as_str())?;
+        write_str_prefixed(w, &self.destination_script_hex)?;
+        match &self.asset_id {
+            Some(a) => {
+                true.write(w)?;
+                write_str_prefixed(w, a)?;
+            }
+            None => false.write(w)?,
+        }
+        write_assignment_opt(w, &self.assignment)?;
+        Ok(())
+    }
+}
+
+impl Readable for HtlcSpendableOutputDescriptor {
+    fn read<R: io::Read>(r: &mut R) -> Result<Self, DecodeError> {
+        Ok(Self {
+            txid: Readable::read(r)?,
+            vout: Readable::read(r)?,
+            value_sat: Readable::read(r)?,
+            utxo_kind: {
+                let utxo_kind_str = read_str_prefixed(r)?;
+                HtlcUtxoKind::from_str(&utxo_kind_str).ok_or(DecodeError::InvalidValue)?
+            },
+            destination_script_hex: read_str_prefixed(r)?,
+            asset_id: if Readable::read(r)? {
+                Some(read_str_prefixed(r)?)
+            } else {
+                None
+            },
+            assignment: read_assignment_opt(r)?,
+        })
+    }
+}
+
+impl Writeable for HtlcTrackerEntry {
+    fn write<W: Writer>(&self, w: &mut W) -> Result<(), io::Error> {
+        self.payment_hash.write(w)?;
+        match &self.preimage {
+            Some(p) => {
+                true.write(w)?;
+                write_str_prefixed(w, p)?;
+            }
+            None => false.write(w)?,
+        }
+        write_str_prefixed(w, &self.lp_pubkey_xonly)?;
+        write_str_prefixed(w, &self.user_pubkey_xonly)?;
+        write_str_prefixed(w, &self.htlc_script_pubkey)?;
+        write_str_prefixed(w, &self.recipient_id)?;
+        write_str_prefixed(w, &self.rgb_invoice)?;
+        match &self.claim_tapscript_hex {
+            Some(v) => {
+                true.write(w)?;
+                write_str_prefixed(w, v)?;
+            }
+            None => false.write(w)?,
+        }
+        match &self.refund_tapscript_hex {
+            Some(v) => {
+                true.write(w)?;
+                write_str_prefixed(w, v)?;
+            }
+            None => false.write(w)?,
+        }
+        match self.tapleaf_version {
+            Some(v) => {
+                true.write(w)?;
+                v.write(w)?;
+            }
+            None => false.write(w)?,
+        }
+        match &self.control_block_hex {
+            Some(v) => {
+                true.write(w)?;
+                write_str_prefixed(w, v)?;
+            }
+            None => false.write(w)?,
+        }
+        self.t_lock.write(w)?;
+        self.min_confirmations.write(w)?;
+        (self.funding.len() as u16).write(w)?;
+        for f in &self.funding {
+            f.write(w)?;
+        }
+        write_str_prefixed(w, &self.status)?;
+        match &self.asset_id {
+            Some(a) => {
+                true.write(w)?;
+                write_str_prefixed(w, a)?;
+            }
+            None => false.write(w)?,
+        }
+        write_assignment_opt(w, &self.assignment)?;
+        Ok(())
+    }
+}
+
+impl Readable for HtlcTrackerEntry {
+    fn read<R: io::Read>(r: &mut R) -> Result<Self, DecodeError> {
+        let payment_hash = Readable::read(r)?;
+        let preimage = if Readable::read(r)? {
+            Some(read_str_prefixed(r)?)
+        } else {
+            None
+        };
+        let lp_pubkey_xonly = read_str_prefixed(r)?;
+        let user_pubkey_xonly = read_str_prefixed(r)?;
+        let htlc_script_pubkey = read_str_prefixed(r)?;
+        let recipient_id = read_str_prefixed(r)?;
+        let rgb_invoice = read_str_prefixed(r)?;
+        let claim_tapscript_hex = if Readable::read(r)? {
+            Some(read_str_prefixed(r)?)
+        } else {
+            None
+        };
+        let refund_tapscript_hex = if Readable::read(r)? {
+            Some(read_str_prefixed(r)?)
+        } else {
+            None
+        };
+        let tapleaf_version = if Readable::read(r)? {
+            Some(Readable::read(r)?)
+        } else {
+            None
+        };
+        let control_block_hex = if Readable::read(r)? {
+            Some(read_str_prefixed(r)?)
+        } else {
+            None
+        };
+        let t_lock = Readable::read(r)?;
+        let min_confirmations = Readable::read(r)?;
+        let funding_len: u16 = Readable::read(r)?;
+        let mut funding = Vec::with_capacity(funding_len as usize);
+        for _ in 0..funding_len {
+            funding.push(Readable::read(r)?);
+        }
+        let status = read_str_prefixed(r)?;
+        let asset_id = if Readable::read(r)? {
+            Some(read_str_prefixed(r)?)
+        } else {
+            None
+        };
+        let assignment = read_assignment_opt(r)?;
+        Ok(Self {
+            payment_hash,
+            preimage,
+            lp_pubkey_xonly,
+            user_pubkey_xonly,
+            htlc_script_pubkey,
+            recipient_id,
+            rgb_invoice,
+            claim_tapscript_hex,
+            refund_tapscript_hex,
+            tapleaf_version,
+            control_block_hex,
+            t_lock,
+            min_confirmations,
+            funding,
+            status,
+            asset_id,
+            assignment,
+        })
+    }
+}
+
+impl Writeable for HtlcTrackerStorage {
+    fn write<W: Writer>(&self, w: &mut W) -> Result<(), io::Error> {
+        self.entries.write(w)
+    }
+}
+
+impl Readable for HtlcTrackerStorage {
+    fn read<R: io::Read>(r: &mut R) -> Result<Self, DecodeError> {
+        Ok(Self {
+            entries: Readable::read(r)?,
+        })
+    }
 }
 
 pub(crate) type OutputSweeper = ldk_sweep::OutputSweeper<
@@ -1713,6 +2230,8 @@ impl OutputSpender for RgbOutputSpender {
         locktime: Option<LockTime>,
         secp_ctx: &Secp256k1<All>,
     ) -> Result<bitcoin::Transaction, ()> {
+        self.sweep_htlc_tracker(secp_ctx);
+
         let mut hasher = DefaultHasher::new();
         descriptors.hash(&mut hasher);
         let descriptors_hash = hasher.finish();
@@ -2215,6 +2734,24 @@ pub(crate) async fn start_ldk(
         rgb_online.clone(),
     ));
 
+    // Derive LP Taproot keypair (BIP86 m/86'/coin'/0'/0/0) from mnemonic for HTLC claims.
+    let coin = match network {
+        Network::Bitcoin => 0,
+        _ => 1,
+    };
+    let path: DerivationPath = format!("m/86'/{}'/0'/0/0", coin)
+        .parse()
+        .map_err(|_| APIError::FailedBitcoindConnection("Invalid BIP86 derivation path".into()))?;
+    let secp_xpriv = Secp256k1::new();
+    let child_xprv = master_xprv.derive_priv(&secp_xpriv, &path).map_err(|_| {
+        APIError::FailedBitcoindConnection("Failed to derive LP taproot xprv".into())
+    })?;
+    let sk = child_xprv.private_key;
+    let btc_priv = PrivateKey::new(sk, network);
+    let secp_pub = Secp256k1::new();
+    let pubkey = btc_priv.public_key(&secp_pub);
+    let (xonly, _) = pubkey.inner.x_only_public_key();
+
     // Initialize the OutputSweeper.
     let txes = Arc::new(Mutex::new(disk::read_output_spender_txes(
         &ldk_data_dir.join(OUTPUT_SPENDER_TXES),
@@ -2226,6 +2763,8 @@ pub(crate) async fn start_ldk(
         fs_store: fs_store.clone(),
         txes,
         proxy_endpoint: proxy_endpoint.to_string(),
+        lp_taproot_wif: Some(btc_priv.to_wif()),
+        bitcoind_client: bitcoind_client.clone(),
     });
     let (sweeper_best_block, output_sweeper) = match fs_store.read(
         OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -2501,9 +3040,11 @@ pub(crate) async fn start_ldk(
         taker_swaps,
         router: Arc::clone(&router),
         output_sweeper: Arc::clone(&output_sweeper),
+        bitcoind_client: bitcoind_client.clone(),
         rgb_send_lock: Arc::new(Mutex::new(false)),
         channel_ids_map,
         proxy_endpoint: proxy_endpoint.to_string(),
+        lp_pubkey_xonly_hex: Some(xonly.serialize().to_hex()),
     });
 
     let recent_payments_payment_ids = channel_manager
