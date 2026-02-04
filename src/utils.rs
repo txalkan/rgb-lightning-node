@@ -18,7 +18,10 @@ use lightning::{
 };
 use lightning_persister::fs_store::FilesystemStore;
 use magic_crypt::{new_magic_crypt, MagicCryptTrait};
-use rgb_lib::{bdk_wallet::keys::bip39::Mnemonic, BitcoinNetwork, ContractId};
+use rgb_lib::{
+    bdk_wallet::keys::bip39::Mnemonic, wallet::Outpoint as RgbOutpoint,
+    Assignment as RgbLibAssignment, BitcoinNetwork, ContractId,
+};
 use std::{
     collections::{HashMap, HashSet},
     fmt::Write,
@@ -217,7 +220,6 @@ pub(crate) fn classify_htlc_utxos_by_asset(
     utxos: &[ScannedUtxo],
     asset_id: Option<&str>,
 ) -> Result<HashMap<(String, u32), HtlcUtxoClassification>, APIError> {
-    let _ = rgb_wallet_wrapper;
     if asset_id.is_none() {
         return Ok(utxos
             .iter()
@@ -233,15 +235,35 @@ pub(crate) fn classify_htlc_utxos_by_asset(
             .collect());
     }
 
-    let _contract_id = ContractId::from_str(asset_id.unwrap())
+    let contract_id = ContractId::from_str(asset_id.unwrap())
         .map_err(|e| APIError::InvalidAssetID(e.to_string()))?;
-    tracing::warn!(
-        "HTLC UTXO RGB classification is stubbed: HTLC outputs are not wallet-owned, \
-         so rgb-lib list_unspents cannot detect colored allocations here. \
-         Falling back to Vanilla classification for all HTLC UTXOs. \
-         TODO: use RGB runtime query over arbitrary outpoints."
-    );
-    let colored_map: HashMap<(String, u32), Option<Assignment>> = HashMap::new();
+    let outpoints: Vec<RgbOutpoint> = utxos
+        .iter()
+        .map(|u| RgbOutpoint {
+            txid: u.txid.to_string(),
+            vout: u.vout,
+        })
+        .collect();
+    let assignments_map = rgb_wallet_wrapper
+        .contract_assignments_for_outpoints(contract_id, outpoints)
+        .map_err(APIError::from)?;
+    let mut colored_map: HashMap<(String, u32), Option<Assignment>> = HashMap::new();
+    for (outpoint, assignments) in assignments_map {
+        if assignments.is_empty() {
+            continue;
+        }
+        if assignments.len() > 1 {
+            return Err(APIError::InvalidHtlcParams(format!(
+                "Multiple RGB assignments for HTLC outpoint {}:{}",
+                outpoint.txid, outpoint.vout
+            )));
+        }
+        let assignment = assignments
+            .into_iter()
+            .next()
+            .map(|a: RgbLibAssignment| a.into());
+        colored_map.insert((outpoint.txid, outpoint.vout), assignment);
+    }
 
     Ok(utxos
         .iter()
@@ -548,7 +570,6 @@ pub(crate) fn validate_and_parse_payment_hash(
 /// Validates a hex-encoded payment preimage string, converts it to a PaymentPreimage,
 /// and verifies that it matches the provided payment hash.
 /// Returns an error if the string is invalid, not exactly 32 bytes, or doesn't match the hash.
-/// TODO feat_submarine_rgb: this function will also be used in the new submarine swap of rgb assets task
 pub(crate) fn validate_and_parse_payment_preimage(
     payment_preimage_str: &str,
     payment_hash: &PaymentHash,

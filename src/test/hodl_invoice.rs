@@ -73,15 +73,6 @@ async fn setup_two_nodes_with_asset_channel(
     )
 }
 
-async fn setup_single_node(test_dir_suffix: &str, port_offset: u16) -> (SocketAddr, String) {
-    let test_dir_base = format!("{TEST_DIR_BASE}{test_dir_suffix}/");
-    let test_dir_node1 = format!("{test_dir_base}node1");
-    let node1_port = NODE1_PEER_PORT + port_offset;
-    let (node1_addr, _) = start_node(&test_dir_node1, node1_port, false).await;
-    fund_and_create_utxos(node1_addr, None).await;
-    (node1_addr, test_dir_node1)
-}
-
 async fn invoice_settle_expect_error(
     node_address: SocketAddr,
     payment_hash: String,
@@ -1119,7 +1110,9 @@ async fn reject_duplicate_hodl_payment_hash() {
     initialize();
 
     // Arrange: start a node and fund it.
-    let (node1_addr, _test_dir_node1) = setup_single_node("duplicate_hash", 40).await;
+    let test_dir_base = format!("{TEST_DIR_BASE}duplicate_hash/");
+    let (node1_addr, _test_dir_node1) =
+        setup_single_node(&test_dir_base, "node1", NODE1_PEER_PORT + 40).await;
 
     // Arrange: create the first HODL invoice.
     let (_preimage_hex, payment_hash_hex) = random_preimage_and_hash();
@@ -1168,7 +1161,9 @@ async fn cancel_unpaid_invoice_fails() {
     initialize();
 
     // Arrange: start a node and fund it.
-    let (node1_addr, _test_dir_node1) = setup_single_node("cancel_unpaid", 41).await;
+    let test_dir_base = format!("{TEST_DIR_BASE}cancel_unpaid/");
+    let (node1_addr, _test_dir_node1) =
+        setup_single_node(&test_dir_base, "node1", NODE1_PEER_PORT + 41).await;
 
     // Arrange: create a HODL invoice but never pay it.
     let (_preimage_hex, payment_hash_hex) = random_preimage_and_hash();

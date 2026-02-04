@@ -18,8 +18,8 @@ use rgb_lib::{
     wallet::{
         rust_only::{check_proxy_url, ColoringInfo},
         AssetCFA, AssetNIA, AssetUDA, Assets, Balance, BtcBalance, Metadata, Online,
-        OperationResult, ReceiveData, Recipient, RefreshResult, Transaction as RgbLibTransaction,
-        Transfer, TransportEndpoint, Unspent, WalletData,
+        OperationResult, Outpoint as RgbOutpoint, ReceiveData, Recipient, RefreshResult,
+        Transaction as RgbLibTransaction, Transfer, TransportEndpoint, Unspent, WalletData,
     },
     AssetSchema, Assignment, BitcoinNetwork, ContractId, Error as RgbLibError, RgbTransfer,
     RgbTransport, RgbTxid, UpdateRes, Wallet as RgbLibWallet, WitnessOrd,
@@ -420,6 +420,15 @@ impl RgbLibWalletWrapper {
     pub(crate) fn get_send_consignment_path(&self, asset_id: &str, transfer_id: &str) -> PathBuf {
         self.get_rgb_wallet()
             .get_send_consignment_path(asset_id, transfer_id)
+    }
+
+    pub(crate) fn contract_assignments_for_outpoints(
+        &self,
+        contract_id: ContractId,
+        outpoints: Vec<RgbOutpoint>,
+    ) -> Result<HashMap<RgbOutpoint, Vec<Assignment>>, RgbLibError> {
+        self.get_rgb_wallet()
+            .contract_assignments_for_outpoints(contract_id, outpoints)
     }
 
     pub(crate) fn get_tx_height(&self, txid: String) -> Result<Option<u32>, RgbLibError> {

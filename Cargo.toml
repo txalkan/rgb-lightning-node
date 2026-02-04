@@ -7,6 +7,14 @@ rust-version = "1.85.0"
 [[bin]]
 name = "rgb-lightning-node"
 
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = [
+  "cfg(c_bindings)",
+  "cfg(fuzzing)",
+  "cfg(ldk_bench)",
+  "cfg(taproot)",
+] }
+
 [dependencies]
 amplify = { version = "=4.8.1", default-features = false }
 anyhow = "1.0.93"
@@ -26,17 +34,17 @@ futures = "0.3"
 hex = { package = "hex-conservative", version = "0.3.0", default-features = false }
 lightning = { version = "0.2.0", path = "./rust-lightning/lightning", features = ["dnssec"] }
 lightning-background-processor = { version = "0.2.0", path = "./rust-lightning/lightning-background-processor" }
-lightning-block-sync = { version = "0.2.0", features = ["rpc-client", "tokio"] }
+lightning-block-sync = { version = "0.2.0", path = "./rust-lightning/lightning-block-sync", features = ["rpc-client", "tokio"] }
 lightning-dns-resolver = { version = "0.3.0", path = "./rust-lightning/lightning-dns-resolver" }
 lightning-invoice = { version = "0.34.0", features = ["std"], path = "./rust-lightning/lightning-invoice" }
 lightning-macros = { version = "0.2.0" }
-lightning-net-tokio = { version = "0.2.0" }
+lightning-net-tokio = { version = "0.2.0", path = "./rust-lightning/lightning-net-tokio" }
 lightning-persister = { version = "0.2.0", path = "./rust-lightning/lightning-persister", features = ["tokio"] }
 lightning-rapid-gossip-sync = { version = "0.2.0", path = "./rust-lightning/lightning-rapid-gossip-sync" }
 magic-crypt = "4.0.1"
 rand = "0.8.5"
 regex = { version = "1.11", default-features = false }
-rgb-lib = { version = "0.3.0-beta.4", features = [
+rgb-lib = { path = "../rgb-lib", features = [
     "electrum",
     "esplora",
 ] }
@@ -70,9 +78,6 @@ tracing-test = "0.2.5"
 [patch.crates-io]
 lightning = { path = "./rust-lightning/lightning" }
 lightning-background-processor = { path = "./rust-lightning/lightning-background-processor"}
-
-[lints.rust.unexpected_cfgs]
-level = "allow"
 
 [profile.reldebug]
 inherits = "release"

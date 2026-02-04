@@ -938,6 +938,11 @@ impl HtlcSpendableOutputDescriptor {
         self.utxo_kind
     }
 
+    #[cfg(test)]
+    pub(crate) fn assignment(&self) -> Option<RlnAssignment> {
+        self.assignment.clone()
+    }
+
     pub(crate) fn new(
         txid: bitcoin::Txid,
         vout: u32,
@@ -1299,7 +1304,9 @@ async fn handle_ldk_events(
                         bitcoin_bech32::constants::Network::Testnet
                     }
                     BitcoinNetwork::Regtest => bitcoin_bech32::constants::Network::Regtest,
-                    BitcoinNetwork::Signet => bitcoin_bech32::constants::Network::Signet,
+                    BitcoinNetwork::Signet | BitcoinNetwork::SignetCustom(_) => {
+                        bitcoin_bech32::constants::Network::Signet
+                    }
                 },
             )
             .expect("Lightning funding tx should always be to a SegWit output");
@@ -2473,7 +2480,7 @@ pub(crate) async fn start_ldk(
             BitcoinNetwork::Testnet => "test",
             BitcoinNetwork::Testnet4 => "testnet4",
             BitcoinNetwork::Regtest => "regtest",
-            BitcoinNetwork::Signet => "signet",
+            BitcoinNetwork::Signet | BitcoinNetwork::SignetCustom(_) => "signet",
         }
     {
         return Err(APIError::NetworkMismatch(bitcoind_chain, bitcoin_network));
@@ -2491,7 +2498,7 @@ pub(crate) async fn start_ldk(
         tracing::info!("Using the default indexer");
         match bitcoin_network {
             BitcoinNetwork::Regtest => ELECTRUM_URL_REGTEST,
-            BitcoinNetwork::Signet => ELECTRUM_URL_SIGNET,
+            BitcoinNetwork::Signet | BitcoinNetwork::SignetCustom(_) => ELECTRUM_URL_SIGNET,
             BitcoinNetwork::Testnet => ELECTRUM_URL_TESTNET,
             BitcoinNetwork::Testnet4 => ELECTRUM_URL_TESTNET4,
             BitcoinNetwork::Mainnet => ELECTRUM_URL_MAINNET,
@@ -2505,6 +2512,7 @@ pub(crate) async fn start_ldk(
         tracing::info!("Using the default proxy");
         match bitcoin_network {
             BitcoinNetwork::Signet
+            | BitcoinNetwork::SignetCustom(_)
             | BitcoinNetwork::Testnet
             | BitcoinNetwork::Testnet4
             | BitcoinNetwork::Mainnet => PROXY_ENDPOINT_PUBLIC,

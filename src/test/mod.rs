@@ -231,6 +231,17 @@ async fn start_node(
     (node_address, password)
 }
 
+pub(crate) async fn setup_single_node(
+    test_dir_base: &str,
+    node_dir: &str,
+    node_peer_port: u16,
+) -> (SocketAddr, String) {
+    let test_dir_node = format!("{test_dir_base}{node_dir}");
+    let (node_addr, _password) = start_node(&test_dir_node, node_peer_port, false).await;
+    fund_and_create_utxos(node_addr, None).await;
+    (node_addr, test_dir_node)
+}
+
 async fn address(node_address: SocketAddr) -> String {
     println!("getting address for node {node_address}");
     let res = reqwest::Client::new()
@@ -1972,7 +1983,7 @@ mod payment;
 mod refuse_high_fees;
 mod restart;
 mod send_receive;
-mod submarine_rgb;
+mod submarine_swap;
 mod swap_assets_liquidity_both_ways;
 mod swap_reverse_same_channel;
 mod swap_roundtrip_assets;
