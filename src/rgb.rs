@@ -347,6 +347,19 @@ impl RgbLibWalletWrapper {
             .color_psbt_and_consume(psbt_to_color, coloring_info)
     }
 
+    pub(crate) fn color_psbt_for_outpoints_and_consume(
+        &self,
+        psbt_to_color: &mut BitcoinPsbt,
+        coloring_info: ColoringInfo,
+        input_outpoints: Vec<OutPoint>,
+    ) -> Result<Vec<RgbTransfer>, RgbLibError> {
+        self.get_rgb_wallet().color_psbt_for_outpoints_and_consume(
+            psbt_to_color,
+            coloring_info,
+            input_outpoints,
+        )
+    }
+
     pub(crate) fn create_utxos(
         &self,
         up_to: bool,
@@ -429,6 +442,18 @@ impl RgbLibWalletWrapper {
     ) -> Result<HashMap<RgbOutpoint, Vec<Assignment>>, RgbLibError> {
         self.get_rgb_wallet()
             .contract_assignments_for_outpoints(contract_id, outpoints)
+    }
+
+    #[cfg(any(feature = "electrum", feature = "esplora"))]
+    pub(crate) fn accept_transfer(
+        &self,
+        txid: String,
+        vout: u32,
+        consignment_endpoint: RgbTransport,
+        blinding: u64,
+    ) -> Result<(RgbTransfer, Vec<Assignment>), RgbLibError> {
+        self.get_rgb_wallet()
+            .accept_transfer(txid, vout, consignment_endpoint, blinding)
     }
 
     pub(crate) fn get_tx_height(&self, txid: String) -> Result<Option<u32>, RgbLibError> {

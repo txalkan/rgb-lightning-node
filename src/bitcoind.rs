@@ -10,6 +10,7 @@ use lightning_block_sync::http::HttpEndpoint;
 use lightning_block_sync::http::JsonResponse;
 use lightning_block_sync::rpc::RpcClient;
 use lightning_block_sync::{AsyncBlockSourceResult, BlockData, BlockHeaderData, BlockSource};
+use serde_json::json;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::str::FromStr;
@@ -341,6 +342,23 @@ impl BitcoindClient {
         u32::try_from(info.latest_height).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "block height too large")
         })
+    }
+
+    pub(crate) async fn get_txout_confirmations(
+        &self,
+        txid: &bitcoin::Txid,
+        vout: u32,
+    ) -> std::io::Result<Option<u64>> {
+        let params = [json!(txid.to_string()), json!(vout), json!(true)];
+        let res = self
+            .bitcoind_rpc_client
+            .call_method::<serde_json::Value>("gettxout", &params)
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        if res.is_null() {
+            return Ok(None);
+        }
+        Ok(res["confirmations"].as_u64())
     }
 
     pub(crate) async fn scan_utxos_for_address(

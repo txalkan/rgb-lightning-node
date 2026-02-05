@@ -248,10 +248,12 @@ pub(crate) fn classify_htlc_utxos_by_asset(
         .contract_assignments_for_outpoints(contract_id, outpoints)
         .map_err(APIError::from)?;
     let mut colored_map: HashMap<(String, u32), Option<Assignment>> = HashMap::new();
+    let mut any_assignment = false;
     for (outpoint, assignments) in assignments_map {
         if assignments.is_empty() {
             continue;
         }
+        any_assignment = true;
         if assignments.len() > 1 {
             return Err(APIError::InvalidHtlcParams(format!(
                 "Multiple RGB assignments for HTLC outpoint {}:{}",
@@ -263,6 +265,12 @@ pub(crate) fn classify_htlc_utxos_by_asset(
             .next()
             .map(|a: RgbLibAssignment| a.into());
         colored_map.insert((outpoint.txid, outpoint.vout), assignment);
+    }
+
+    if !any_assignment {
+        return Err(APIError::InvalidHtlcParams(
+            "No RGB assignments found for HTLC outpoints".into(),
+        ));
     }
 
     Ok(utxos

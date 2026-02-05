@@ -79,7 +79,7 @@ use rgb_lib::{
         WitnessData,
     },
     AssetSchema, Assignment, BitcoinNetwork, ConsignmentExt, ContractId, FileContent, RgbTransfer,
-    RgbTxid, WitnessOrd,
+    RgbTransport, RgbTxid, WitnessOrd,
 };
 use std::collections::HashMap;
 use std::convert::TryInto;
@@ -762,6 +762,7 @@ impl RgbOutputSpender {
         let mut tracker = disk::read_htlc_tracker(&self.static_state.ldk_data_dir);
         let mut updated = false;
         let mut broadcast_txs: Vec<Transaction> = Vec::new();
+        let mut pending_accepts: Vec<(String, u32)> = Vec::new();
 
         for entry in tracker.entries.values_mut() {
             if entry.status != "ClaimRequested" {
@@ -805,95 +806,332 @@ impl RgbOutputSpender {
                 }
             };
             let htlc_script_pubkey = ScriptBuf::from_bytes(htlc_spk_bytes);
+            let control_ser = control_block.serialize();
 
             let mut entry_broadcast = false;
+            let mut vanilla_descs: Vec<&HtlcSpendableOutputDescriptor> = Vec::new();
+            let mut colored_by_asset: HashMap<String, Vec<&HtlcSpendableOutputDescriptor>> =
+                HashMap::new();
 
             for desc in &entry.funding {
-                let dest_script_hex_opt = match desc.utxo_kind {
-                    HtlcUtxoKind::Vanilla => entry.btc_destination_script_hex.as_ref(),
-                    HtlcUtxoKind::Colored => entry.rgb_destination_script_hex.as_ref(),
-                };
-                let Some(dest_script_hex) = dest_script_hex_opt else {
-                    tracing::warn!(
-                        "HTLC sweep skipped: missing destination script for {:?} utxo {}:{}",
-                        desc.utxo_kind,
-                        desc.txid,
-                        desc.vout
-                    );
+                match desc.utxo_kind {
+                    HtlcUtxoKind::Vanilla => vanilla_descs.push(desc),
+                    HtlcUtxoKind::Colored => {
+                        let Some(asset_id) = desc.asset_id.clone() else {
+                            tracing::warn!(
+                                "HTLC sweep skipped: missing asset_id for colored utxo {}:{}",
+                                desc.txid,
+                                desc.vout
+                            );
+                            continue;
+                        };
+                        colored_by_asset.entry(asset_id).or_default().push(desc);
+                    }
+                }
+            }
+
+            let leaf_hash = claim_script.tapscript_leaf_hash();
+
+            if !vanilla_descs.is_empty() {
+                if let Some(dest_script_hex) = entry.btc_destination_script_hex.as_ref() {
+                    if let Some(dest_script_bytes) = hex_str_to_vec(dest_script_hex) {
+                        let dest_script = ScriptBuf::from_bytes(dest_script_bytes);
+                        let total_value: u64 = vanilla_descs.iter().map(|d| d.value_sat).sum();
+                        let fee_sat = (FEE_RATE as u64)
+                            .saturating_mul(200)
+                            .saturating_mul(vanilla_descs.len() as u64);
+                        let min_out = DUST_LIMIT_MSAT / 1000;
+                        if total_value <= fee_sat + min_out as u64 {
+                            tracing::warn!("HTLC sweep skipped: output value too small");
+                        } else {
+                            let output_value = total_value - fee_sat;
+                            let mut tx = Transaction {
+                                version: transaction::Version::TWO,
+                                lock_time: LockTime::ZERO,
+                                input: vanilla_descs
+                                    .iter()
+                                    .map(|desc| TxIn {
+                                        previous_output: OutPoint {
+                                            txid: desc.txid,
+                                            vout: desc.vout,
+                                        },
+                                        script_sig: ScriptBuf::new(),
+                                        sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                                        witness: Witness::default(),
+                                    })
+                                    .collect(),
+                                output: vec![TxOut {
+                                    value: Amount::from_sat(output_value),
+                                    script_pubkey: dest_script.clone(),
+                                }],
+                            };
+
+                            let prevouts: Vec<TxOut> = vanilla_descs
+                                .iter()
+                                .map(|desc| TxOut {
+                                    value: Amount::from_sat(desc.value_sat),
+                                    script_pubkey: htlc_script_pubkey.clone(),
+                                })
+                                .collect();
+                            let mut ok = true;
+                            for (idx, _desc) in vanilla_descs.iter().enumerate() {
+                                let sighash = match SighashCache::new(&tx)
+                                    .taproot_script_spend_signature_hash(
+                                        idx,
+                                        &sighash::Prevouts::All(&prevouts),
+                                        leaf_hash,
+                                        TapSighashType::All,
+                                    ) {
+                                    Ok(h) => h,
+                                    Err(_) => {
+                                        tracing::warn!(
+                                            "HTLC sweep skipped: taproot sighash failure"
+                                        );
+                                        ok = false;
+                                        break;
+                                    }
+                                };
+                                let msg = bitcoin::secp256k1::Message::from(sighash);
+                                let signature = secp_ctx.sign_schnorr(&msg, &keypair);
+                                let final_sig = bitcoin::taproot::Signature {
+                                    signature,
+                                    sighash_type: TapSighashType::All,
+                                };
+                                let sig_ser = final_sig.serialize();
+                                tx.input[idx].witness = Witness::from_slice(&[
+                                    sig_ser.as_ref(),
+                                    preimage.as_slice(),
+                                    claim_script.as_bytes(),
+                                    control_ser.as_slice(),
+                                ]);
+                            }
+                            if ok {
+                                broadcast_txs.push(tx);
+                                entry_broadcast = true;
+                            }
+                        }
+                    } else {
+                        tracing::warn!("HTLC sweep skipped: invalid BTC destination script hex");
+                    }
+                } else {
+                    tracing::warn!("HTLC sweep skipped: missing BTC destination script");
+                }
+            }
+
+            if !colored_by_asset.is_empty() {
+                let dest_script_hex = entry.rgb_destination_script_hex.as_ref();
+                let Some(dest_script_hex) = dest_script_hex else {
+                    tracing::warn!("HTLC sweep skipped: missing RGB destination script");
                     continue;
                 };
                 let Some(dest_script_bytes) = hex_str_to_vec(dest_script_hex) else {
-                    tracing::warn!(
-                        "HTLC sweep skipped: invalid {:?} destination script hex for {}:{}",
-                        desc.utxo_kind,
-                        desc.txid,
-                        desc.vout
-                    );
+                    tracing::warn!("HTLC sweep skipped: invalid RGB destination script hex");
                     continue;
                 };
                 let dest_script = ScriptBuf::from_bytes(dest_script_bytes);
-
-                let fee_sat = (FEE_RATE as u64).saturating_mul(200);
-                let min_out = DUST_LIMIT_MSAT / 1000;
-                if desc.value_sat <= fee_sat + min_out as u64 {
-                    tracing::warn!("HTLC sweep skipped: output value too small");
-                    continue;
-                }
-                let output_value = desc.value_sat - fee_sat;
-
-                let mut tx = Transaction {
-                    version: transaction::Version::TWO,
-                    lock_time: LockTime::ZERO,
-                    input: vec![TxIn {
-                        previous_output: OutPoint {
-                            txid: desc.txid,
-                            vout: desc.vout,
-                        },
-                        script_sig: ScriptBuf::new(),
-                        sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-                        witness: Witness::default(),
-                    }],
-                    output: vec![TxOut {
-                        value: Amount::from_sat(output_value),
-                        script_pubkey: dest_script,
-                    }],
-                };
-
-                let leaf_hash = claim_script.tapscript_leaf_hash();
-                let prevout = TxOut {
-                    value: Amount::from_sat(desc.value_sat),
-                    script_pubkey: htlc_script_pubkey.clone(),
-                };
-                let sighash = match SighashCache::new(&tx).taproot_script_spend_signature_hash(
-                    0,
-                    &sighash::Prevouts::All(&[prevout]),
-                    leaf_hash,
-                    TapSighashType::All,
-                ) {
-                    Ok(h) => h,
-                    Err(_) => {
-                        tracing::warn!("HTLC sweep skipped: taproot sighash failure");
-                        continue;
+                let recipient_id =
+                    recipient_id_from_script_buf(dest_script.clone(), self.static_state.network);
+                let proxy_url = match TransportEndpoint::new(self.proxy_endpoint.clone()) {
+                    Ok(endpoint) => endpoint.endpoint,
+                    Err(e) => {
+                        tracing::warn!("HTLC sweep skipped: invalid proxy endpoint: {e}");
+                        String::new()
                     }
                 };
-                let msg = bitcoin::secp256k1::Message::from(sighash);
-                let signature = secp_ctx.sign_schnorr(&msg, &keypair);
-                let final_sig = bitcoin::taproot::Signature {
-                    signature,
-                    sighash_type: TapSighashType::All,
-                };
 
-                let sig_ser = final_sig.serialize();
-                let control_ser = control_block.serialize();
-                tx.input[0].witness = Witness::from_slice(&[
-                    sig_ser.as_ref(),
-                    preimage.as_slice(),
-                    claim_script.as_bytes(),
-                    control_ser.as_slice(),
-                ]);
+                for (asset_id, descs) in colored_by_asset {
+                    let mut total_rgb: u64 = 0;
+                    let mut invalid_assignment = false;
+                    for desc in &descs {
+                        match desc.assignment.as_ref() {
+                            Some(RlnAssignment::Fungible(v))
+                            | Some(RlnAssignment::InflationRight(v)) => {
+                                total_rgb = total_rgb.saturating_add(*v);
+                            }
+                            Some(RlnAssignment::NonFungible) => {
+                                total_rgb = total_rgb.saturating_add(1);
+                            }
+                            _ => {
+                                invalid_assignment = true;
+                                break;
+                            }
+                        }
+                    }
+                    if invalid_assignment || total_rgb == 0 {
+                        tracing::warn!(
+                            "HTLC sweep skipped: invalid or missing RGB assignment for asset {}",
+                            asset_id
+                        );
+                        continue;
+                    }
 
-                broadcast_txs.push(tx);
-                entry_broadcast = true;
+                    let total_value: u64 = descs.iter().map(|d| d.value_sat).sum();
+                    let fee_sat = (FEE_RATE as u64)
+                        .saturating_mul(200)
+                        .saturating_mul(descs.len() as u64);
+                    let min_out = DUST_LIMIT_MSAT / 1000;
+                    if total_value <= fee_sat + min_out as u64 {
+                        tracing::warn!("HTLC sweep skipped: output value too small");
+                        continue;
+                    }
+                    let output_value = total_value - fee_sat;
+
+                    let mut tx = Transaction {
+                        version: transaction::Version::TWO,
+                        lock_time: LockTime::ZERO,
+                        input: descs
+                            .iter()
+                            .map(|desc| TxIn {
+                                previous_output: OutPoint {
+                                    txid: desc.txid,
+                                    vout: desc.vout,
+                                },
+                                script_sig: ScriptBuf::new(),
+                                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                                witness: Witness::default(),
+                            })
+                            .collect(),
+                        output: vec![TxOut {
+                            value: Amount::from_sat(output_value),
+                            script_pubkey: dest_script.clone(),
+                        }],
+                    };
+
+                    let mut psbt =
+                        Psbt::from_unsigned_tx(tx).expect("valid HTLC claim transaction");
+                    let mut rgb_psbt = RgbLibPsbt::from_str(&psbt.to_string()).unwrap();
+                    let contract_id = match ContractId::from_str(&asset_id) {
+                        Ok(id) => id,
+                        Err(_) => {
+                            tracing::warn!(
+                                "HTLC sweep skipped: invalid asset_id {} for RGB coloring",
+                                asset_id
+                            );
+                            continue;
+                        }
+                    };
+                    let mut asset_info_map = map![];
+                    asset_info_map.insert(
+                        contract_id,
+                        AssetColoringInfo {
+                            output_map: HashMap::from_iter([(0, total_rgb)]),
+                            static_blinding: None,
+                        },
+                    );
+                    let coloring_info = ColoringInfo {
+                        asset_info_map,
+                        static_blinding: None,
+                        nonce: None,
+                    };
+                    let input_outpoints: Vec<OutPoint> = descs
+                        .iter()
+                        .map(|desc| OutPoint {
+                            txid: desc.txid,
+                            vout: desc.vout,
+                        })
+                        .collect();
+                    let consignments = match self
+                        .rgb_wallet_wrapper
+                        .color_psbt_for_outpoints_and_consume(
+                            &mut rgb_psbt,
+                            coloring_info,
+                            input_outpoints,
+                        ) {
+                        Ok(consignments) => consignments,
+                        Err(e) => {
+                            tracing::warn!("HTLC sweep skipped: RGB coloring failed: {e}");
+                            continue;
+                        }
+                    };
+
+                    let psbt = Psbt::from_str(&rgb_psbt.to_string())
+                        .expect("valid colored HTLC claim PSBT");
+                    tx = match psbt.extract_tx() {
+                        Ok(tx) => tx,
+                        Err(ExtractTxError::MissingInputValue { tx }) => tx,
+                        Err(e) => {
+                            tracing::warn!("HTLC sweep skipped: invalid PSBT: {e}");
+                            continue;
+                        }
+                    };
+
+                    let prevouts: Vec<TxOut> = descs
+                        .iter()
+                        .map(|desc| TxOut {
+                            value: Amount::from_sat(desc.value_sat),
+                            script_pubkey: htlc_script_pubkey.clone(),
+                        })
+                        .collect();
+                    let mut ok = true;
+                    for (idx, _desc) in descs.iter().enumerate() {
+                        let sighash = match SighashCache::new(&tx)
+                            .taproot_script_spend_signature_hash(
+                                idx,
+                                &sighash::Prevouts::All(&prevouts),
+                                leaf_hash,
+                                TapSighashType::All,
+                            ) {
+                            Ok(h) => h,
+                            Err(_) => {
+                                tracing::warn!("HTLC sweep skipped: taproot sighash failure");
+                                ok = false;
+                                break;
+                            }
+                        };
+                        let msg = bitcoin::secp256k1::Message::from(sighash);
+                        let signature = secp_ctx.sign_schnorr(&msg, &keypair);
+                        let final_sig = bitcoin::taproot::Signature {
+                            signature,
+                            sighash_type: TapSighashType::All,
+                        };
+                        let sig_ser = final_sig.serialize();
+                        tx.input[idx].witness = Witness::from_slice(&[
+                            sig_ser.as_ref(),
+                            preimage.as_slice(),
+                            claim_script.as_bytes(),
+                            control_ser.as_slice(),
+                        ]);
+                    }
+                    if !ok {
+                        continue;
+                    }
+
+                    let claim_txid = tx.compute_txid().to_string();
+                    if !consignments.is_empty() && !proxy_url.is_empty() {
+                        let rgb_vout = tx
+                            .output
+                            .iter()
+                            .position(|o| o.script_pubkey == dest_script)
+                            .unwrap_or(0) as u32;
+                        for consignment in consignments {
+                            let consignment_path = self
+                                .static_state
+                                .ldk_data_dir
+                                .join(format!("consignment_{}", claim_txid));
+                            if consignment.save_file(&consignment_path).is_err() {
+                                tracing::warn!(
+                                    "HTLC sweep skipped: failed to save consignment for {}",
+                                    claim_txid
+                                );
+                                continue;
+                            }
+                            if let Err(e) = self.rgb_wallet_wrapper.post_consignment(
+                                &proxy_url,
+                                recipient_id.clone(),
+                                &consignment_path,
+                                claim_txid.clone(),
+                                Some(rgb_vout),
+                            ) {
+                                tracing::warn!("HTLC sweep skipped: cannot post consignment: {e}");
+                            }
+                            let _ = fs::remove_file(&consignment_path);
+                        }
+                        pending_accepts.push((claim_txid.clone(), rgb_vout));
+                    }
+
+                    broadcast_txs.push(tx);
+                    entry_broadcast = true;
+                }
             }
 
             if entry_broadcast {
@@ -905,6 +1143,23 @@ impl RgbOutputSpender {
         if !broadcast_txs.is_empty() {
             let tx_refs: Vec<&Transaction> = broadcast_txs.iter().collect();
             self.bitcoind_client.broadcast_transactions(&tx_refs);
+        }
+
+        if !pending_accepts.is_empty() {
+            if let Ok(consignment_endpoint) = RgbTransport::from_str(&self.proxy_endpoint) {
+                for (txid, vout) in pending_accepts {
+                    if let Err(e) = self.rgb_wallet_wrapper.accept_transfer(
+                        txid.clone(),
+                        vout,
+                        consignment_endpoint.clone(),
+                        STATIC_BLINDING,
+                    ) {
+                        tracing::warn!("HTLC accept transfer failed for {}:{}: {}", txid, vout, e);
+                    }
+                }
+            } else {
+                tracing::warn!("HTLC accept transfer skipped: invalid proxy endpoint");
+            }
         }
 
         if updated {
@@ -985,7 +1240,6 @@ pub(crate) struct HtlcTrackerStorage {
 
 #[derive(Debug, Clone)]
 pub(crate) struct HtlcTrackerEntry {
-    pub(crate) payment_hash: PaymentHash,
     pub(crate) preimage: Option<String>,
     pub(crate) lp_pubkey_xonly: String,
     pub(crate) user_pubkey_xonly: String,
@@ -1138,7 +1392,6 @@ impl Readable for HtlcSpendableOutputDescriptor {
 
 impl Writeable for HtlcTrackerEntry {
     fn write<W: Writer>(&self, w: &mut W) -> Result<(), io::Error> {
-        self.payment_hash.write(w)?;
         match &self.preimage {
             Some(p) => {
                 true.write(w)?;
@@ -1202,7 +1455,6 @@ impl Writeable for HtlcTrackerEntry {
 
 impl Readable for HtlcTrackerEntry {
     fn read<R: io::Read>(r: &mut R) -> Result<Self, DecodeError> {
-        let payment_hash = Readable::read(r)?;
         let preimage = if Readable::read(r)? {
             Some(read_str_prefixed(r)?)
         } else {
@@ -1250,7 +1502,6 @@ impl Readable for HtlcTrackerEntry {
         let btc_destination_script_hex = read_str_opt(r)?;
         let rgb_destination_script_hex = read_str_opt(r)?;
         Ok(Self {
-            payment_hash,
             preimage,
             lp_pubkey_xonly,
             user_pubkey_xonly,
