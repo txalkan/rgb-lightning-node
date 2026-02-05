@@ -2145,12 +2145,6 @@ pub(crate) async fn htlc_claim(
             ));
         }
 
-        let dest_addr = unlocked_state.rgb_get_address()?;
-        let dest_script = Address::from_str(&dest_addr)
-            .map_err(|_| APIError::InvalidHtlcParams("Invalid wallet address".into()))?
-            .assume_checked()
-            .script_pubkey();
-        let dest_script_hex = dest_script.as_bytes().to_hex();
         let network: Network = state.static_state.network.into();
         let htlc_address = Address::from_script(&computed_spk, network)
             .map_err(|_| APIError::InvalidHtlcParams("Failed to derive HTLC address".into()))?;
@@ -2198,7 +2192,6 @@ pub(crate) async fn htlc_claim(
                 utxo.vout,
                 utxo.value_sat,
                 class.utxo_kind.clone(),
-                dest_script_hex.clone(),
                 descriptor_asset_id,
                 class.assignment.clone(),
             ));
@@ -3908,6 +3901,21 @@ pub(crate) async fn rgb_invoice_htlc(
         let lp_xonly = XOnlyPublicKey::from_str(lp_xonly_hex).map_err(|_| {
             APIError::InvalidHtlcParams("Invalid lp_pubkey_xonly_hex in node state".into())
         })?;
+        let network: Network = state.static_state.network.into();
+        let secp = Secp256k1::verification_only();
+        let btc_destination_script_hex = Address::p2tr(&secp, lp_xonly, None, network)
+            .script_pubkey()
+            .as_bytes()
+            .to_hex();
+        let rgb_address = unlocked_state
+            .rgb_get_address()
+            .map_err(|e| APIError::InvalidHtlcParams(e.to_string()))?;
+        let rgb_destination_script_hex = Address::from_str(&rgb_address)
+            .map_err(|_| APIError::InvalidHtlcParams("Invalid RGB wallet address".into()))?
+            .assume_checked()
+            .script_pubkey()
+            .as_bytes()
+            .to_hex();
 
         let current_height = unlocked_state
             .bitcoind_client
@@ -4031,6 +4039,8 @@ pub(crate) async fn rgb_invoice_htlc(
             status: "Created".to_string(),
             asset_id: payload.asset_id.clone(),
             assignment: payload.assignment.clone(),
+            btc_destination_script_hex: Some(btc_destination_script_hex),
+            rgb_destination_script_hex: Some(rgb_destination_script_hex),
         };
         ensure_htlc_tracker_scripts(&mut entry, &taproot_info)?;
         tracker.entries.insert(payment_hash, entry);

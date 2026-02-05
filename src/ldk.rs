@@ -808,10 +808,27 @@ impl RgbOutputSpender {
 
             let mut entry_broadcast = false;
 
-            // TODO: Send vanilla UTXOs to BTC-only wallet and Colored UTXOs to rgb-lib wallet + RGB state update
             for desc in &entry.funding {
-                let Some(dest_script_bytes) = hex_str_to_vec(&desc.destination_script_hex) else {
-                    tracing::warn!("HTLC sweep skipped: invalid destination script hex");
+                let dest_script_hex_opt = match desc.utxo_kind {
+                    HtlcUtxoKind::Vanilla => entry.btc_destination_script_hex.as_ref(),
+                    HtlcUtxoKind::Colored => entry.rgb_destination_script_hex.as_ref(),
+                };
+                let Some(dest_script_hex) = dest_script_hex_opt else {
+                    tracing::warn!(
+                        "HTLC sweep skipped: missing destination script for {:?} utxo {}:{}",
+                        desc.utxo_kind,
+                        desc.txid,
+                        desc.vout
+                    );
+                    continue;
+                };
+                let Some(dest_script_bytes) = hex_str_to_vec(dest_script_hex) else {
+                    tracing::warn!(
+                        "HTLC sweep skipped: invalid {:?} destination script hex for {}:{}",
+                        desc.utxo_kind,
+                        desc.txid,
+                        desc.vout
+                    );
                     continue;
                 };
                 let dest_script = ScriptBuf::from_bytes(dest_script_bytes);
@@ -904,7 +921,6 @@ pub(crate) struct HtlcSpendableOutputDescriptor {
     vout: u32,
     value_sat: u64,
     utxo_kind: HtlcUtxoKind,
-    destination_script_hex: String,
     asset_id: Option<String>,
     assignment: Option<RlnAssignment>,
 }
@@ -948,7 +964,6 @@ impl HtlcSpendableOutputDescriptor {
         vout: u32,
         value_sat: u64,
         utxo_kind: HtlcUtxoKind,
-        destination_script_hex: String,
         asset_id: Option<String>,
         assignment: Option<RlnAssignment>,
     ) -> Self {
@@ -957,7 +972,6 @@ impl HtlcSpendableOutputDescriptor {
             vout,
             value_sat,
             utxo_kind,
-            destination_script_hex,
             asset_id,
             assignment,
         }
@@ -988,6 +1002,8 @@ pub(crate) struct HtlcTrackerEntry {
     pub(crate) status: String,
     pub(crate) asset_id: Option<String>,
     pub(crate) assignment: Option<RlnAssignment>,
+    pub(crate) btc_destination_script_hex: Option<String>,
+    pub(crate) rgb_destination_script_hex: Option<String>,
 }
 
 fn write_str_prefixed<W: Writer>(w: &mut W, s: &str) -> Result<(), io::Error> {
@@ -1001,6 +1017,28 @@ fn read_str_prefixed<R: io::Read>(r: &mut R) -> Result<String, DecodeError> {
     r.read_exact(&mut buf)
         .map_err(|e| DecodeError::Io(e.kind()))?;
     String::from_utf8(buf).map_err(|_| DecodeError::InvalidValue)
+}
+
+fn write_str_opt<W: Writer>(w: &mut W, value: &Option<String>) -> Result<(), io::Error> {
+    match value {
+        Some(v) => {
+            true.write(w)?;
+            write_str_prefixed(w, v)?;
+        }
+        None => false.write(w)?,
+    }
+    Ok(())
+}
+
+fn read_str_opt<R: io::Read>(r: &mut R) -> Result<Option<String>, DecodeError> {
+    match Readable::read(r) {
+        Ok(true) => Ok(Some(read_str_prefixed(r)?)),
+        Ok(false) => Ok(None),
+        Err(DecodeError::ShortRead) | Err(DecodeError::Io(io::ErrorKind::UnexpectedEof)) => {
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 fn write_assignment<W: Writer>(w: &mut W, assignment: &RlnAssignment) -> Result<(), io::Error> {
@@ -1066,7 +1104,6 @@ impl Writeable for HtlcSpendableOutputDescriptor {
         self.vout.write(w)?;
         self.value_sat.write(w)?;
         write_str_prefixed(w, self.utxo_kind.as_str())?;
-        write_str_prefixed(w, &self.destination_script_hex)?;
         match &self.asset_id {
             Some(a) => {
                 true.write(w)?;
@@ -1089,7 +1126,6 @@ impl Readable for HtlcSpendableOutputDescriptor {
                 let utxo_kind_str = read_str_prefixed(r)?;
                 HtlcUtxoKind::from_str(&utxo_kind_str).ok_or(DecodeError::InvalidValue)?
             },
-            destination_script_hex: read_str_prefixed(r)?,
             asset_id: if Readable::read(r)? {
                 Some(read_str_prefixed(r)?)
             } else {
@@ -1158,6 +1194,8 @@ impl Writeable for HtlcTrackerEntry {
             None => false.write(w)?,
         }
         write_assignment_opt(w, &self.assignment)?;
+        write_str_opt(w, &self.btc_destination_script_hex)?;
+        write_str_opt(w, &self.rgb_destination_script_hex)?;
         Ok(())
     }
 }
@@ -1209,6 +1247,8 @@ impl Readable for HtlcTrackerEntry {
             None
         };
         let assignment = read_assignment_opt(r)?;
+        let btc_destination_script_hex = read_str_opt(r)?;
+        let rgb_destination_script_hex = read_str_opt(r)?;
         Ok(Self {
             payment_hash,
             preimage,
@@ -1227,6 +1267,8 @@ impl Readable for HtlcTrackerEntry {
             status,
             asset_id,
             assignment,
+            btc_destination_script_hex,
+            rgb_destination_script_hex,
         })
     }
 }

@@ -33,20 +33,21 @@ use crate::routes::{
     DisconnectPeerRequest, EmptyResponse, FailTransfersRequest, FailTransfersResponse,
     GetAssetMediaRequest, GetAssetMediaResponse, GetChannelIdRequest, GetChannelIdResponse,
     GetPaymentPreimageRequest, GetPaymentPreimageResponse, GetPaymentRequest, GetPaymentResponse,
-    GetSwapRequest, GetSwapResponse, HTLCStatus, InitRequest, InitResponse, InvoiceCancelRequest,
-    InvoiceHodlRequest, InvoiceHodlResponse, InvoiceSettleRequest, InvoiceStatus,
-    InvoiceStatusRequest, InvoiceStatusResponse, IssueAssetCFARequest, IssueAssetCFAResponse,
-    IssueAssetNIARequest, IssueAssetNIAResponse, IssueAssetUDARequest, IssueAssetUDAResponse,
-    KeysendRequest, KeysendResponse, LNInvoiceRequest, LNInvoiceResponse, ListAssetsRequest,
-    ListAssetsResponse, ListChannelsResponse, ListPaymentsResponse, ListPeersResponse,
-    ListSwapsResponse, ListTransactionsRequest, ListTransactionsResponse, ListTransfersRequest,
-    ListTransfersResponse, ListUnspentsRequest, ListUnspentsResponse, MakerExecuteRequest,
-    MakerInitRequest, MakerInitResponse, NetworkInfoResponse, NodeInfoResponse, OpenChannelRequest,
-    OpenChannelResponse, Payment, Peer, PostAssetMediaResponse, RecipientType, RefreshRequest,
-    RestoreRequest, RevokeTokenRequest, RgbInvoiceHtlcRequest, RgbInvoiceHtlcResponse,
-    RgbInvoiceRequest, RgbInvoiceResponse, SendAssetRequest, SendAssetResponse, SendBtcRequest,
-    SendBtcResponse, SendPaymentRequest, SendPaymentResponse, Swap, SwapStatus, TakerRequest,
-    Transaction, Transfer, UnlockRequest, Unspent, WitnessData, HTLC_MIN_MSAT,
+    GetSwapRequest, GetSwapResponse, HTLCStatus, HtlcClaimRequest, InitRequest, InitResponse,
+    InvoiceCancelRequest, InvoiceHodlRequest, InvoiceHodlResponse, InvoiceSettleRequest,
+    InvoiceStatus, InvoiceStatusRequest, InvoiceStatusResponse, IssueAssetCFARequest,
+    IssueAssetCFAResponse, IssueAssetNIARequest, IssueAssetNIAResponse, IssueAssetUDARequest,
+    IssueAssetUDAResponse, KeysendRequest, KeysendResponse, LNInvoiceRequest, LNInvoiceResponse,
+    ListAssetsRequest, ListAssetsResponse, ListChannelsResponse, ListPaymentsResponse,
+    ListPeersResponse, ListSwapsResponse, ListTransactionsRequest, ListTransactionsResponse,
+    ListTransfersRequest, ListTransfersResponse, ListUnspentsRequest, ListUnspentsResponse,
+    MakerExecuteRequest, MakerInitRequest, MakerInitResponse, NetworkInfoResponse,
+    NodeInfoResponse, OpenChannelRequest, OpenChannelResponse, Payment, Peer,
+    PostAssetMediaResponse, RecipientType, RefreshRequest, RestoreRequest, RevokeTokenRequest,
+    RgbInvoiceHtlcRequest, RgbInvoiceHtlcResponse, RgbInvoiceRequest, RgbInvoiceResponse,
+    SendAssetRequest, SendAssetResponse, SendBtcRequest, SendBtcResponse, SendPaymentRequest,
+    SendPaymentResponse, Swap, SwapStatus, TakerRequest, Transaction, Transfer, UnlockRequest,
+    Unspent, WitnessData, HTLC_MIN_MSAT,
 };
 use crate::utils::{
     hex_str, hex_str_to_vec, validate_and_parse_payment_hash, ELECTRUM_URL_REGTEST, LDK_DIR,
@@ -128,14 +129,6 @@ async fn post_and_check_error_response<T: Serialize>(
         .await
         .unwrap();
     check_response_is_nok(res, expected_status, expected_message, expected_name).await;
-}
-
-fn random_preimage_and_hash() -> (String, String) {
-    let mut preimage = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut preimage);
-    let preimage_hex = hex_str(&preimage);
-    let payment_hash = hex_str(&Sha256::hash(&preimage).to_byte_array());
-    (preimage_hex, payment_hash)
 }
 
 fn _fund_wallet(address: String) {
@@ -965,6 +958,28 @@ async fn get_swap(node_address: SocketAddr, payment_hash: &str, taker: bool) -> 
         .swap
 }
 
+async fn htlc_claim(
+    node_address: SocketAddr,
+    payment_hash: String,
+    preimage: String,
+) -> EmptyResponse {
+    let payload = HtlcClaimRequest {
+        payment_hash,
+        preimage,
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/htlcclaim"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    _check_response_is_ok(res)
+        .await
+        .json::<EmptyResponse>()
+        .await
+        .unwrap()
+}
+
 async fn list_transactions(node_address: SocketAddr) -> Vec<Transaction> {
     println!("listing transactions for node {node_address}");
     let payload = ListTransactionsRequest { skip_sync: false };
@@ -1383,6 +1398,14 @@ async fn post_asset_media(node_address: SocketAddr, file_path: &str) -> String {
         .await
         .unwrap()
         .digest
+}
+
+fn random_preimage_and_hash() -> (String, String) {
+    let mut preimage = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut preimage);
+    let preimage_hex = hex_str(&preimage);
+    let payment_hash = hex_str(&Sha256::hash(&preimage).to_byte_array());
+    (preimage_hex, payment_hash)
 }
 
 async fn refresh_transfers(node_address: SocketAddr) {
