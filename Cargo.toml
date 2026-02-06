@@ -7,6 +7,11 @@ rust-version = "1.85.0"
 [[bin]]
 name = "rgb-lightning-node"
 
+[features]
+default = ["electrum", "esplora"]
+electrum = ["rgb-lib/electrum"]
+esplora = ["rgb-lib/esplora"]
+
 [lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = [
   "cfg(c_bindings)",
@@ -44,10 +49,7 @@ lightning-rapid-gossip-sync = { version = "0.2.0", path = "./rust-lightning/ligh
 magic-crypt = "4.0.1"
 rand = "0.8.5"
 regex = { version = "1.11", default-features = false }
-rgb-lib = { path = "../rgb-lib", features = [
-    "electrum",
-    "esplora",
-] }
+rgb-lib = { path = "../rgb-lib", default-features = false }
 rgb-invoicing = "0.11.1-rc.6"
 scrypt = "0.11.0"
 serde = { version = "^1.0", features = ["derive"] }

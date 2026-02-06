@@ -64,6 +64,8 @@ use lightning_invoice::PaymentSecret;
 use lightning_net_tokio::SocketDescriptor;
 use lightning_persister::fs_store::FilesystemStore;
 use rand::RngCore;
+#[cfg(any(feature = "electrum", feature = "esplora"))]
+use rgb_lib::RgbTransport;
 use rgb_lib::{
     bdk_wallet::keys::{bip39::Mnemonic, DerivableKey, ExtendedKey},
     bitcoin::{
@@ -79,7 +81,7 @@ use rgb_lib::{
         WitnessData,
     },
     AssetSchema, Assignment, BitcoinNetwork, ConsignmentExt, ContractId, FileContent, RgbTransfer,
-    RgbTransport, RgbTxid, WitnessOrd,
+    RgbTxid, WitnessOrd,
 };
 use std::collections::HashMap;
 use std::convert::TryInto;
@@ -944,12 +946,8 @@ impl RgbOutputSpender {
                     let mut invalid_assignment = false;
                     for desc in &descs {
                         match desc.assignment.as_ref() {
-                            Some(RlnAssignment::Fungible(v))
-                            | Some(RlnAssignment::InflationRight(v)) => {
+                            Some(RlnAssignment::Fungible(v)) => {
                                 total_rgb = total_rgb.saturating_add(*v);
-                            }
-                            Some(RlnAssignment::NonFungible) => {
-                                total_rgb = total_rgb.saturating_add(1);
                             }
                             _ => {
                                 invalid_assignment = true;
@@ -997,8 +995,7 @@ impl RgbOutputSpender {
                         }],
                     };
 
-                    let mut psbt =
-                        Psbt::from_unsigned_tx(tx).expect("valid HTLC claim transaction");
+                    let psbt = Psbt::from_unsigned_tx(tx).expect("valid HTLC claim transaction");
                     let mut rgb_psbt = RgbLibPsbt::from_str(&psbt.to_string()).unwrap();
                     let contract_id = match ContractId::from_str(&asset_id) {
                         Ok(id) => id,
@@ -1145,6 +1142,7 @@ impl RgbOutputSpender {
             self.bitcoind_client.broadcast_transactions(&tx_refs);
         }
 
+        #[cfg(any(feature = "electrum", feature = "esplora"))]
         if !pending_accepts.is_empty() {
             if let Ok(consignment_endpoint) = RgbTransport::from_str(&self.proxy_endpoint) {
                 for (txid, vout) in pending_accepts {
@@ -1160,6 +1158,10 @@ impl RgbOutputSpender {
             } else {
                 tracing::warn!("HTLC accept transfer skipped: invalid proxy endpoint");
             }
+        }
+        #[cfg(not(any(feature = "electrum", feature = "esplora")))]
+        if !pending_accepts.is_empty() {
+            tracing::warn!("HTLC accept transfer skipped: rgb-lib indexer features are disabled");
         }
 
         if updated {

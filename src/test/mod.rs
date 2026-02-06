@@ -33,16 +33,16 @@ use crate::routes::{
     DisconnectPeerRequest, EmptyResponse, FailTransfersRequest, FailTransfersResponse,
     GetAssetMediaRequest, GetAssetMediaResponse, GetChannelIdRequest, GetChannelIdResponse,
     GetPaymentPreimageRequest, GetPaymentPreimageResponse, GetPaymentRequest, GetPaymentResponse,
-    GetSwapRequest, GetSwapResponse, HTLCStatus, HtlcClaimRequest, InitRequest, InitResponse,
-    InvoiceCancelRequest, InvoiceHodlRequest, InvoiceHodlResponse, InvoiceSettleRequest,
-    InvoiceStatus, InvoiceStatusRequest, InvoiceStatusResponse, IssueAssetCFARequest,
-    IssueAssetCFAResponse, IssueAssetNIARequest, IssueAssetNIAResponse, IssueAssetUDARequest,
-    IssueAssetUDAResponse, KeysendRequest, KeysendResponse, LNInvoiceRequest, LNInvoiceResponse,
-    ListAssetsRequest, ListAssetsResponse, ListChannelsResponse, ListPaymentsResponse,
-    ListPeersResponse, ListSwapsResponse, ListTransactionsRequest, ListTransactionsResponse,
-    ListTransfersRequest, ListTransfersResponse, ListUnspentsRequest, ListUnspentsResponse,
-    MakerExecuteRequest, MakerInitRequest, MakerInitResponse, NetworkInfoResponse,
-    NodeInfoResponse, OpenChannelRequest, OpenChannelResponse, Payment, Peer,
+    GetSwapRequest, GetSwapResponse, HTLCStatus, HtlcClaimRequest, HtlcScanRequest, InitRequest,
+    InitResponse, InvoiceCancelRequest, InvoiceHodlRequest, InvoiceHodlResponse,
+    InvoiceSettleRequest, InvoiceStatus, InvoiceStatusRequest, InvoiceStatusResponse,
+    IssueAssetCFARequest, IssueAssetCFAResponse, IssueAssetNIARequest, IssueAssetNIAResponse,
+    IssueAssetUDARequest, IssueAssetUDAResponse, KeysendRequest, KeysendResponse, LNInvoiceRequest,
+    LNInvoiceResponse, ListAssetsRequest, ListAssetsResponse, ListChannelsResponse,
+    ListPaymentsResponse, ListPeersResponse, ListSwapsResponse, ListTransactionsRequest,
+    ListTransactionsResponse, ListTransfersRequest, ListTransfersResponse, ListUnspentsRequest,
+    ListUnspentsResponse, MakerExecuteRequest, MakerInitRequest, MakerInitResponse,
+    NetworkInfoResponse, NodeInfoResponse, OpenChannelRequest, OpenChannelResponse, Payment, Peer,
     PostAssetMediaResponse, RecipientType, RefreshRequest, RestoreRequest, RevokeTokenRequest,
     RgbInvoiceHtlcRequest, RgbInvoiceHtlcResponse, RgbInvoiceRequest, RgbInvoiceResponse,
     SendAssetRequest, SendAssetResponse, SendBtcRequest, SendBtcResponse, SendPaymentRequest,
@@ -969,6 +969,21 @@ async fn htlc_claim(
     };
     let res = reqwest::Client::new()
         .post(format!("http://{node_address}/htlcclaim"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    _check_response_is_ok(res)
+        .await
+        .json::<EmptyResponse>()
+        .await
+        .unwrap()
+}
+
+async fn htlc_scan(node_address: SocketAddr, payment_hash: String) -> EmptyResponse {
+    let payload = HtlcScanRequest { payment_hash };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/htlcscan"))
         .json(&payload)
         .send()
         .await

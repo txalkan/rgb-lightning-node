@@ -1026,142 +1026,12 @@ pub(crate) struct HtlcScanRequest {
     pub(crate) payment_hash: String,
 }
 
-fn derive_deterministic_internal_key() -> Result<XOnlyPublicKey, APIError> {
-    const INTERNAL_KEY_CONSTANT: &[u8] = b"SUBMARINE_SWAP_HTLC_P2TR_INTERNAL_KEY_V0";
-    for attempt in 0..256u32 {
-        let mut data = INTERNAL_KEY_CONSTANT.to_vec();
-        if attempt > 0 {
-            data.extend_from_slice(&attempt.to_be_bytes());
-        }
-        let candidate = sha256::Hash::hash(&data).to_byte_array();
-        if let Ok(x) = XOnlyPublicKey::from_slice(&candidate) {
-            return Ok(x);
-        }
-    }
-    Err(APIError::InvalidHtlcParams(
-        "Failed to derive deterministic internal key".into(),
-    ))
-}
-
 struct HtlcTaprootInfo {
     script_pubkey: ScriptBuf,
     claim_script: ScriptBuf,
     refund_script: ScriptBuf,
     control_block: ControlBlock,
     tapleaf_version: LeafVersion,
-}
-
-fn build_htlc_taproot_info(
-    payment_hash_hex: &str,
-    lp_xonly_hex: &str,
-    user_xonly_hex: &str,
-    t_lock: u32,
-) -> Result<HtlcTaprootInfo, APIError> {
-    let secp = Secp256k1::new();
-
-    let payment_hash = hex_str_to_vec(payment_hash_hex)
-        .ok_or_else(|| APIError::InvalidHtlcParams("Invalid payment_hash hex".into()))?;
-    let lp_xonly = XOnlyPublicKey::from_str(lp_xonly_hex)
-        .map_err(|_| APIError::InvalidHtlcParams("Invalid lp x-only pubkey".into()))?;
-    let user_xonly = XOnlyPublicKey::from_str(user_xonly_hex)
-        .map_err(|_| APIError::InvalidHtlcParams("Invalid user x-only pubkey".into()))?;
-
-    // Claim script: OP_SHA256 <H> OP_EQUALVERIFY <LP_xonly> OP_CHECKSIG
-    let claim_script =
-        bitcoin::script::Builder::new()
-            .push_opcode(bitcoin::opcodes::all::OP_SHA256)
-            .push_slice(PushBytesBuf::try_from(payment_hash).map_err(|_| {
-                APIError::InvalidHtlcParams("payment_hash not valid for push".into())
-            })?)
-            .push_opcode(bitcoin::opcodes::all::OP_EQUALVERIFY)
-            .push_slice(PushBytesBuf::try_from(lp_xonly.serialize().to_vec()).unwrap())
-            .push_opcode(bitcoin::opcodes::all::OP_CHECKSIG)
-            .into_script();
-
-    // Refund script: <t_lock> OP_CLTV OP_DROP <User_xonly> OP_CHECKSIG
-    let refund_script = bitcoin::script::Builder::new()
-        .push_int(t_lock as i64)
-        .push_opcode(bitcoin::opcodes::all::OP_CLTV)
-        .push_opcode(bitcoin::opcodes::all::OP_DROP)
-        .push_slice(PushBytesBuf::try_from(user_xonly.serialize().to_vec()).unwrap())
-        .push_opcode(bitcoin::opcodes::all::OP_CHECKSIG)
-        .into_script();
-
-    let internal_key = derive_deterministic_internal_key()?;
-
-    let spend_info = TaprootBuilder::new()
-        .add_leaf(1, claim_script.clone())
-        .map_err(|e| APIError::InvalidHtlcParams(format!("taproot builder error: {:?}", e)))?
-        .add_leaf(1, refund_script.clone())
-        .map_err(|e| APIError::InvalidHtlcParams(format!("taproot builder error: {:?}", e)))?
-        .finalize(&secp, internal_key)
-        .map_err(|e| APIError::InvalidHtlcParams(format!("taproot finalize error: {:?}", e)))?;
-
-    let tapleaf_version = LeafVersion::TapScript;
-    let control_block = spend_info
-        .control_block(&(claim_script.clone(), tapleaf_version))
-        .ok_or(APIError::InvalidHtlcParams(
-            "Failed to derive taproot control block".into(),
-        ))?;
-
-    Ok(HtlcTaprootInfo {
-        script_pubkey: ScriptBuf::new_p2tr_tweaked(spend_info.output_key()),
-        claim_script,
-        refund_script,
-        control_block,
-        tapleaf_version,
-    })
-}
-
-fn ensure_htlc_tracker_scripts(
-    entry: &mut HtlcTrackerEntry,
-    info: &HtlcTaprootInfo,
-) -> Result<(), APIError> {
-    let claim_hex = info.claim_script.as_bytes().to_hex();
-    match &entry.claim_tapscript_hex {
-        Some(existing) if existing != &claim_hex => {
-            return Err(APIError::InvalidHtlcParams(
-                "HTLC tracker claim script mismatch".into(),
-            ))
-        }
-        None => entry.claim_tapscript_hex = Some(claim_hex),
-        _ => {}
-    }
-
-    let refund_hex = info.refund_script.as_bytes().to_hex();
-    match &entry.refund_tapscript_hex {
-        Some(existing) if existing != &refund_hex => {
-            return Err(APIError::InvalidHtlcParams(
-                "HTLC tracker refund script mismatch".into(),
-            ))
-        }
-        None => entry.refund_tapscript_hex = Some(refund_hex),
-        _ => {}
-    }
-
-    let tapleaf_version = info.tapleaf_version.to_consensus();
-    match entry.tapleaf_version {
-        Some(existing) if existing != tapleaf_version => {
-            return Err(APIError::InvalidHtlcParams(
-                "HTLC tracker tapleaf version mismatch".into(),
-            ))
-        }
-        None => entry.tapleaf_version = Some(tapleaf_version),
-        _ => {}
-    }
-
-    let control_hex = info.control_block.serialize().to_hex();
-    match &entry.control_block_hex {
-        Some(existing) if existing != &control_hex => {
-            return Err(APIError::InvalidHtlcParams(
-                "HTLC tracker control block mismatch".into(),
-            ))
-        }
-        None => entry.control_block_hex = Some(control_hex),
-        _ => {}
-    }
-
-    Ok(())
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1475,6 +1345,289 @@ impl AppState {
         let mut unlocked_app_state = self.get_unlocked_app_state().await;
         *unlocked_app_state = updated;
     }
+}
+
+fn build_htlc_taproot_info(
+    payment_hash_hex: &str,
+    lp_xonly_hex: &str,
+    user_xonly_hex: &str,
+    t_lock: u32,
+) -> Result<HtlcTaprootInfo, APIError> {
+    let secp = Secp256k1::new();
+
+    let payment_hash = hex_str_to_vec(payment_hash_hex)
+        .ok_or_else(|| APIError::InvalidHtlcParams("Invalid payment_hash hex".into()))?;
+    let lp_xonly = XOnlyPublicKey::from_str(lp_xonly_hex)
+        .map_err(|_| APIError::InvalidHtlcParams("Invalid lp x-only pubkey".into()))?;
+    let user_xonly = XOnlyPublicKey::from_str(user_xonly_hex)
+        .map_err(|_| APIError::InvalidHtlcParams("Invalid user x-only pubkey".into()))?;
+
+    // Claim script: OP_SHA256 <H> OP_EQUALVERIFY <LP_xonly> OP_CHECKSIG
+    let claim_script =
+        bitcoin::script::Builder::new()
+            .push_opcode(bitcoin::opcodes::all::OP_SHA256)
+            .push_slice(PushBytesBuf::try_from(payment_hash).map_err(|_| {
+                APIError::InvalidHtlcParams("payment_hash not valid for push".into())
+            })?)
+            .push_opcode(bitcoin::opcodes::all::OP_EQUALVERIFY)
+            .push_slice(PushBytesBuf::try_from(lp_xonly.serialize().to_vec()).unwrap())
+            .push_opcode(bitcoin::opcodes::all::OP_CHECKSIG)
+            .into_script();
+
+    // Refund script: <t_lock> OP_CLTV OP_DROP <User_xonly> OP_CHECKSIG
+    let refund_script = bitcoin::script::Builder::new()
+        .push_int(t_lock as i64)
+        .push_opcode(bitcoin::opcodes::all::OP_CLTV)
+        .push_opcode(bitcoin::opcodes::all::OP_DROP)
+        .push_slice(PushBytesBuf::try_from(user_xonly.serialize().to_vec()).unwrap())
+        .push_opcode(bitcoin::opcodes::all::OP_CHECKSIG)
+        .into_script();
+
+    let internal_key = {
+        const INTERNAL_KEY_CONSTANT: &[u8] = b"SUBMARINE_SWAP_HTLC_P2TR_INTERNAL_KEY_V0";
+        let mut derived = None;
+        for attempt in 0..256u32 {
+            let mut data = INTERNAL_KEY_CONSTANT.to_vec();
+            if attempt > 0 {
+                data.extend_from_slice(&attempt.to_be_bytes());
+            }
+            let candidate = sha256::Hash::hash(&data).to_byte_array();
+            if let Ok(x) = XOnlyPublicKey::from_slice(&candidate) {
+                derived = Some(x);
+                break;
+            }
+        }
+        derived.ok_or_else(|| {
+            APIError::InvalidHtlcParams("Failed to derive deterministic internal key".into())
+        })?
+    };
+
+    let spend_info = TaprootBuilder::new()
+        .add_leaf(1, claim_script.clone())
+        .map_err(|e| APIError::InvalidHtlcParams(format!("taproot builder error: {:?}", e)))?
+        .add_leaf(1, refund_script.clone())
+        .map_err(|e| APIError::InvalidHtlcParams(format!("taproot builder error: {:?}", e)))?
+        .finalize(&secp, internal_key)
+        .map_err(|e| APIError::InvalidHtlcParams(format!("taproot finalize error: {:?}", e)))?;
+
+    let tapleaf_version = LeafVersion::TapScript;
+    let control_block = spend_info
+        .control_block(&(claim_script.clone(), tapleaf_version))
+        .ok_or(APIError::InvalidHtlcParams(
+            "Failed to derive taproot control block".into(),
+        ))?;
+
+    Ok(HtlcTaprootInfo {
+        script_pubkey: ScriptBuf::new_p2tr_tweaked(spend_info.output_key()),
+        claim_script,
+        refund_script,
+        control_block,
+        tapleaf_version,
+    })
+}
+
+fn ensure_htlc_tracker_scripts(
+    entry: &mut HtlcTrackerEntry,
+    info: &HtlcTaprootInfo,
+) -> Result<(), APIError> {
+    let claim_hex = info.claim_script.as_bytes().to_hex();
+    match &entry.claim_tapscript_hex {
+        Some(existing) if existing != &claim_hex => {
+            return Err(APIError::InvalidHtlcParams(
+                "HTLC tracker claim script mismatch".into(),
+            ))
+        }
+        None => entry.claim_tapscript_hex = Some(claim_hex),
+        _ => {}
+    }
+
+    let refund_hex = info.refund_script.as_bytes().to_hex();
+    match &entry.refund_tapscript_hex {
+        Some(existing) if existing != &refund_hex => {
+            return Err(APIError::InvalidHtlcParams(
+                "HTLC tracker refund script mismatch".into(),
+            ))
+        }
+        None => entry.refund_tapscript_hex = Some(refund_hex),
+        _ => {}
+    }
+
+    let tapleaf_version = info.tapleaf_version.to_consensus();
+    match entry.tapleaf_version {
+        Some(existing) if existing != tapleaf_version => {
+            return Err(APIError::InvalidHtlcParams(
+                "HTLC tracker tapleaf version mismatch".into(),
+            ))
+        }
+        None => entry.tapleaf_version = Some(tapleaf_version),
+        _ => {}
+    }
+
+    let control_hex = info.control_block.serialize().to_hex();
+    match &entry.control_block_hex {
+        Some(existing) if existing != &control_hex => {
+            return Err(APIError::InvalidHtlcParams(
+                "HTLC tracker control block mismatch".into(),
+            ))
+        }
+        None => entry.control_block_hex = Some(control_hex),
+        _ => {}
+    }
+
+    Ok(())
+}
+
+struct HtlcFundingScanResult {
+    descriptors: Vec<HtlcSpendableOutputDescriptor>,
+    underfunded: bool,
+}
+
+async fn scan_htlc_funding(
+    unlocked_state: &UnlockedAppState,
+    entry: &HtlcTrackerEntry,
+    computed_spk: &ScriptBuf,
+    network: Network,
+    enforce_assignment: bool,
+) -> Result<HtlcFundingScanResult, APIError> {
+    let computed_spk_hex = computed_spk.as_bytes().to_hex();
+    let htlc_address = Address::from_script(computed_spk, network)
+        .map_err(|_| APIError::InvalidHtlcParams("Failed to derive HTLC address".into()))?;
+    let utxos = unlocked_state
+        .bitcoind_client
+        .scan_utxos_for_address(&htlc_address.to_string())
+        .await
+        .map_err(|e| APIError::FailedBitcoindConnection(e.to_string()))?;
+    if utxos.is_empty() {
+        return Err(APIError::InvalidHtlcParams(
+            "No HTLC UTXOs found at address".into(),
+        ));
+    }
+
+    let mut confirmed_utxos = Vec::with_capacity(utxos.len());
+    for utxo in utxos {
+        let confirmations = unlocked_state
+            .bitcoind_client
+            .get_txout_confirmations(&utxo.txid, utxo.vout)
+            .await
+            .map_err(|e| APIError::FailedBitcoindConnection(e.to_string()))?
+            .unwrap_or(0);
+        if confirmations >= entry.min_confirmations as u64 {
+            confirmed_utxos.push(utxo);
+        }
+    }
+    if confirmed_utxos.is_empty() {
+        return Err(APIError::InvalidHtlcParams(format!(
+            "No HTLC UTXOs meet min_confirmations={}",
+            entry.min_confirmations
+        )));
+    }
+
+    unlocked_state
+        .rgb_refresh(false)
+        .map_err(|e| APIError::InvalidHtlcParams(format!("RGB refresh failed: {e}")))?;
+
+    let asset_id = entry.asset_id.clone();
+    if asset_id.is_some() {
+        #[cfg(any(feature = "electrum", feature = "esplora"))]
+        {
+            if let Ok(consignment_endpoint) = RgbTransport::from_str(&unlocked_state.proxy_endpoint)
+            {
+                for utxo in &confirmed_utxos {
+                    if !utxo
+                        .script_pubkey_hex
+                        .eq_ignore_ascii_case(&computed_spk_hex)
+                    {
+                        continue;
+                    }
+                    if let Err(e) = unlocked_state.rgb_wallet_wrapper.accept_transfer(
+                        utxo.txid.to_string(),
+                        utxo.vout,
+                        consignment_endpoint.clone(),
+                        STATIC_BLINDING,
+                    ) {
+                        tracing::warn!(
+                            "HTLC consignment import failed for {}:{}: {}",
+                            utxo.txid,
+                            utxo.vout,
+                            e
+                        );
+                    }
+                }
+            } else {
+                tracing::warn!("HTLC consignment import skipped: invalid proxy endpoint");
+            }
+        }
+        #[cfg(not(any(feature = "electrum", feature = "esplora")))]
+        {
+            tracing::warn!(
+                "HTLC consignment import skipped: rgb-lib indexer features are disabled"
+            );
+        }
+    }
+    let classification = classify_htlc_utxos_by_asset(
+        &unlocked_state.rgb_wallet_wrapper,
+        &confirmed_utxos,
+        asset_id.as_deref(),
+    )?;
+
+    let mut assignment_total: u64 = 0;
+    let mut descriptors = Vec::with_capacity(confirmed_utxos.len());
+    for utxo in confirmed_utxos {
+        if !utxo
+            .script_pubkey_hex
+            .eq_ignore_ascii_case(&computed_spk_hex)
+        {
+            tracing::warn!(
+                "Skipping HTLC UTXO {}:{}; scriptPubKey mismatch",
+                utxo.txid,
+                utxo.vout
+            );
+            continue;
+        }
+        let class = classification
+            .get(&(utxo.txid.to_string(), utxo.vout))
+            .expect("classification entry should exist");
+        if let Some(value) = class.assignment.as_ref().and_then(|a| match a {
+            Assignment::Fungible(v) => Some(*v),
+            _ => None,
+        }) {
+            assignment_total = assignment_total.saturating_add(value);
+        }
+        let descriptor_asset_id = if class.utxo_kind == HtlcUtxoKind::Colored {
+            asset_id.clone()
+        } else {
+            None
+        };
+        descriptors.push(HtlcSpendableOutputDescriptor::new(
+            utxo.txid,
+            utxo.vout,
+            utxo.value_sat,
+            class.utxo_kind.clone(),
+            descriptor_asset_id,
+            class.assignment.clone(),
+        ));
+    }
+    if descriptors.is_empty() {
+        return Err(APIError::InvalidHtlcParams(
+            "No HTLC UTXOs matched expected script pubkey".into(),
+        ));
+    }
+    let mut underfunded = false;
+    if let Some(Assignment::Fungible(required)) = entry.assignment.as_ref() {
+        if assignment_total < *required {
+            if enforce_assignment {
+                return Err(APIError::InvalidHtlcParams(format!(
+                    "RGB assignment total {assignment_total} below requested {required}"
+                )));
+            }
+            underfunded = true;
+        }
+    }
+
+    Ok(HtlcFundingScanResult {
+        descriptors,
+        underfunded,
+    })
 }
 
 pub(crate) async fn address(
@@ -2118,18 +2271,17 @@ pub(crate) async fn htlc_claim(
         let preimage_hex = hex_str(&preimage.0);
 
         let mut tracker = disk::read_htlc_tracker(&state.static_state.ldk_data_dir);
-        if tracker.entries.contains_key(&payment_hash) {
-            return Err(APIError::InvalidHtlcParams(
-                "HTLC tracker entry already exists".into(),
-            ));
-        }
-
         let entry = tracker
             .entries
             .get_mut(&payment_hash)
             .ok_or(APIError::InvalidHtlcParams(
                 "HTLC tracker entry not found".into(),
             ))?;
+        if entry.status == "ClaimRequested" || entry.status == "SweepBroadcast" {
+            return Err(APIError::InvalidHtlcParams(
+                "HTLC claim already requested".into(),
+            ));
+        }
 
         if let Some(existing) = entry.preimage.as_ref() {
             if !existing.eq_ignore_ascii_case(&preimage_hex) {
@@ -2156,139 +2308,9 @@ pub(crate) async fn htlc_claim(
         }
 
         let network: Network = state.static_state.network.into();
-        let htlc_address = Address::from_script(&computed_spk, network)
-            .map_err(|_| APIError::InvalidHtlcParams("Failed to derive HTLC address".into()))?;
-        let utxos = unlocked_state
-            .bitcoind_client
-            .scan_utxos_for_address(&htlc_address.to_string())
-            .await
-            .map_err(|e| APIError::FailedBitcoindConnection(e.to_string()))?;
-        if utxos.is_empty() {
-            return Err(APIError::InvalidHtlcParams(
-                "No HTLC UTXOs found at address".into(),
-            ));
-        }
-
-        let mut confirmed_utxos = Vec::with_capacity(utxos.len());
-        for utxo in utxos {
-            let confirmations = unlocked_state
-                .bitcoind_client
-                .get_txout_confirmations(&utxo.txid, utxo.vout)
-                .await
-                .map_err(|e| APIError::FailedBitcoindConnection(e.to_string()))?
-                .unwrap_or(0);
-            if confirmations >= entry.min_confirmations as u64 {
-                confirmed_utxos.push(utxo);
-            }
-        }
-        if confirmed_utxos.is_empty() {
-            return Err(APIError::InvalidHtlcParams(format!(
-                "No HTLC UTXOs meet min_confirmations={}",
-                entry.min_confirmations
-            )));
-        }
-
-        unlocked_state
-            .rgb_refresh(false)
-            .map_err(|e| APIError::InvalidHtlcParams(format!("RGB refresh failed: {e}")))?;
-
-        let asset_id = entry.asset_id.clone();
-        if asset_id.is_some() {
-            let consignment_endpoint = RgbTransport::from_str(&unlocked_state.proxy_endpoint)
-                .map_err(|_| {
-                    APIError::InvalidHtlcParams(
-                        "Invalid proxy endpoint for HTLC consignment import".into(),
-                    )
-                })?;
-            for utxo in &confirmed_utxos {
-                if !utxo
-                    .script_pubkey_hex
-                    .eq_ignore_ascii_case(&computed_spk_hex)
-                {
-                    continue;
-                }
-                let res = unlocked_state.rgb_wallet_wrapper.accept_transfer(
-                    utxo.txid.to_string(),
-                    utxo.vout,
-                    consignment_endpoint.clone(),
-                    STATIC_BLINDING,
-                );
-                if let Err(e) = res {
-                    tracing::warn!(
-                        "HTLC consignment import failed for {}:{}: {}",
-                        utxo.txid,
-                        utxo.vout,
-                        e
-                    );
-                }
-            }
-        }
-        let classification = classify_htlc_utxos_by_asset(
-            &unlocked_state.rgb_wallet_wrapper,
-            &confirmed_utxos,
-            asset_id.as_deref(),
-        )?;
-        if asset_id.is_some()
-            && classification
-                .values()
-                .all(|c| c.utxo_kind == HtlcUtxoKind::Vanilla)
-        {
-            return Err(APIError::InvalidHtlcParams(
-                "No colored HTLC UTXOs found; consignment may be unavailable".into(),
-            ));
-        }
-
-        let mut assignment_total: u64 = 0;
-        let mut descriptors = Vec::with_capacity(confirmed_utxos.len());
-        for utxo in confirmed_utxos {
-            if !utxo
-                .script_pubkey_hex
-                .eq_ignore_ascii_case(&computed_spk_hex)
-            {
-                tracing::warn!(
-                    "Skipping HTLC UTXO {}:{}; scriptPubKey mismatch",
-                    utxo.txid,
-                    utxo.vout
-                );
-                continue;
-            }
-            let class = classification
-                .get(&(utxo.txid.to_string(), utxo.vout))
-                .expect("classification entry should exist");
-            if let Some(value) = class.assignment.as_ref().and_then(|a| match a {
-                Assignment::Fungible(v) => Some(*v),
-                _ => None,
-            }) {
-                assignment_total = assignment_total.saturating_add(value);
-            }
-            let descriptor_asset_id = if class.utxo_kind == HtlcUtxoKind::Colored {
-                asset_id.clone()
-            } else {
-                None
-            };
-            descriptors.push(HtlcSpendableOutputDescriptor::new(
-                utxo.txid,
-                utxo.vout,
-                utxo.value_sat,
-                class.utxo_kind.clone(),
-                descriptor_asset_id,
-                class.assignment.clone(),
-            ));
-        }
-        if descriptors.is_empty() {
-            return Err(APIError::InvalidHtlcParams(
-                "No HTLC UTXOs matched expected script pubkey".into(),
-            ));
-        }
-        if let Some(Assignment::Fungible(required)) = entry.assignment.as_ref() {
-            if assignment_total < *required {
-                return Err(APIError::InvalidHtlcParams(format!(
-                    "RGB assignment total {assignment_total} below requested {required}"
-                )));
-            }
-        }
+        let scan = scan_htlc_funding(unlocked_state, entry, &computed_spk, network, true).await?;
         ensure_htlc_tracker_scripts(entry, &taproot_info)?;
-        entry.funding = descriptors;
+        entry.funding = scan.descriptors;
         entry.status = "ClaimRequested".to_string();
 
         disk::write_htlc_tracker(&state.static_state.ldk_data_dir, &tracker);
@@ -2332,103 +2354,15 @@ pub(crate) async fn htlc_scan(
         }
 
         let network: Network = state.static_state.network.into();
-        let htlc_address = Address::from_script(&computed_spk, network)
-            .map_err(|_| APIError::InvalidHtlcParams("Failed to derive HTLC address".into()))?;
-        let utxos = unlocked_state
-            .bitcoind_client
-            .scan_utxos_for_address(&htlc_address.to_string())
-            .await
-            .map_err(|e| APIError::FailedBitcoindConnection(e.to_string()))?;
-        if utxos.is_empty() {
-            return Err(APIError::InvalidHtlcParams(
-                "No HTLC UTXOs found at address".into(),
-            ));
-        }
-
-        let mut confirmed_utxos = Vec::with_capacity(utxos.len());
-        for utxo in utxos {
-            let confirmations = unlocked_state
-                .bitcoind_client
-                .get_txout_confirmations(&utxo.txid, utxo.vout)
-                .await
-                .map_err(|e| APIError::FailedBitcoindConnection(e.to_string()))?
-                .unwrap_or(0);
-            if confirmations >= entry.min_confirmations as u64 {
-                confirmed_utxos.push(utxo);
-            }
-        }
-        if confirmed_utxos.is_empty() {
-            return Err(APIError::InvalidHtlcParams(format!(
-                "No HTLC UTXOs meet min_confirmations={}",
-                entry.min_confirmations
-            )));
-        }
-
-        unlocked_state
-            .rgb_refresh(false)
-            .map_err(|e| APIError::InvalidHtlcParams(format!("RGB refresh failed: {e}")))?;
-
-        let asset_id = entry.asset_id.clone();
-        let classification = classify_htlc_utxos_by_asset(
-            &unlocked_state.rgb_wallet_wrapper,
-            &confirmed_utxos,
-            asset_id.as_deref(),
-        )?;
-
-        let mut assignment_total: u64 = 0;
-        let mut descriptors = Vec::with_capacity(confirmed_utxos.len());
-        for utxo in confirmed_utxos {
-            if !utxo
-                .script_pubkey_hex
-                .eq_ignore_ascii_case(&computed_spk_hex)
-            {
-                tracing::warn!(
-                    "Skipping HTLC UTXO {}:{}; scriptPubKey mismatch",
-                    utxo.txid,
-                    utxo.vout
-                );
-                continue;
-            }
-            let class = classification
-                .get(&(utxo.txid.to_string(), utxo.vout))
-                .expect("classification entry should exist");
-            if let Some(value) = class.assignment.as_ref().and_then(|a| match a {
-                Assignment::Fungible(v) => Some(*v),
-                _ => None,
-            }) {
-                assignment_total = assignment_total.saturating_add(value);
-            }
-            let descriptor_asset_id = if class.utxo_kind == HtlcUtxoKind::Colored {
-                asset_id.clone()
-            } else {
-                None
-            };
-            descriptors.push(HtlcSpendableOutputDescriptor::new(
-                utxo.txid,
-                utxo.vout,
-                utxo.value_sat,
-                class.utxo_kind.clone(),
-                descriptor_asset_id,
-                class.assignment.clone(),
-            ));
-        }
-        if descriptors.is_empty() {
-            return Err(APIError::InvalidHtlcParams(
-                "No HTLC UTXOs matched expected script pubkey".into(),
-            ));
-        }
-        if let Some(Assignment::Fungible(required)) = entry.assignment.as_ref() {
-            if assignment_total < *required {
-                return Err(APIError::InvalidHtlcParams(format!(
-                    "RGB assignment total {assignment_total} below requested {required}"
-                )));
-            }
-        }
-
+        let scan = scan_htlc_funding(unlocked_state, entry, &computed_spk, network, false).await?;
         ensure_htlc_tracker_scripts(entry, &taproot_info)?;
-        entry.funding = descriptors;
+        entry.funding = scan.descriptors;
         if entry.status != "ClaimRequested" && entry.status != "SweepBroadcast" {
-            entry.status = "FundingDetected".to_string();
+            entry.status = if scan.underfunded {
+                "Underfunded".to_string()
+            } else {
+                "FundingDetected".to_string()
+            };
         }
 
         disk::write_htlc_tracker(&state.static_state.ldk_data_dir, &tracker);
@@ -4247,6 +4181,12 @@ pub(crate) async fn rgb_invoice_htlc(
 
         let htlc_spk_hex = htlc_p2tr_script_pubkey.as_bytes().to_hex();
         let mut tracker = disk::read_htlc_tracker(&state.static_state.ldk_data_dir);
+        if tracker.entries.contains_key(&payment_hash) {
+            return Err(APIError::InvalidHtlcParams(format!(
+                "HTLC tracker entry already exists for payment hash {}",
+                payment_hash_hex
+            )));
+        }
         let mut entry = HtlcTrackerEntry {
             preimage: None,
             lp_pubkey_xonly: lp_xonly_hex.clone(),

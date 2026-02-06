@@ -3,6 +3,7 @@ use crate::ldk::{HtlcTrackerStorage, HtlcUtxoKind};
 use amplify::hex::ToHex;
 use bitcoin::secp256k1::XOnlyPublicKey;
 use bitcoin::{Address, Network, ScriptBuf};
+use lightning::rgb_utils::STATIC_BLINDING;
 use lightning::util::ser::Readable;
 use std::path::Path;
 
@@ -47,10 +48,231 @@ async fn rgb_invoice_htlc_with_random_user(
 #[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[traced_test]
+async fn htlc_claim_updates_tracker_for_mixed_utxos() {
+    initialize();
+
+    let test_dir_base = format!("{TEST_DIR_BASE}htlc_claim_mixed/");
+    let (node1_addr, test_dir_node1) =
+        setup_single_node(&test_dir_base, "node1", NODE1_PEER_PORT).await;
+    let test_dir_node1 = Path::new(&test_dir_node1);
+
+    let asset_id = issue_asset_nia(node1_addr).await.asset_id;
+    let (preimage_hex, payment_hash_hex) = random_preimage_and_hash();
+    let response = rgb_invoice_htlc_with_random_user(
+        node1_addr,
+        Some(asset_id.clone()),
+        Some(Assignment::Fungible(1)),
+        Some(3600),
+        payment_hash_hex.clone(),
+        210,
+    )
+    .await;
+
+    send_asset(
+        node1_addr,
+        &asset_id,
+        Assignment::Fungible(1),
+        response.recipient_id.clone(),
+        Some(WitnessData {
+            amount_sat: 1000,
+            blinding: Some(STATIC_BLINDING),
+        }),
+    )
+    .await;
+    mine(false);
+    refresh_transfers(node1_addr).await;
+
+    fund_htlc_address(response.htlc_p2tr_script_pubkey.as_str());
+
+    htlc_claim(node1_addr, payment_hash_hex.clone(), preimage_hex.clone()).await;
+
+    let tracker_path = test_dir_node1.join(LDK_DIR);
+    assert!(
+        tracker_path.join("htlc_tracker.json").exists(),
+        "htlc tracker file missing at {}",
+        tracker_path.display()
+    );
+    let tracker_file =
+        std::fs::File::open(tracker_path.join("htlc_tracker.json")).expect("open htlc tracker");
+    let tracker = HtlcTrackerStorage::read(&mut std::io::BufReader::new(tracker_file))
+        .expect("decode htlc tracker");
+    assert!(
+        !tracker.entries.is_empty(),
+        "htlc tracker empty at {}",
+        tracker_path.display()
+    );
+    let entry = tracker
+        .entries
+        .iter()
+        .find(|(k, _)| hex_str(&k.0).eq_ignore_ascii_case(&payment_hash_hex))
+        .map(|(_, v)| v)
+        .expect("htlc tracker entry");
+    assert_eq!(entry.status, "ClaimRequested");
+    assert!(entry.funding.len() == 2);
+    assert!(entry
+        .funding
+        .iter()
+        .any(|d| d.utxo_kind() == HtlcUtxoKind::Vanilla));
+    assert!(entry
+        .funding
+        .iter()
+        .any(|d| d.utxo_kind() == HtlcUtxoKind::Colored));
+    assert!(entry
+        .funding
+        .iter()
+        .any(|d| d.assignment() == Some(Assignment::Fungible(1))));
+}
+
+#[serial_test::serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[traced_test]
+async fn htlc_scan_updates_tracker_for_mixed_utxos() {
+    initialize();
+
+    let test_dir_base = format!("{TEST_DIR_BASE}htlc_scan/");
+    let (node1_addr, test_dir_node1) =
+        setup_single_node(&test_dir_base, "node1", NODE1_PEER_PORT).await;
+    let test_dir_node1 = Path::new(&test_dir_node1);
+
+    let asset_id = issue_asset_nia(node1_addr).await.asset_id;
+    let (_preimage_hex, payment_hash_hex) = random_preimage_and_hash();
+    let response = rgb_invoice_htlc_with_random_user(
+        node1_addr,
+        Some(asset_id.clone()),
+        Some(Assignment::Fungible(1)),
+        Some(3600),
+        payment_hash_hex.clone(),
+        210,
+    )
+    .await;
+
+    fund_htlc_address(response.htlc_p2tr_script_pubkey.as_str());
+
+    send_asset(
+        node1_addr,
+        &asset_id,
+        Assignment::Fungible(1),
+        response.recipient_id.clone(),
+        Some(WitnessData {
+            amount_sat: 1000,
+            blinding: None,
+        }),
+    )
+    .await;
+    mine(false);
+    refresh_transfers(node1_addr).await;
+
+    htlc_scan(node1_addr, payment_hash_hex.clone()).await;
+
+    let tracker_path = test_dir_node1.join(LDK_DIR);
+    let tracker_file =
+        std::fs::File::open(tracker_path.join("htlc_tracker.json")).expect("open htlc tracker");
+    let tracker = HtlcTrackerStorage::read(&mut std::io::BufReader::new(tracker_file))
+        .expect("decode htlc tracker");
+    let entry = tracker
+        .entries
+        .iter()
+        .find(|(k, _)| hex_str(&k.0).eq_ignore_ascii_case(&payment_hash_hex))
+        .map(|(_, v)| v)
+        .expect("htlc tracker entry");
+
+    assert_eq!(entry.status, "FundingDetected");
+    let vanilla_count = entry
+        .funding
+        .iter()
+        .filter(|d| d.utxo_kind() == HtlcUtxoKind::Vanilla)
+        .count();
+    let colored_count = entry
+        .funding
+        .iter()
+        .filter(|d| d.utxo_kind() == HtlcUtxoKind::Colored)
+        .count();
+    assert_eq!(vanilla_count, 1);
+    assert_eq!(colored_count, 1);
+}
+
+#[serial_test::serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[traced_test]
+async fn htlc_claim_sets_dest_scripts_for_vanilla_and_colored() {
+    initialize();
+
+    let test_dir_base = format!("{TEST_DIR_BASE}htlc_claim_dest_scripts/");
+    let (node1_addr, test_dir_node1) =
+        setup_single_node(&test_dir_base, "node1", NODE1_PEER_PORT).await;
+    let test_dir_node1 = Path::new(&test_dir_node1);
+
+    let asset_id = issue_asset_nia(node1_addr).await.asset_id;
+
+    let (preimage_hex, payment_hash_hex) = random_preimage_and_hash();
+    let response = rgb_invoice_htlc_with_random_user(
+        node1_addr,
+        Some(asset_id.clone()),
+        Some(Assignment::Fungible(1)),
+        Some(3600),
+        payment_hash_hex.clone(),
+        210,
+    )
+    .await;
+
+    let htlc_spk_hex = response.htlc_p2tr_script_pubkey.as_str();
+    fund_htlc_address(htlc_spk_hex);
+
+    send_asset(
+        node1_addr,
+        &asset_id,
+        Assignment::Fungible(1),
+        response.recipient_id.clone(),
+        Some(WitnessData {
+            amount_sat: 1000,
+            blinding: None,
+        }),
+    )
+    .await;
+    mine(false);
+    refresh_transfers(node1_addr).await;
+
+    htlc_claim(node1_addr, payment_hash_hex.clone(), preimage_hex.clone()).await;
+
+    let tracker_path = test_dir_node1.join(LDK_DIR);
+    let tracker_file =
+        std::fs::File::open(tracker_path.join("htlc_tracker.json")).expect("open htlc tracker");
+    let tracker = HtlcTrackerStorage::read(&mut std::io::BufReader::new(tracker_file))
+        .expect("decode htlc tracker");
+    let entry = tracker
+        .entries
+        .iter()
+        .find(|(k, _)| hex_str(&k.0).eq_ignore_ascii_case(&payment_hash_hex))
+        .map(|(_, v)| v)
+        .expect("htlc tracker entry");
+
+    let btc_dest_hex = entry
+        .btc_destination_script_hex
+        .as_ref()
+        .expect("btc destination script missing");
+    let lp_xonly =
+        XOnlyPublicKey::from_str(&entry.lp_pubkey_xonly).expect("lp_pubkey_xonly invalid");
+    let secp = Secp256k1::verification_only();
+    let expected_btc_script =
+        Address::p2tr(&secp, lp_xonly, None, Network::Regtest).script_pubkey();
+    assert_eq!(btc_dest_hex, &expected_btc_script.as_bytes().to_hex());
+
+    let rgb_dest_hex = entry
+        .rgb_destination_script_hex
+        .as_ref()
+        .expect("rgb destination script missing");
+    let rgb_script_bytes = hex_str_to_vec(rgb_dest_hex).expect("rgb destination script hex");
+    let rgb_script = ScriptBuf::from_bytes(rgb_script_bytes);
+    Address::from_script(&rgb_script, Network::Regtest).expect("rgb destination script invalid");
+}
+
+#[serial_test::serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[traced_test]
 async fn rgb_invoice_htlc_binds_to_p2tr_script() {
     initialize();
 
-    let test_dir_base = format!("{TEST_DIR_BASE}happy_path/");
+    let test_dir_base = format!("{TEST_DIR_BASE}invoice_happy_path/");
     let (node1_addr, test_dir_node1) =
         setup_single_node(&test_dir_base, "node1", NODE1_PEER_PORT).await;
     let asset_id = issue_asset_nia(node1_addr).await.asset_id;
@@ -154,189 +376,4 @@ async fn rgb_invoice_htlc_rejects_invalid_params() {
         "InvalidHtlcParams",
     )
     .await;
-}
-
-#[serial_test::serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-#[traced_test]
-async fn htlc_claim_updates_tracker_for_vanilla_utxo() {
-    initialize();
-
-    let test_dir_base = format!("{TEST_DIR_BASE}htlc_claim/");
-    let (node1_addr, test_dir_node1) =
-        setup_single_node(&test_dir_base, "node1", NODE1_PEER_PORT).await;
-    let test_dir_node1 = Path::new(&test_dir_node1);
-
-    let (preimage_hex, payment_hash_hex) = random_preimage_and_hash();
-    let response = rgb_invoice_htlc_with_random_user(
-        node1_addr,
-        None,
-        None,
-        Some(3600),
-        payment_hash_hex.clone(),
-        210,
-    )
-    .await;
-
-    let htlc_spk_hex = response.htlc_p2tr_script_pubkey.as_str();
-    fund_htlc_address(htlc_spk_hex);
-
-    htlc_claim(node1_addr, payment_hash_hex.clone(), preimage_hex.clone()).await;
-
-    let tracker_path = test_dir_node1.join(LDK_DIR);
-    assert!(
-        tracker_path.join("htlc_tracker.json").exists(),
-        "htlc tracker file missing at {}",
-        tracker_path.display()
-    );
-    let tracker_file =
-        std::fs::File::open(tracker_path.join("htlc_tracker.json")).expect("open htlc tracker");
-    let tracker = HtlcTrackerStorage::read(&mut std::io::BufReader::new(tracker_file))
-        .expect("decode htlc tracker");
-    assert!(
-        !tracker.entries.is_empty(),
-        "htlc tracker empty at {}",
-        tracker_path.display()
-    );
-    let entry = tracker
-        .entries
-        .iter()
-        .find(|(k, _)| hex_str(&k.0).eq_ignore_ascii_case(&payment_hash_hex))
-        .map(|(_, v)| v)
-        .expect("htlc tracker entry");
-    assert_eq!(entry.status, "ClaimRequested");
-    assert_eq!(entry.funding.len(), 1);
-    assert_eq!(entry.funding[0].utxo_kind(), HtlcUtxoKind::Vanilla);
-}
-
-#[serial_test::serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-#[traced_test]
-async fn htlc_claim_updates_tracker_for_colored_utxo() {
-    initialize();
-
-    let test_dir_base = format!("{TEST_DIR_BASE}htlc_claim_colored/");
-    let (node1_addr, test_dir_node1) =
-        setup_single_node(&test_dir_base, "node1", NODE1_PEER_PORT).await;
-    let test_dir_node1 = Path::new(&test_dir_node1);
-
-    let asset_id = issue_asset_nia(node1_addr).await.asset_id;
-
-    let (preimage_hex, payment_hash_hex) = random_preimage_and_hash();
-    let response = rgb_invoice_htlc_with_random_user(
-        node1_addr,
-        Some(asset_id.clone()),
-        Some(Assignment::Fungible(1)),
-        Some(3600),
-        payment_hash_hex.clone(),
-        210,
-    )
-    .await;
-
-    send_asset(
-        node1_addr,
-        &asset_id,
-        Assignment::Fungible(1),
-        response.recipient_id.clone(),
-        Some(WitnessData {
-            amount_sat: 1000,
-            blinding: None,
-        }),
-    )
-    .await;
-    mine(false);
-    refresh_transfers(node1_addr).await;
-
-    htlc_claim(node1_addr, payment_hash_hex.clone(), preimage_hex.clone()).await;
-
-    let tracker_path = test_dir_node1.join(LDK_DIR);
-    let tracker_file =
-        std::fs::File::open(tracker_path.join("htlc_tracker.json")).expect("open htlc tracker");
-    let tracker = HtlcTrackerStorage::read(&mut std::io::BufReader::new(tracker_file))
-        .expect("decode htlc tracker");
-    let entry = tracker
-        .entries
-        .iter()
-        .find(|(k, _)| hex_str(&k.0).eq_ignore_ascii_case(&payment_hash_hex))
-        .map(|(_, v)| v)
-        .expect("htlc tracker entry");
-    assert_eq!(entry.status, "ClaimRequested");
-    assert_eq!(entry.funding.len(), 1);
-    assert_eq!(entry.funding[0].utxo_kind(), HtlcUtxoKind::Colored);
-    assert_eq!(entry.funding[0].assignment(), Some(Assignment::Fungible(1)));
-}
-
-#[serial_test::serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-#[traced_test]
-async fn htlc_claim_sets_dest_scripts_for_vanilla_and_colored() {
-    initialize();
-
-    let test_dir_base = format!("{TEST_DIR_BASE}htlc_claim_dest_scripts/");
-    let (node1_addr, test_dir_node1) =
-        setup_single_node(&test_dir_base, "node1", NODE1_PEER_PORT).await;
-    let test_dir_node1 = Path::new(&test_dir_node1);
-
-    let asset_id = issue_asset_nia(node1_addr).await.asset_id;
-
-    let (preimage_hex, payment_hash_hex) = random_preimage_and_hash();
-    let response = rgb_invoice_htlc_with_random_user(
-        node1_addr,
-        Some(asset_id.clone()),
-        Some(Assignment::Fungible(1)),
-        Some(3600),
-        payment_hash_hex.clone(),
-        210,
-    )
-    .await;
-
-    let htlc_spk_hex = response.htlc_p2tr_script_pubkey.as_str();
-    fund_htlc_address(htlc_spk_hex);
-
-    send_asset(
-        node1_addr,
-        &asset_id,
-        Assignment::Fungible(1),
-        response.recipient_id.clone(),
-        Some(WitnessData {
-            amount_sat: 1000,
-            blinding: None,
-        }),
-    )
-    .await;
-    mine(false);
-    refresh_transfers(node1_addr).await;
-
-    htlc_claim(node1_addr, payment_hash_hex.clone(), preimage_hex.clone()).await;
-
-    let tracker_path = test_dir_node1.join(LDK_DIR);
-    let tracker_file =
-        std::fs::File::open(tracker_path.join("htlc_tracker.json")).expect("open htlc tracker");
-    let tracker = HtlcTrackerStorage::read(&mut std::io::BufReader::new(tracker_file))
-        .expect("decode htlc tracker");
-    let entry = tracker
-        .entries
-        .iter()
-        .find(|(k, _)| hex_str(&k.0).eq_ignore_ascii_case(&payment_hash_hex))
-        .map(|(_, v)| v)
-        .expect("htlc tracker entry");
-
-    let btc_dest_hex = entry
-        .btc_destination_script_hex
-        .as_ref()
-        .expect("btc destination script missing");
-    let lp_xonly =
-        XOnlyPublicKey::from_str(&entry.lp_pubkey_xonly).expect("lp_pubkey_xonly invalid");
-    let secp = Secp256k1::verification_only();
-    let expected_btc_script =
-        Address::p2tr(&secp, lp_xonly, None, Network::Regtest).script_pubkey();
-    assert_eq!(btc_dest_hex, &expected_btc_script.as_bytes().to_hex());
-
-    let rgb_dest_hex = entry
-        .rgb_destination_script_hex
-        .as_ref()
-        .expect("rgb destination script missing");
-    let rgb_script_bytes = hex_str_to_vec(rgb_dest_hex).expect("rgb destination script hex");
-    let rgb_script = ScriptBuf::from_bytes(rgb_script_bytes);
-    Address::from_script(&rgb_script, Network::Regtest).expect("rgb destination script invalid");
 }
