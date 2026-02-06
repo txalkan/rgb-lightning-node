@@ -38,6 +38,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::bitcoind::ScannedUtxo;
 use crate::ldk::HtlcUtxoKind;
+#[cfg(test)]
+use crate::ldk::RgbOutputSpender;
 use crate::ldk::{ChannelIdsMap, Router};
 use crate::rgb::{get_rgb_channel_info_optional, RgbLibWalletWrapper};
 use crate::routes::Assignment;
@@ -120,6 +122,8 @@ pub(crate) struct UnlockedAppState {
     pub(crate) rgb_wallet_wrapper: Arc<RgbLibWalletWrapper>,
     pub(crate) router: Arc<Router>,
     pub(crate) output_sweeper: Arc<OutputSweeper>,
+    #[cfg(test)]
+    pub(crate) htlc_output_spender: Arc<RgbOutputSpender>,
     pub(crate) bitcoind_client: Arc<BitcoindClient>,
     pub(crate) rgb_send_lock: Arc<Mutex<bool>>,
     pub(crate) channel_ids_map: Arc<Mutex<ChannelIdsMap>>,

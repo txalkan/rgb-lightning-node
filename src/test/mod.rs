@@ -50,8 +50,8 @@ use crate::routes::{
     Unspent, WitnessData, HTLC_MIN_MSAT,
 };
 use crate::utils::{
-    hex_str, hex_str_to_vec, validate_and_parse_payment_hash, ELECTRUM_URL_REGTEST, LDK_DIR,
-    PROXY_ENDPOINT_LOCAL,
+    hex_str, hex_str_to_vec, validate_and_parse_payment_hash, AppState, ELECTRUM_URL_REGTEST,
+    LDK_DIR, PROXY_ENDPOINT_LOCAL,
 };
 
 use super::*;
@@ -188,6 +188,31 @@ async fn start_daemon(
     node_address
 }
 
+async fn start_daemon_with_state(
+    node_test_dir: &str,
+    node_peer_port: u16,
+    root_public_key: Option<biscuit_auth::PublicKey>,
+) -> (SocketAddr, Arc<AppState>) {
+    let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let node_address = listener.local_addr().unwrap();
+    std::fs::create_dir_all(node_test_dir).unwrap();
+    let args = UserArgs {
+        storage_dir_path: node_test_dir.into(),
+        ldk_peer_listening_port: node_peer_port,
+        root_public_key,
+        ..Default::default()
+    };
+    let (router, app_state) = app(args).await.unwrap();
+    let app_state_clone = app_state.clone();
+    tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown_signal(app_state_clone))
+            .await
+            .unwrap();
+    });
+    (node_address, app_state)
+}
+
 async fn start_node(
     node_test_dir: &str,
     node_peer_port: u16,
@@ -224,6 +249,43 @@ async fn start_node(
     (node_address, password)
 }
 
+async fn start_node_with_state(
+    node_test_dir: &str,
+    node_peer_port: u16,
+    keep_node_dir: bool,
+) -> (SocketAddr, String, Arc<AppState>) {
+    println!("starting node with peer port {node_peer_port}");
+    if !keep_node_dir && Path::new(&node_test_dir).is_dir() {
+        std::fs::remove_dir_all(node_test_dir).unwrap();
+    }
+    let (node_address, app_state) =
+        start_daemon_with_state(node_test_dir, node_peer_port, None).await;
+
+    let password = format!("{node_test_dir}.{node_peer_port}");
+
+    if !keep_node_dir {
+        let payload = InitRequest {
+            password: password.clone(),
+        };
+        let res = reqwest::Client::new()
+            .post(format!("http://{node_address}/init"))
+            .json(&payload)
+            .send()
+            .await
+            .unwrap();
+        _check_response_is_ok(res)
+            .await
+            .json::<InitResponse>()
+            .await
+            .unwrap();
+    }
+
+    unlock(node_address, &password).await;
+
+    println!("node on peer port {node_peer_port} started with address {node_address:?}");
+    (node_address, password, app_state)
+}
+
 pub(crate) async fn setup_single_node(
     test_dir_base: &str,
     node_dir: &str,
@@ -233,6 +295,18 @@ pub(crate) async fn setup_single_node(
     let (node_addr, _password) = start_node(&test_dir_node, node_peer_port, false).await;
     fund_and_create_utxos(node_addr, None).await;
     (node_addr, test_dir_node)
+}
+
+pub(crate) async fn setup_single_node_with_state(
+    test_dir_base: &str,
+    node_dir: &str,
+    node_peer_port: u16,
+) -> (SocketAddr, String, Arc<AppState>) {
+    let test_dir_node = format!("{test_dir_base}{node_dir}");
+    let (node_addr, _password, app_state) =
+        start_node_with_state(&test_dir_node, node_peer_port, false).await;
+    fund_and_create_utxos(node_addr, None).await;
+    (node_addr, test_dir_node, app_state)
 }
 
 async fn address(node_address: SocketAddr) -> String {
