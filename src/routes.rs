@@ -1532,6 +1532,7 @@ async fn scan_htlc_funding(
         {
             if let Ok(consignment_endpoint) = RgbTransport::from_str(&unlocked_state.proxy_endpoint)
             {
+                let mut handles = Vec::new();
                 for utxo in &confirmed_utxos {
                     if !utxo
                         .script_pubkey_hex
@@ -1539,18 +1540,38 @@ async fn scan_htlc_funding(
                     {
                         continue;
                     }
-                    if let Err(e) = unlocked_state.rgb_wallet_wrapper.accept_transfer(
-                        utxo.txid.to_string(),
-                        utxo.vout,
-                        consignment_endpoint.clone(),
-                        STATIC_BLINDING,
-                    ) {
-                        tracing::warn!(
-                            "HTLC consignment import failed for {}:{}: {}",
-                            utxo.txid,
-                            utxo.vout,
-                            e
-                        );
+                    let rgb_wallet_wrapper = unlocked_state.rgb_wallet_wrapper.clone();
+                    let endpoint = consignment_endpoint.clone();
+                    let txid = utxo.txid.to_string();
+                    let vout = utxo.vout;
+                    let txid_for_task = txid.clone();
+                    let handle = tokio::task::spawn_blocking(move || {
+                        rgb_wallet_wrapper.accept_transfer(
+                            txid_for_task,
+                            vout,
+                            endpoint,
+                            STATIC_BLINDING,
+                        )
+                    });
+                    handles.push((txid, vout, handle));
+                }
+                for (txid, vout, handle) in handles {
+                    match handle.await {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => {
+                            tracing::warn!(
+                                "HTLC consignment import failed for {}:{}: {e}",
+                                txid,
+                                vout
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "HTLC consignment import task failed for {}:{}: {e}",
+                                txid,
+                                vout
+                            );
+                        }
                     }
                 }
             } else {
@@ -2278,9 +2299,18 @@ pub(crate) async fn htlc_claim(
                 "HTLC tracker entry not found".into(),
             ))?;
         if entry.status == "ClaimRequested" || entry.status == "SweepBroadcast" {
-            return Err(APIError::InvalidHtlcParams(
-                "HTLC claim already requested".into(),
-            ));
+            if let Some(existing) = entry.preimage.as_ref() {
+                if !existing.eq_ignore_ascii_case(&preimage_hex) {
+                    return Err(APIError::InvalidHtlcParams(
+                        "Preimage mismatch with tracker entry".into(),
+                    ));
+                }
+            } else {
+                return Err(APIError::InvalidHtlcParams(
+                    "HTLC preimage missing for claimed entry".into(),
+                ));
+            }
+            return Ok(Json(EmptyResponse {}));
         }
 
         if let Some(existing) = entry.preimage.as_ref() {
