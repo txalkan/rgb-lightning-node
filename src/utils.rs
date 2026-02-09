@@ -19,7 +19,13 @@ use lightning::{
 use lightning_persister::fs_store::FilesystemStore;
 use magic_crypt::{new_magic_crypt, MagicCryptTrait};
 use rgb_lib::{
-    bdk_wallet::keys::bip39::Mnemonic, wallet::Outpoint as RgbOutpoint,
+    bdk_wallet::keys::bip39::Mnemonic,
+    bitcoin::{
+        bip32::{ChildNumber, DerivationPath, Xpriv, Xpub},
+        secp256k1::Secp256k1 as Secp256k1_30,
+        Network,
+    },
+    wallet::Outpoint as RgbOutpoint,
     Assignment as RgbLibAssignment, BitcoinNetwork, ContractId,
 };
 use std::{
@@ -128,7 +134,7 @@ pub(crate) struct UnlockedAppState {
     pub(crate) rgb_send_lock: Arc<Mutex<bool>>,
     pub(crate) channel_ids_map: Arc<Mutex<ChannelIdsMap>>,
     pub(crate) proxy_endpoint: String,
-    pub(crate) lp_pubkey_xonly_hex: Option<String>,
+    pub(crate) lp_htlc_xpub: Xpub,
 }
 
 impl UnlockedAppState {
@@ -593,4 +599,78 @@ pub(crate) fn validate_and_parse_payment_preimage(
         return Err(APIError::InvalidPaymentPreimage);
     }
     Ok(preimage)
+}
+
+pub(crate) fn htlc_child_numbers_from_payment_hash(
+    payment_hash: &PaymentHash,
+) -> (ChildNumber, ChildNumber) {
+    let bytes = payment_hash.0;
+    let idx1 = u32::from_be_bytes(bytes[0..4].try_into().expect("slice length")) & 0x7fff_ffff;
+    let idx2 = u32::from_be_bytes(bytes[4..8].try_into().expect("slice length")) & 0x7fff_ffff;
+    (
+        ChildNumber::Normal { index: idx1 },
+        ChildNumber::Normal { index: idx2 },
+    )
+}
+
+pub(crate) fn htlc_base_path(network: Network) -> DerivationPath {
+    let coin = match network {
+        Network::Bitcoin => 0,
+        _ => 1,
+    };
+    format!("m/86'/{}'/0'/0", coin)
+        .parse()
+        .expect("valid BIP86 base path")
+}
+
+pub(crate) fn htlc_full_path_from_payment_hash(
+    network: Network,
+    payment_hash: &PaymentHash,
+) -> DerivationPath {
+    let base = htlc_base_path(network);
+    let (child1, child2) = htlc_child_numbers_from_payment_hash(payment_hash);
+    let mut parts = base.as_ref().to_vec();
+    parts.push(child1);
+    parts.push(child2);
+    DerivationPath::from(parts)
+}
+
+pub(crate) fn derive_lp_htlc_xpub(
+    base_xpub: &Xpub,
+    payment_hash: &PaymentHash,
+) -> Result<Xpub, APIError> {
+    let (child1, child2) = htlc_child_numbers_from_payment_hash(payment_hash);
+    let path = DerivationPath::from(vec![child1, child2]);
+    let secp = Secp256k1_30::new();
+    base_xpub
+        .derive_pub(&secp, &path)
+        .map_err(|_| APIError::InvalidHtlcParams("Failed to derive LP HTLC pubkey".into()))
+}
+
+pub(crate) fn derive_lp_htlc_xprv_from_path(
+    base_xprv: &Xpriv,
+    path_str: &str,
+    network: Network,
+) -> Result<Xpriv, APIError> {
+    let full_path: DerivationPath = path_str
+        .parse()
+        .map_err(|_| APIError::InvalidHtlcParams("Invalid LP HTLC key path".into()))?;
+    let base = htlc_base_path(network);
+    let full_parts = full_path.as_ref();
+    let base_parts = base.as_ref();
+    if full_parts.len() < base_parts.len() || full_parts[..base_parts.len()] != *base_parts {
+        return Err(APIError::InvalidHtlcParams(
+            "LP HTLC key path does not match base path".into(),
+        ));
+    }
+    let tail: Vec<ChildNumber> = full_parts[base_parts.len()..].iter().copied().collect();
+    if tail.is_empty() {
+        return Err(APIError::InvalidHtlcParams(
+            "LP HTLC key path missing child indices".into(),
+        ));
+    }
+    let secp = Secp256k1_30::new();
+    base_xprv
+        .derive_priv(&secp, &DerivationPath::from(tail))
+        .map_err(|_| APIError::InvalidHtlcParams("Failed to derive LP HTLC key".into()))
 }

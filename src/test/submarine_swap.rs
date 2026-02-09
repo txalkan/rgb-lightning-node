@@ -528,9 +528,13 @@ async fn submarine_swap_sweeper_broadcasts_mixed_claim() {
     let unlocked_guard = app_state.get_unlocked_app_state().await;
     let unlocked_state = unlocked_guard.as_ref().expect("unlocked state").clone();
     drop(unlocked_guard);
-    unlocked_state
-        .htlc_output_spender
-        .sweep_htlc_tracker_for_tests();
+    let spender = unlocked_state.htlc_output_spender.clone();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        spender.sweep_htlc_tracker_for_tests();
+        let _ = sender.send(());
+    });
+    receiver.await.expect("sweeper thread failed");
 
     let tracker_path = test_dir_node1.join(LDK_DIR);
     let tracker_file =

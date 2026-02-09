@@ -83,10 +83,10 @@ use crate::ldk::{start_ldk, stop_ldk, LdkBackgroundServices, MIN_CHANNEL_CONFIRM
 use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{
     check_already_initialized, check_channel_id, check_password_strength, check_password_validity,
-    classify_htlc_utxos_by_asset, encrypt_and_save_mnemonic, get_max_local_rgb_amount,
-    get_mnemonic_path, get_route, hex_str, hex_str_to_compressed_pubkey, hex_str_to_vec,
-    validate_and_parse_payment_hash, validate_and_parse_payment_preimage, UnlockedAppState,
-    UserOnionMessageContents,
+    classify_htlc_utxos_by_asset, derive_lp_htlc_xpub, encrypt_and_save_mnemonic,
+    get_max_local_rgb_amount, get_mnemonic_path, get_route, hex_str, hex_str_to_compressed_pubkey,
+    hex_str_to_vec, htlc_full_path_from_payment_hash, validate_and_parse_payment_hash,
+    validate_and_parse_payment_preimage, UnlockedAppState, UserOnionMessageContents,
 };
 use crate::{
     backup::{do_backup, restore_backup},
@@ -1532,7 +1532,6 @@ async fn scan_htlc_funding(
         {
             if let Ok(consignment_endpoint) = RgbTransport::from_str(&unlocked_state.proxy_endpoint)
             {
-                let mut handles = Vec::new();
                 for utxo in &confirmed_utxos {
                     if !utxo
                         .script_pubkey_hex
@@ -1544,31 +1543,29 @@ async fn scan_htlc_funding(
                     let endpoint = consignment_endpoint.clone();
                     let txid = utxo.txid.to_string();
                     let vout = utxo.vout;
-                    let txid_for_task = txid.clone();
-                    let handle = tokio::task::spawn_blocking(move || {
-                        rgb_wallet_wrapper.accept_transfer(
-                            txid_for_task,
+                    let (sender, receiver) = tokio::sync::oneshot::channel();
+                    std::thread::spawn(move || {
+                        let res = rgb_wallet_wrapper.accept_transfer(
+                            txid,
                             vout,
                             endpoint,
                             STATIC_BLINDING,
-                        )
+                        );
+                        let _ = sender.send(res);
                     });
-                    handles.push((txid, vout, handle));
-                }
-                for (txid, vout, handle) in handles {
-                    match handle.await {
+                    match receiver.await {
                         Ok(Ok(_)) => {}
                         Ok(Err(e)) => {
                             tracing::warn!(
                                 "HTLC consignment import failed for {}:{}: {e}",
-                                txid,
+                                utxo.txid,
                                 vout
                             );
                         }
                         Err(e) => {
                             tracing::warn!(
                                 "HTLC consignment import task failed for {}:{}: {e}",
-                                txid,
+                                utxo.txid,
                                 vout
                             );
                         }
@@ -4081,18 +4078,13 @@ pub(crate) async fn rgb_invoice_htlc(
         let user_pk = PublicKey::from_str(payload.user_pubkey.trim())
             .map_err(|_| APIError::InvalidHtlcParams("Invalid user compressed pubkey".into()))?;
         let (user_xonly, _) = user_pk.x_only_public_key();
-        let lp_xonly_hex =
-            unlocked_state
-                .lp_pubkey_xonly_hex
-                .as_ref()
-                .ok_or(APIError::InvalidHtlcParams(
-                    "LP Taproot key unavailable (missing lp_pubkey_xonly_hex)".into(),
-                ))?;
-        let lp_xonly = XOnlyPublicKey::from_str(lp_xonly_hex).map_err(|_| {
-            APIError::InvalidHtlcParams("Invalid lp_pubkey_xonly_hex in node state".into())
-        })?;
         let network: Network = state.static_state.network.into();
-        let secp = Secp256k1::verification_only();
+        let secp = Secp256k1::new();
+        let lp_child_xpub = derive_lp_htlc_xpub(&unlocked_state.lp_htlc_xpub, &payment_hash)?;
+        let lp_pubkey = lp_child_xpub.public_key;
+        let (lp_xonly, _) = lp_pubkey.x_only_public_key();
+        let lp_xonly_hex = lp_xonly.serialize().to_hex();
+        let lp_key_path = htlc_full_path_from_payment_hash(network, &payment_hash).to_string();
         let btc_destination_script_hex = Address::p2tr(&secp, lp_xonly, None, network)
             .script_pubkey()
             .as_bytes()
@@ -4116,7 +4108,6 @@ pub(crate) async fn rgb_invoice_htlc(
             .checked_add(payload.csv)
             .ok_or(APIError::InvalidHtlcParams("csv value too large".into()))?;
 
-        let lp_xonly_hex = lp_xonly.serialize().to_hex();
         let user_xonly_hex = user_xonly.serialize().to_hex();
 
         let taproot_info =
@@ -4221,6 +4212,7 @@ pub(crate) async fn rgb_invoice_htlc(
             preimage: None,
             lp_pubkey_xonly: lp_xonly_hex.clone(),
             user_pubkey_xonly: user_xonly_hex.clone(),
+            lp_key_path: Some(lp_key_path.clone()),
             htlc_script_pubkey: htlc_spk_hex.clone(),
             recipient_id: recipient_id.clone(),
             rgb_invoice: invoice.clone(),
