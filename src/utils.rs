@@ -663,7 +663,7 @@ pub(crate) fn derive_lp_htlc_xprv_from_path(
             "LP HTLC key path does not match base path".into(),
         ));
     }
-    let tail: Vec<ChildNumber> = full_parts[base_parts.len()..].iter().copied().collect();
+    let tail: Vec<ChildNumber> = full_parts[base_parts.len()..].to_vec();
     if tail.is_empty() {
         return Err(APIError::InvalidHtlcParams(
             "LP HTLC key path missing child indices".into(),

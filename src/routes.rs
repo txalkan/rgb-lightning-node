@@ -1620,7 +1620,7 @@ async fn scan_htlc_funding(
             utxo.txid,
             utxo.vout,
             utxo.value_sat,
-            class.utxo_kind.clone(),
+            class.utxo_kind,
             descriptor_asset_id,
             class.assignment.clone(),
         ));

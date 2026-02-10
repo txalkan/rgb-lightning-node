@@ -971,7 +971,7 @@ impl RgbOutputSpender {
 
                     let total_sat_colored: u64 = colored_descs.iter().map(|d| d.value_sat).sum();
                     let total_sat_vanilla: u64 = vanilla_descs.iter().map(|d| d.value_sat).sum();
-                    let fee_sat = (FEE_RATE as u64)
+                    let fee_sat = FEE_RATE
                         .saturating_mul(200)
                         .saturating_mul(input_descs.len() as u64);
 
@@ -1012,7 +1012,7 @@ impl RgbOutputSpender {
                         });
                         rgb_output_index = Some(1);
                     } else if has_vanilla {
-                        if total_sat_vanilla <= fee_sat + min_out as u64 {
+                        if total_sat_vanilla <= fee_sat + min_out {
                             tracing::warn!("HTLC sweep skipped: output value too small");
                             return;
                         }
@@ -1024,7 +1024,7 @@ impl RgbOutputSpender {
                                 .expect("btc destination script present"),
                         });
                     } else {
-                        if total_sat_colored <= fee_sat + min_out as u64 {
+                        if total_sat_colored <= fee_sat + min_out {
                             tracing::warn!("HTLC sweep skipped: output value too small");
                             return;
                         }
@@ -3182,7 +3182,7 @@ pub(crate) async fn start_ldk(
         fs_store: fs_store.clone(),
         txes,
         proxy_endpoint: proxy_endpoint.to_string(),
-        lp_htlc_xprv: lp_htlc_xprv.clone(),
+        lp_htlc_xprv,
         bitcoind_client: bitcoind_client.clone(),
     });
     let (sweeper_best_block, output_sweeper) = match fs_store.read(

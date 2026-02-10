@@ -354,7 +354,7 @@ impl BitcoindClient {
             .bitcoind_rpc_client
             .call_method::<serde_json::Value>("gettxout", &params)
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         if res.is_null() {
             return Ok(None);
         }
@@ -371,7 +371,7 @@ impl BitcoindClient {
             .bitcoind_rpc_client
             .call_method::<ScanTxOutSetResponse>("scantxoutset", &params)
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         let mut utxos = Vec::new();
         for unspent in res.unspents {
