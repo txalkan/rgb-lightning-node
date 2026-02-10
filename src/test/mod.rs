@@ -1868,6 +1868,24 @@ async fn wait_for_usable_channels(node_address: SocketAddr, expected_num_usable_
     }
 }
 
+async fn wait_for_channels(node_address: SocketAddr, expected_num_channels: usize) {
+    let t_0 = OffsetDateTime::now_utc();
+    loop {
+        let channels = list_channels(node_address).await;
+        let num_channels = channels.len();
+        if num_channels == expected_num_channels {
+            break;
+        }
+        if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 15.0 {
+            panic!(
+                "num of channels ({num_channels}) is not becoming the expected one \
+                ({expected_num_channels})"
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
 async fn wait_for_ln_payment(
     node_address: SocketAddr,
     payment_hash: &str,
