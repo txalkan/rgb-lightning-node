@@ -1576,42 +1576,108 @@ async fn scan_htlc_funding(
         {
             if let Ok(consignment_endpoint) = RgbTransport::from_str(&unlocked_state.proxy_endpoint)
             {
-                for utxo in &confirmed_utxos {
-                    if !utxo
-                        .script_pubkey_hex
-                        .eq_ignore_ascii_case(&computed_spk_hex)
-                    {
-                        continue;
-                    }
+                let htlc_outpoints: Vec<(String, u32)> = confirmed_utxos
+                    .iter()
+                    .filter(|utxo| {
+                        utxo.script_pubkey_hex
+                            .eq_ignore_ascii_case(&computed_spk_hex)
+                    })
+                    .map(|utxo| (utxo.txid.to_string(), utxo.vout))
+                    .collect();
+                let mut imported_any = false;
+
+                for (txid, vout) in &htlc_outpoints {
                     let rgb_wallet_wrapper = unlocked_state.rgb_wallet_wrapper.clone();
                     let endpoint = consignment_endpoint.clone();
-                    let txid = utxo.txid.to_string();
-                    let vout = utxo.vout;
-                    let (sender, receiver) = tokio::sync::oneshot::channel();
-                    std::thread::spawn(move || {
-                        let res = rgb_wallet_wrapper.accept_transfer(
-                            txid,
-                            vout,
-                            endpoint,
-                            STATIC_BLINDING,
-                        );
-                        let _ = sender.send(res);
-                    });
-                    match receiver.await {
-                        Ok(Ok(_)) => {}
+                    let txid = txid.clone();
+                    let txid_for_log = txid.clone();
+                    let vout = *vout;
+                    match tokio::task::spawn_blocking(move || {
+                        rgb_wallet_wrapper.accept_transfer(txid, vout, endpoint, STATIC_BLINDING)
+                    })
+                    .await
+                    {
+                        Ok(Ok(_)) => {
+                            imported_any = true;
+                        }
                         Ok(Err(e)) => {
                             tracing::warn!(
                                 "HTLC consignment import failed for {}:{}: {e}",
-                                utxo.txid,
+                                txid_for_log,
                                 vout
                             );
                         }
                         Err(e) => {
                             tracing::warn!(
                                 "HTLC consignment import task failed for {}:{}: {e}",
-                                utxo.txid,
+                                txid_for_log,
                                 vout
                             );
+                        }
+                    }
+                }
+
+                if !imported_any {
+                    let recipient_id = entry.recipient_id.trim();
+                    if htlc_outpoints.is_empty() {
+                        tracing::warn!(
+                            "HTLC consignment import skipped: no HTLC UTXOs matched expected script"
+                        );
+                    } else if recipient_id.is_empty() {
+                        tracing::warn!("HTLC consignment import skipped: missing recipient_id");
+                    } else {
+                        let rgb_wallet_wrapper = unlocked_state.rgb_wallet_wrapper.clone();
+                        let endpoint = consignment_endpoint.clone();
+                        let recipient_id = recipient_id.to_string();
+                        let htlc_outpoints = htlc_outpoints.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            rgb_wallet_wrapper
+                                .fetch_consignment_by_recipient_id(recipient_id, endpoint)
+                                .and_then(|(consignment, txid, vout)| {
+                                    let matches_htlc =
+                                        htlc_outpoints.iter().any(|(u_txid, u_vout)| {
+                                            u_txid.eq_ignore_ascii_case(&txid) && *u_vout == vout
+                                        });
+                                    if !matches_htlc {
+                                        return Ok(Some((false, txid, vout)));
+                                    }
+                                    rgb_wallet_wrapper
+                                        .accept_transfer_from_consignment(
+                                            consignment,
+                                            txid.clone(),
+                                            vout,
+                                            STATIC_BLINDING,
+                                        )
+                                        .map(|_| Some((true, txid, vout)))
+                                })
+                        })
+                        .await
+                        {
+                            Ok(Ok(Some((true, txid, vout)))) => {
+                                tracing::info!(
+                                    "HTLC consignment import succeeded via recipient_id for {}:{}",
+                                    txid,
+                                    vout
+                                );
+                            }
+                            Ok(Ok(Some((false, txid, vout)))) => {
+                                tracing::warn!(
+                                    "HTLC consignment import skipped: proxy returned {}:{} not owned by HTLC script",
+                                    txid,
+                                    vout
+                                );
+                            }
+                            Ok(Ok(None)) => {}
+                            Ok(Err(e)) => {
+                                tracing::warn!(
+                                    "HTLC consignment import failed via recipient_id: {e}"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "HTLC consignment import task failed via recipient_id: {e}"
+                                );
+                            }
                         }
                     }
                 }
