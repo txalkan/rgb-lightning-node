@@ -856,16 +856,32 @@ async fn settling_while_settling_fails() {
         "claimable entry should be marked settling",
     );
 
-    // Prefer the settling-in-progress error; accept already-settled if the race completes first.
-    invoice_settle_expect_error(
-        node2_addr,
-        payment_hash_hex.clone(),
-        preimage_hex,
-        StatusCode::FORBIDDEN,
-        "Invoice settlement is in progress",
-        "InvoiceSettlingInProgress",
-    )
-    .await;
+    // Prefer the settling-in-progress error; accept already-settled (200 OK) if the race completes first.
+    let payload = InvoiceSettleRequest {
+        payment_hash: payment_hash_hex.clone(),
+        payment_preimage: preimage_hex,
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node2_addr}/settlehodlinvoice"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    if res.status() == StatusCode::FORBIDDEN {
+        check_response_is_nok(
+            res,
+            StatusCode::FORBIDDEN,
+            "Invoice settlement is in progress",
+            "InvoiceSettlingInProgress",
+        )
+        .await;
+    } else if res.status() == StatusCode::OK {
+        let _ = _check_response_is_ok(res).await;
+    } else {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        panic!("expected 403 settling-in-progress or 200 already settled, got {status}: {body}");
+    }
 
     let payee_payment =
         wait_for_ln_payment(node2_addr, &decoded.payment_hash, HTLCStatus::Succeeded).await;
