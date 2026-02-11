@@ -1301,7 +1301,7 @@ pub(crate) enum HtlcUtxoKind {
 }
 
 impl HtlcUtxoKind {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             HtlcUtxoKind::Vanilla => "Vanilla",
             HtlcUtxoKind::Colored => "Colored",
@@ -1318,14 +1318,28 @@ impl HtlcUtxoKind {
 }
 
 impl HtlcSpendableOutputDescriptor {
-    #[cfg(test)]
     pub(crate) fn utxo_kind(&self) -> HtlcUtxoKind {
         self.utxo_kind
     }
 
-    #[cfg(test)]
     pub(crate) fn assignment(&self) -> Option<RlnAssignment> {
         self.assignment.clone()
+    }
+
+    pub(crate) fn txid(&self) -> bitcoin::Txid {
+        self.txid
+    }
+
+    pub(crate) fn vout(&self) -> u32 {
+        self.vout
+    }
+
+    pub(crate) fn value_sat(&self) -> u64 {
+        self.value_sat
+    }
+
+    pub(crate) fn asset_id(&self) -> Option<String> {
+        self.asset_id.clone()
     }
 
     pub(crate) fn new(

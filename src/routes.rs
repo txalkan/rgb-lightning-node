@@ -1026,6 +1026,50 @@ pub(crate) struct HtlcScanRequest {
     pub(crate) payment_hash: String,
 }
 
+#[derive(Deserialize, Serialize)]
+pub(crate) struct HtlcTrackerRequest {
+    pub(crate) payment_hash: String,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct HtlcFundingDescriptorInfo {
+    pub(crate) txid: String,
+    pub(crate) vout: u32,
+    pub(crate) value_sat: u64,
+    pub(crate) utxo_kind: String,
+    pub(crate) asset_id: Option<String>,
+    pub(crate) assignment: Option<Assignment>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct HtlcTrackerEntryInfo {
+    pub(crate) payment_hash: String,
+    pub(crate) preimage: Option<String>,
+    pub(crate) lp_pubkey_xonly: String,
+    pub(crate) user_pubkey_xonly: String,
+    pub(crate) lp_key_path: Option<String>,
+    pub(crate) htlc_script_pubkey: String,
+    pub(crate) recipient_id: String,
+    pub(crate) rgb_invoice: String,
+    pub(crate) claim_tapscript_hex: Option<String>,
+    pub(crate) refund_tapscript_hex: Option<String>,
+    pub(crate) tapleaf_version: Option<u8>,
+    pub(crate) control_block_hex: Option<String>,
+    pub(crate) t_lock: u32,
+    pub(crate) min_confirmations: u32,
+    pub(crate) funding: Vec<HtlcFundingDescriptorInfo>,
+    pub(crate) status: String,
+    pub(crate) asset_id: Option<String>,
+    pub(crate) assignment: Option<Assignment>,
+    pub(crate) btc_destination_script_hex: Option<String>,
+    pub(crate) rgb_destination_script_hex: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct HtlcTrackerResponse {
+    pub(crate) entry: Option<HtlcTrackerEntryInfo>,
+}
+
 struct HtlcTaprootInfo {
     script_pubkey: ScriptBuf,
     claim_script: ScriptBuf,
@@ -2397,6 +2441,55 @@ pub(crate) async fn htlc_scan(
         Ok(Json(EmptyResponse {}))
     })
     .await
+}
+
+pub(crate) async fn htlc_tracker(
+    State(state): State<Arc<AppState>>,
+    WithRejection(Json(payload), _): WithRejection<Json<HtlcTrackerRequest>, APIError>,
+) -> Result<Json<HtlcTrackerResponse>, APIError> {
+    let _guard = state.check_unlocked().await?;
+    let payment_hash = validate_and_parse_payment_hash(payload.payment_hash.trim())?;
+    let payment_hash_hex = hex_str(&payment_hash.0);
+
+    let tracker = disk::read_htlc_tracker(&state.static_state.ldk_data_dir);
+    let entry = tracker.entries.get(&payment_hash).map(|entry| {
+        let funding = entry
+            .funding
+            .iter()
+            .map(|desc| HtlcFundingDescriptorInfo {
+                txid: desc.txid().to_string(),
+                vout: desc.vout(),
+                value_sat: desc.value_sat(),
+                utxo_kind: desc.utxo_kind().as_str().to_string(),
+                asset_id: desc.asset_id(),
+                assignment: desc.assignment(),
+            })
+            .collect();
+        HtlcTrackerEntryInfo {
+            payment_hash: payment_hash_hex.clone(),
+            preimage: entry.preimage.clone(),
+            lp_pubkey_xonly: entry.lp_pubkey_xonly.clone(),
+            user_pubkey_xonly: entry.user_pubkey_xonly.clone(),
+            lp_key_path: entry.lp_key_path.clone(),
+            htlc_script_pubkey: entry.htlc_script_pubkey.clone(),
+            recipient_id: entry.recipient_id.clone(),
+            rgb_invoice: entry.rgb_invoice.clone(),
+            claim_tapscript_hex: entry.claim_tapscript_hex.clone(),
+            refund_tapscript_hex: entry.refund_tapscript_hex.clone(),
+            tapleaf_version: entry.tapleaf_version,
+            control_block_hex: entry.control_block_hex.clone(),
+            t_lock: entry.t_lock,
+            min_confirmations: entry.min_confirmations,
+            funding,
+            status: entry.status.clone(),
+            asset_id: entry.asset_id.clone(),
+            assignment: entry.assignment.clone(),
+            btc_destination_script_hex: entry.btc_destination_script_hex.clone(),
+            rgb_destination_script_hex: entry.rgb_destination_script_hex.clone(),
+        }
+    });
+
+    Ok(Json(HtlcTrackerResponse { entry }))
 }
 
 pub(crate) async fn init(

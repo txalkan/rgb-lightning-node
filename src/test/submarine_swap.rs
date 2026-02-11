@@ -48,10 +48,10 @@ async fn rgb_invoice_htlc_with_random_user(
 #[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[traced_test]
-async fn htlc_claim_updates_tracker_for_mixed_utxos() {
+async fn htlc_claim_is_idempotent_with_same_preimage() {
     initialize();
 
-    let test_dir_base = format!("{TEST_DIR_BASE}htlc_claim_mixed/");
+    let test_dir_base = format!("{TEST_DIR_BASE}htlc_claim_idempotent/");
     let (node1_addr, test_dir_node1) =
         setup_single_node(&test_dir_base, "node1", NODE1_PEER_PORT).await;
     let test_dir_node1 = Path::new(&test_dir_node1);
@@ -85,22 +85,13 @@ async fn htlc_claim_updates_tracker_for_mixed_utxos() {
     fund_htlc_address(response.htlc_p2tr_script_pubkey.as_str());
 
     htlc_claim(node1_addr, payment_hash_hex.clone(), preimage_hex.clone()).await;
+    htlc_claim(node1_addr, payment_hash_hex.clone(), preimage_hex.clone()).await;
 
     let tracker_path = test_dir_node1.join(LDK_DIR);
-    assert!(
-        tracker_path.join("htlc_tracker.json").exists(),
-        "htlc tracker file missing at {}",
-        tracker_path.display()
-    );
     let tracker_file =
         std::fs::File::open(tracker_path.join("htlc_tracker.json")).expect("open htlc tracker");
     let tracker = HtlcTrackerStorage::read(&mut std::io::BufReader::new(tracker_file))
         .expect("decode htlc tracker");
-    assert!(
-        !tracker.entries.is_empty(),
-        "htlc tracker empty at {}",
-        tracker_path.display()
-    );
     let entry = tracker
         .entries
         .iter()
@@ -108,137 +99,6 @@ async fn htlc_claim_updates_tracker_for_mixed_utxos() {
         .map(|(_, v)| v)
         .expect("htlc tracker entry");
     assert_eq!(entry.status, "ClaimRequested");
-    assert!(entry.funding.len() == 2);
-    assert!(entry
-        .funding
-        .iter()
-        .any(|d| d.utxo_kind() == HtlcUtxoKind::Vanilla));
-    assert!(entry
-        .funding
-        .iter()
-        .any(|d| d.utxo_kind() == HtlcUtxoKind::Colored));
-    assert!(entry
-        .funding
-        .iter()
-        .any(|d| d.assignment() == Some(Assignment::Fungible(1))));
-}
-
-#[serial_test::serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-#[traced_test]
-async fn htlc_scan_updates_tracker_for_mixed_utxos() {
-    initialize();
-
-    let test_dir_base = format!("{TEST_DIR_BASE}htlc_scan/");
-    let (node1_addr, test_dir_node1) =
-        setup_single_node(&test_dir_base, "node1", NODE1_PEER_PORT).await;
-    let test_dir_node1 = Path::new(&test_dir_node1);
-
-    let asset_id = issue_asset_nia(node1_addr).await.asset_id;
-    let (_preimage_hex, payment_hash_hex) = random_preimage_and_hash();
-    let response = rgb_invoice_htlc_with_random_user(
-        node1_addr,
-        Some(asset_id.clone()),
-        Some(Assignment::Fungible(1)),
-        Some(3600),
-        payment_hash_hex.clone(),
-        210,
-    )
-    .await;
-
-    fund_htlc_address(response.htlc_p2tr_script_pubkey.as_str());
-
-    send_asset(
-        node1_addr,
-        &asset_id,
-        Assignment::Fungible(1),
-        response.recipient_id.clone(),
-        Some(WitnessData {
-            amount_sat: 1000,
-            blinding: None,
-        }),
-    )
-    .await;
-    mine(false);
-    refresh_transfers(node1_addr).await;
-
-    htlc_scan(node1_addr, payment_hash_hex.clone()).await;
-
-    let tracker_path = test_dir_node1.join(LDK_DIR);
-    let tracker_file =
-        std::fs::File::open(tracker_path.join("htlc_tracker.json")).expect("open htlc tracker");
-    let tracker = HtlcTrackerStorage::read(&mut std::io::BufReader::new(tracker_file))
-        .expect("decode htlc tracker");
-    let entry = tracker
-        .entries
-        .iter()
-        .find(|(k, _)| hex_str(&k.0).eq_ignore_ascii_case(&payment_hash_hex))
-        .map(|(_, v)| v)
-        .expect("htlc tracker entry");
-
-    assert_eq!(entry.status, "FundingDetected");
-    let vanilla_count = entry
-        .funding
-        .iter()
-        .filter(|d| d.utxo_kind() == HtlcUtxoKind::Vanilla)
-        .count();
-    let colored_count = entry
-        .funding
-        .iter()
-        .filter(|d| d.utxo_kind() == HtlcUtxoKind::Colored)
-        .count();
-    assert_eq!(vanilla_count, 1);
-    assert_eq!(colored_count, 1);
-}
-
-#[serial_test::serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-#[traced_test]
-async fn htlc_scan_marks_underfunded() {
-    initialize();
-
-    let test_dir_base = format!("{TEST_DIR_BASE}htlc_scan_underfunded/");
-    let (node1_addr, test_dir_node1) =
-        setup_single_node(&test_dir_base, "node1", NODE1_PEER_PORT).await;
-    let test_dir_node1 = Path::new(&test_dir_node1);
-
-    let asset_id = issue_asset_nia(node1_addr).await.asset_id;
-    let (_preimage_hex, payment_hash_hex) = random_preimage_and_hash();
-    let response = rgb_invoice_htlc_with_random_user(
-        node1_addr,
-        Some(asset_id.clone()),
-        Some(Assignment::Fungible(2)),
-        Some(3600),
-        payment_hash_hex.clone(),
-        210,
-    )
-    .await;
-
-    fund_htlc_address(response.htlc_p2tr_script_pubkey.as_str());
-
-    htlc_scan(node1_addr, payment_hash_hex.clone()).await;
-
-    let tracker_path = test_dir_node1.join(LDK_DIR);
-    let tracker_file =
-        std::fs::File::open(tracker_path.join("htlc_tracker.json")).expect("open htlc tracker");
-    let tracker = HtlcTrackerStorage::read(&mut std::io::BufReader::new(tracker_file))
-        .expect("decode htlc tracker");
-    let entry = tracker
-        .entries
-        .iter()
-        .find(|(k, _)| hex_str(&k.0).eq_ignore_ascii_case(&payment_hash_hex))
-        .map(|(_, v)| v)
-        .expect("htlc tracker entry");
-
-    assert_eq!(entry.status, "Underfunded");
-    assert!(entry
-        .funding
-        .iter()
-        .any(|d| d.utxo_kind() == HtlcUtxoKind::Vanilla));
-    assert!(!entry
-        .funding
-        .iter()
-        .any(|d| d.utxo_kind() == HtlcUtxoKind::Colored));
 }
 
 #[serial_test::serial]
@@ -319,10 +179,10 @@ async fn htlc_claim_sets_dest_scripts_for_vanilla_and_colored() {
 #[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[traced_test]
-async fn htlc_claim_is_idempotent_with_same_preimage() {
+async fn htlc_claim_updates_tracker_for_mixed_utxos() {
     initialize();
 
-    let test_dir_base = format!("{TEST_DIR_BASE}htlc_claim_idempotent/");
+    let test_dir_base = format!("{TEST_DIR_BASE}htlc_claim_mixed/");
     let (node1_addr, test_dir_node1) =
         setup_single_node(&test_dir_base, "node1", NODE1_PEER_PORT).await;
     let test_dir_node1 = Path::new(&test_dir_node1);
@@ -356,7 +216,70 @@ async fn htlc_claim_is_idempotent_with_same_preimage() {
     fund_htlc_address(response.htlc_p2tr_script_pubkey.as_str());
 
     htlc_claim(node1_addr, payment_hash_hex.clone(), preimage_hex.clone()).await;
-    htlc_claim(node1_addr, payment_hash_hex.clone(), preimage_hex.clone()).await;
+
+    let tracker_path = test_dir_node1.join(LDK_DIR);
+    assert!(
+        tracker_path.join("htlc_tracker.json").exists(),
+        "htlc tracker file missing at {}",
+        tracker_path.display()
+    );
+    let tracker_file =
+        std::fs::File::open(tracker_path.join("htlc_tracker.json")).expect("open htlc tracker");
+    let tracker = HtlcTrackerStorage::read(&mut std::io::BufReader::new(tracker_file))
+        .expect("decode htlc tracker");
+    assert!(
+        !tracker.entries.is_empty(),
+        "htlc tracker empty at {}",
+        tracker_path.display()
+    );
+    let entry = tracker
+        .entries
+        .iter()
+        .find(|(k, _)| hex_str(&k.0).eq_ignore_ascii_case(&payment_hash_hex))
+        .map(|(_, v)| v)
+        .expect("htlc tracker entry");
+    assert_eq!(entry.status, "ClaimRequested");
+    assert!(entry.funding.len() == 2);
+    assert!(entry
+        .funding
+        .iter()
+        .any(|d| d.utxo_kind() == HtlcUtxoKind::Vanilla));
+    assert!(entry
+        .funding
+        .iter()
+        .any(|d| d.utxo_kind() == HtlcUtxoKind::Colored));
+    assert!(entry
+        .funding
+        .iter()
+        .any(|d| d.assignment() == Some(Assignment::Fungible(1))));
+}
+
+#[serial_test::serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[traced_test]
+async fn htlc_scan_marks_underfunded() {
+    initialize();
+
+    let test_dir_base = format!("{TEST_DIR_BASE}htlc_scan_underfunded/");
+    let (node1_addr, test_dir_node1) =
+        setup_single_node(&test_dir_base, "node1", NODE1_PEER_PORT).await;
+    let test_dir_node1 = Path::new(&test_dir_node1);
+
+    let asset_id = issue_asset_nia(node1_addr).await.asset_id;
+    let (_preimage_hex, payment_hash_hex) = random_preimage_and_hash();
+    let response = rgb_invoice_htlc_with_random_user(
+        node1_addr,
+        Some(asset_id.clone()),
+        Some(Assignment::Fungible(2)),
+        Some(3600),
+        payment_hash_hex.clone(),
+        210,
+    )
+    .await;
+
+    fund_htlc_address(response.htlc_p2tr_script_pubkey.as_str());
+
+    htlc_scan(node1_addr, payment_hash_hex.clone()).await;
 
     let tracker_path = test_dir_node1.join(LDK_DIR);
     let tracker_file =
@@ -369,7 +292,144 @@ async fn htlc_claim_is_idempotent_with_same_preimage() {
         .find(|(k, _)| hex_str(&k.0).eq_ignore_ascii_case(&payment_hash_hex))
         .map(|(_, v)| v)
         .expect("htlc tracker entry");
-    assert_eq!(entry.status, "ClaimRequested");
+
+    assert_eq!(entry.status, "Underfunded");
+    assert!(entry
+        .funding
+        .iter()
+        .any(|d| d.utxo_kind() == HtlcUtxoKind::Vanilla));
+    assert!(!entry
+        .funding
+        .iter()
+        .any(|d| d.utxo_kind() == HtlcUtxoKind::Colored));
+}
+
+#[serial_test::serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[traced_test]
+async fn htlc_scan_updates_tracker_for_mixed_utxos() {
+    initialize();
+
+    let test_dir_base = format!("{TEST_DIR_BASE}htlc_scan/");
+    let (node1_addr, test_dir_node1) =
+        setup_single_node(&test_dir_base, "node1", NODE1_PEER_PORT).await;
+    let test_dir_node1 = Path::new(&test_dir_node1);
+
+    let asset_id = issue_asset_nia(node1_addr).await.asset_id;
+    let (_preimage_hex, payment_hash_hex) = random_preimage_and_hash();
+    let response = rgb_invoice_htlc_with_random_user(
+        node1_addr,
+        Some(asset_id.clone()),
+        Some(Assignment::Fungible(1)),
+        Some(3600),
+        payment_hash_hex.clone(),
+        210,
+    )
+    .await;
+
+    fund_htlc_address(response.htlc_p2tr_script_pubkey.as_str());
+
+    send_asset(
+        node1_addr,
+        &asset_id,
+        Assignment::Fungible(1),
+        response.recipient_id.clone(),
+        Some(WitnessData {
+            amount_sat: 1000,
+            blinding: None,
+        }),
+    )
+    .await;
+    mine(false);
+    refresh_transfers(node1_addr).await;
+
+    htlc_scan(node1_addr, payment_hash_hex.clone()).await;
+
+    let tracker_path = test_dir_node1.join(LDK_DIR);
+    let tracker_file =
+        std::fs::File::open(tracker_path.join("htlc_tracker.json")).expect("open htlc tracker");
+    let tracker = HtlcTrackerStorage::read(&mut std::io::BufReader::new(tracker_file))
+        .expect("decode htlc tracker");
+    let entry = tracker
+        .entries
+        .iter()
+        .find(|(k, _)| hex_str(&k.0).eq_ignore_ascii_case(&payment_hash_hex))
+        .map(|(_, v)| v)
+        .expect("htlc tracker entry");
+
+    assert_eq!(entry.status, "FundingDetected");
+    let vanilla_count = entry
+        .funding
+        .iter()
+        .filter(|d| d.utxo_kind() == HtlcUtxoKind::Vanilla)
+        .count();
+    let colored_count = entry
+        .funding
+        .iter()
+        .filter(|d| d.utxo_kind() == HtlcUtxoKind::Colored)
+        .count();
+    assert_eq!(vanilla_count, 1);
+    assert_eq!(colored_count, 1);
+}
+
+#[serial_test::serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[traced_test]
+async fn htlc_tracker_endpoint_returns_entry() {
+    initialize();
+
+    let test_dir_base = format!("{TEST_DIR_BASE}htlc_tracker_endpoint/");
+    let (node1_addr, _test_dir_node1) =
+        setup_single_node(&test_dir_base, "node1", NODE1_PEER_PORT).await;
+
+    let asset_id = issue_asset_nia(node1_addr).await.asset_id;
+    let (_preimage_hex, payment_hash_hex) = random_preimage_and_hash();
+    let response = rgb_invoice_htlc_with_random_user(
+        node1_addr,
+        Some(asset_id.clone()),
+        Some(Assignment::Fungible(1)),
+        Some(3600),
+        payment_hash_hex.clone(),
+        210,
+    )
+    .await;
+
+    fund_htlc_address(response.htlc_p2tr_script_pubkey.as_str());
+
+    send_asset(
+        node1_addr,
+        &asset_id,
+        Assignment::Fungible(1),
+        response.recipient_id.clone(),
+        Some(WitnessData {
+            amount_sat: 1000,
+            blinding: Some(STATIC_BLINDING),
+        }),
+    )
+    .await;
+    mine(false);
+    refresh_transfers(node1_addr).await;
+
+    htlc_scan(node1_addr, payment_hash_hex.clone()).await;
+
+    let tracker = htlc_tracker(node1_addr, payment_hash_hex.clone()).await;
+    let entry = tracker.entry.expect("htlc tracker entry");
+
+    assert!(entry.payment_hash.eq_ignore_ascii_case(&payment_hash_hex));
+    assert_eq!(entry.htlc_script_pubkey, response.htlc_p2tr_script_pubkey);
+    assert_eq!(entry.status, "FundingDetected");
+    let vanilla_count = entry
+        .funding
+        .iter()
+        .filter(|d| d.utxo_kind == "Vanilla")
+        .count();
+    let colored_count = entry
+        .funding
+        .iter()
+        .filter(|d| d.utxo_kind == "Colored")
+        .count();
+    assert_eq!(vanilla_count, 1);
+    assert_eq!(colored_count, 1);
 }
 
 #[serial_test::serial]
