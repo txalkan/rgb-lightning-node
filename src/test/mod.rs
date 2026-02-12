@@ -486,12 +486,12 @@ async fn create_utxos(node_address: SocketAddr, up_to: bool, num: Option<u8>, si
         "creating{}{} UTXOs{} for node {node_address}",
         if up_to { " up to" } else { "" },
         if let Some(num) = num {
-            format!(" {}", num)
+            format!(" {num}")
         } else {
             s!("")
         },
         if let Some(size) = size {
-            format!(" of size {}", size)
+            format!(" of size {size}")
         } else {
             s!("")
         },
@@ -1331,16 +1331,12 @@ async fn open_channel_with_retry(
             Ok(channel) => return channel,
             Err(status) if status == reqwest::StatusCode::FORBIDDEN && attempt < max_retries => {
                 println!(
-                    "Channel opening in progress (attempt {}/{}), retrying in 5s...",
-                    attempt, max_retries
+                    "Channel opening in progress (attempt {attempt}/{max_retries}), retrying in 5s..."
                 );
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             }
             Err(status) => {
-                panic!(
-                    "Failed to open channel after {} attempts with status: {}",
-                    attempt, status
-                );
+                panic!("Failed to open channel after {attempt} attempts with status: {status}");
             }
         }
     }

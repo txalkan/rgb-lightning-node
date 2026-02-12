@@ -365,7 +365,7 @@ impl BitcoindClient {
         &self,
         address: &str,
     ) -> std::io::Result<Vec<ScannedUtxo>> {
-        let descriptor = format!("addr({})", address);
+        let descriptor = format!("addr({address})");
         let params = [serde_json::json!("start"), serde_json::json!([descriptor])];
         let res = self
             .bitcoind_rpc_client

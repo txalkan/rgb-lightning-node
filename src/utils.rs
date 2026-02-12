@@ -618,7 +618,7 @@ pub(crate) fn htlc_base_path(network: Network) -> DerivationPath {
         Network::Bitcoin => 0,
         _ => 1,
     };
-    format!("m/86'/{}'/0'/0", coin)
+    format!("m/86'/{coin}'/0'/0")
         .parse()
         .expect("valid BIP86 base path")
 }

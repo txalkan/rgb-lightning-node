@@ -1192,7 +1192,7 @@ impl RgbOutputSpender {
                             let consignment_path = self
                                 .static_state
                                 .ldk_data_dir
-                                .join(format!("consignment_{}", claim_txid));
+                                .join(format!("consignment_{claim_txid}"));
                             if consignment.save_file(&consignment_path).is_err() {
                                 tracing::warn!(
                                     "HTLC sweep skipped: failed to save consignment for {}",
@@ -3176,7 +3176,7 @@ pub(crate) async fn start_ldk(
         Network::Bitcoin => 0,
         _ => 1,
     };
-    let path: DerivationPath = format!("m/86'/{}'/0'/0", coin)
+    let path: DerivationPath = format!("m/86'/{coin}'/0'/0")
         .parse()
         .map_err(|_| APIError::FailedBitcoindConnection("Invalid BIP86 derivation path".into()))?;
     let secp_xpriv = Secp256k1_30::new();

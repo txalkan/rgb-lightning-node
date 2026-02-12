@@ -1448,11 +1448,11 @@ fn build_htlc_taproot_info(
 
     let spend_info = TaprootBuilder::new()
         .add_leaf(1, claim_script.clone())
-        .map_err(|e| APIError::InvalidHtlcParams(format!("taproot builder error: {:?}", e)))?
+        .map_err(|e| APIError::InvalidHtlcParams(format!("taproot builder error: {e:?}")))?
         .add_leaf(1, refund_script.clone())
-        .map_err(|e| APIError::InvalidHtlcParams(format!("taproot builder error: {:?}", e)))?
+        .map_err(|e| APIError::InvalidHtlcParams(format!("taproot builder error: {e:?}")))?
         .finalize(&secp, internal_key)
-        .map_err(|e| APIError::InvalidHtlcParams(format!("taproot finalize error: {:?}", e)))?;
+        .map_err(|e| APIError::InvalidHtlcParams(format!("taproot finalize error: {e:?}")))?;
 
     let tapleaf_version = LeafVersion::TapScript;
     let control_block = spend_info
@@ -4285,8 +4285,7 @@ pub(crate) async fn rgb_invoice_htlc(
         );
         let beneficiary = XChainNet::<Beneficiary>::from_str(&recipient_id).map_err(|_| {
             APIError::InvalidRecipientData(format!(
-                "Failed to parse recipient_id from P2TR script: invalid recipient_id format '{}'",
-                recipient_id
+                "Failed to parse recipient_id from P2TR script: invalid recipient_id format '{recipient_id}'"
             ))
         })?;
 
@@ -4363,8 +4362,7 @@ pub(crate) async fn rgb_invoice_htlc(
         let mut tracker = disk::read_htlc_tracker(&state.static_state.ldk_data_dir);
         if tracker.entries.contains_key(&payment_hash) {
             return Err(APIError::InvalidHtlcParams(format!(
-                "HTLC tracker entry already exists for payment hash {}",
-                payment_hash_hex
+                "HTLC tracker entry already exists for payment hash {payment_hash_hex}"
             )));
         }
         let mut entry = HtlcTrackerEntry {
