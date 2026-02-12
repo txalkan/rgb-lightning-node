@@ -361,6 +361,22 @@ impl BitcoindClient {
         Ok(res["confirmations"].as_u64())
     }
 
+    pub(crate) fn get_txout_confirmations_blocking(
+        &self,
+        txid: &bitcoin::Txid,
+        vout: u32,
+    ) -> std::io::Result<Option<u64>> {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::block_in_place(|| {
+                self.handle
+                    .block_on(self.get_txout_confirmations(txid, vout))
+            })
+        } else {
+            self.handle
+                .block_on(self.get_txout_confirmations(txid, vout))
+        }
+    }
+
     pub(crate) async fn scan_utxos_for_address(
         &self,
         address: &str,

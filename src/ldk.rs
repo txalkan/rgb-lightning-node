@@ -744,9 +744,12 @@ impl RgbOutputSpender {
         let mut tracker = disk::read_htlc_tracker(&self.static_state.ldk_data_dir);
         let mut updated = false;
         let mut broadcast_txs: Vec<Transaction> = Vec::new();
-        let mut pending_accepts: Vec<(String, u32)> = Vec::new();
 
         for (payment_hash, entry) in tracker.entries.iter_mut() {
+            if entry.status == "SweepBroadcast" {
+                self.try_accept_sweep(entry);
+                continue;
+            }
             if entry.status != "ClaimRequested" {
                 continue;
             }
@@ -1215,7 +1218,6 @@ impl RgbOutputSpender {
                             }
                             let _ = fs::remove_file(&consignment_path);
                         }
-                        pending_accepts.push((claim_txid.clone(), rgb_vout));
                     }
 
                     broadcast_txs.push(tx);
@@ -1240,34 +1242,13 @@ impl RgbOutputSpender {
             if entry_broadcast {
                 entry.status = "SweepBroadcast".to_string();
                 updated = true;
+                self.try_accept_sweep(entry);
             }
         }
 
         if !broadcast_txs.is_empty() {
             let tx_refs: Vec<&Transaction> = broadcast_txs.iter().collect();
             self.bitcoind_client.broadcast_transactions(&tx_refs);
-        }
-
-        #[cfg(any(feature = "electrum", feature = "esplora"))]
-        if !pending_accepts.is_empty() {
-            if let Ok(consignment_endpoint) = RgbTransport::from_str(&self.proxy_endpoint) {
-                for (txid, vout) in pending_accepts {
-                    if let Err(e) = self.rgb_wallet_wrapper.accept_transfer(
-                        txid.clone(),
-                        vout,
-                        consignment_endpoint.clone(),
-                        STATIC_BLINDING,
-                    ) {
-                        tracing::warn!("HTLC accept transfer failed for {}:{}: {}", txid, vout, e);
-                    }
-                }
-            } else {
-                tracing::warn!("HTLC accept transfer skipped: invalid proxy endpoint");
-            }
-        }
-        #[cfg(not(any(feature = "electrum", feature = "esplora")))]
-        if !pending_accepts.is_empty() {
-            tracing::warn!("HTLC accept transfer skipped: rgb-lib indexer features are disabled");
         }
 
         if updated {
@@ -1279,6 +1260,89 @@ impl RgbOutputSpender {
     pub(crate) fn sweep_htlc_tracker_for_tests(&self) {
         let secp_ctx = Secp256k1::new();
         self.sweep_htlc_tracker(&secp_ctx);
+    }
+
+    fn try_accept_sweep(&self, entry: &HtlcTrackerEntry) {
+        if entry.asset_id.is_none() {
+            return;
+        }
+        let Some(dest_script_hex) = entry.rgb_destination_script_hex.as_ref() else {
+            tracing::warn!("HTLC sweep accept skipped: missing RGB destination script");
+            return;
+        };
+        let Some(dest_script_bytes) = hex_str_to_vec(dest_script_hex) else {
+            tracing::warn!("HTLC sweep accept skipped: invalid RGB destination script hex");
+            return;
+        };
+        let dest_script = ScriptBuf::from_bytes(dest_script_bytes);
+        let recipient_id = recipient_id_from_script_buf(dest_script, self.static_state.network);
+
+        #[cfg(any(feature = "electrum", feature = "esplora"))]
+        {
+            let consignment_endpoint = match RgbTransport::from_str(&self.proxy_endpoint) {
+                Ok(endpoint) => endpoint,
+                Err(e) => {
+                    tracing::warn!("HTLC sweep accept skipped: invalid proxy endpoint: {e}");
+                    return;
+                }
+            };
+            let (consignment, txid_str, vout) = match self
+                .rgb_wallet_wrapper
+                .fetch_consignment_by_recipient_id(recipient_id, consignment_endpoint)
+            {
+                Ok(res) => res,
+                Err(e) => {
+                    tracing::warn!("HTLC sweep accept skipped: {e}");
+                    return;
+                }
+            };
+            let txid = match bitcoin::Txid::from_str(&txid_str) {
+                Ok(txid) => txid,
+                Err(_) => {
+                    tracing::warn!("HTLC sweep accept skipped: invalid txid {txid_str}");
+                    return;
+                }
+            };
+
+            let min_confirmations = entry.min_confirmations.max(1) as u64;
+            let confirmations = match self
+                .bitcoind_client
+                .get_txout_confirmations_blocking(&txid, vout)
+            {
+                Ok(res) => res.unwrap_or(0),
+                Err(e) => {
+                    tracing::warn!("HTLC sweep accept skipped: tx confirmation error: {e}");
+                    return;
+                }
+            };
+            if confirmations < min_confirmations {
+                return;
+            }
+
+            if let Err(e) = self.rgb_wallet_wrapper.accept_transfer_from_consignment(
+                consignment,
+                txid_str.clone(),
+                vout,
+                STATIC_BLINDING,
+            ) {
+                tracing::warn!(
+                    "HTLC claim accept transfer failed for {}:{}: {}",
+                    txid_str,
+                    vout,
+                    e
+                );
+            } else {
+                tracing::info!(
+                    "HTLC claim accept transfer succeeded for {}:{}",
+                    txid_str,
+                    vout
+                );
+            }
+        }
+        #[cfg(not(any(feature = "electrum", feature = "esplora")))]
+        {
+            tracing::warn!("HTLC accept transfer skipped: rgb-lib indexer features are disabled");
+        }
     }
 }
 
