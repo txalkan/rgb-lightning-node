@@ -3399,6 +3399,7 @@ pub(crate) async fn start_ldk(
     let channel_manager_listener = channel_manager.clone();
     let chain_monitor_listener = chain_monitor.clone();
     let output_sweeper_listener = output_sweeper.clone();
+    let htlc_output_spender = rgb_output_spender.clone();
     let bitcoind_block_source = bitcoind_client.clone();
     let stop_listen = Arc::clone(&stop_processing);
     tokio::spawn(async move {
@@ -3408,12 +3409,15 @@ pub(crate) async fn start_ldk(
             &(channel_manager_listener, output_sweeper_listener),
         );
         let mut spv_client = SpvClient::new(chain_tip, chain_poller, &mut cache, &chain_listener);
+        let secp_ctx = Secp256k1::new();
         loop {
             if stop_listen.load(Ordering::Acquire) {
                 return;
             }
             if let Err(e) = spv_client.poll_best_tip().await {
                 tracing::error!("Error while polling best tip: {:?}", e);
+            } else {
+                htlc_output_spender.sweep_htlc_tracker(&secp_ctx);
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
