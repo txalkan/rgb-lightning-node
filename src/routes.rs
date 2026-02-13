@@ -1566,10 +1566,6 @@ async fn scan_htlc_funding(
         )));
     }
 
-    unlocked_state
-        .rgb_refresh(false)
-        .map_err(|e| APIError::InvalidHtlcParams(format!("RGB refresh failed: {e}")))?;
-
     let asset_id = entry.asset_id.clone();
     if asset_id.is_some() {
         #[cfg(any(feature = "electrum", feature = "esplora"))]
