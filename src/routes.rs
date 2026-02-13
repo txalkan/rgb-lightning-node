@@ -48,7 +48,7 @@ use lightning_invoice::{Bolt11Invoice, PaymentSecret};
 use regex::Regex;
 use rgb_lib::{
     generate_keys,
-    utils::recipient_id_from_script_buf,
+    utils::{recipient_id_from_script_buf, script_buf_from_recipient_id},
     wallet::{
         rust_only::{
             check_indexer_url as rgb_lib_check_indexer_url,
@@ -4260,15 +4260,19 @@ pub(crate) async fn rgb_invoice_htlc(
             .as_bytes()
             .to_hex();
 
-        let rgb_address = unlocked_state
-            .rgb_get_address()
-            .map_err(|e| APIError::InvalidHtlcParams(e.to_string()))?;
-        let rgb_destination_script_hex = Address::from_str(&rgb_address)
-            .map_err(|_| APIError::InvalidHtlcParams("Invalid RGB wallet address".into()))?
-            .assume_checked()
-            .script_pubkey()
-            .as_bytes()
-            .to_hex();
+        let claim_witness_receive = unlocked_state.rgb_witness_receive(
+            payload.asset_id.clone(),
+            assignment.clone(),
+            payload.duration_seconds,
+            vec![unlocked_state.proxy_endpoint.clone()],
+            payload.min_confirmations,
+        )?;
+        let rgb_destination_script = script_buf_from_recipient_id(claim_witness_receive.recipient_id)
+            .map_err(|e| APIError::InvalidRecipientData(e.to_string()))?
+            .ok_or_else(|| {
+                APIError::InvalidRecipientData("RGB recipient_id is not witness".into())
+            })?;
+        let rgb_destination_script_hex = rgb_destination_script.as_bytes().to_hex();
 
         let current_height = unlocked_state
             .bitcoind_client
