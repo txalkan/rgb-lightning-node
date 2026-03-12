@@ -2,32 +2,34 @@ namespace rgb_lightning_node {
     string uniffi_healthcheck();
 };
 
-interface SdkNodeV1 {
+interface SdkNode {
     [Throws=RlnError, Name=create]
-    constructor(SdkInitRequestV1 request);
+    constructor(SdkInitRequest request);
     void shutdown();
     [Throws=RlnError]
-    NodeInfoV1 node_info();
+    NodeInfo node_info();
     [Throws=RlnError]
     ChannelId get_channel_id(ChannelId temporary_channel_id);
     [Throws=RlnError]
-    PaymentV1 get_payment(PaymentHash payment_hash);
+    Payment get_payment(PaymentHash payment_hash);
     [Throws=RlnError]
-    SwapV1 get_swap(PaymentHash payment_hash, boolean taker);
+    Swap get_swap(PaymentHash payment_hash, boolean taker);
     [Throws=RlnError]
-    LnInvoiceResponseV1 ln_invoice(LnInvoiceRequestV1 request);
+    LnInvoiceResponse ln_invoice(LnInvoiceRequest request);
     [Throws=RlnError]
-    SendRgbResponseV1 send_rgb(SendRgbRequestV1 request);
+    SendRgbResponse send_rgb(SendRgbRequest request);
 };
 
 [Error]
 enum RlnError {
     "NotInitialized",
     "InvalidRequest",
+    "NotFound",
+    "Conflict",
     "Internal",
 };
 
-dictionary NodeInfoV1 {
+dictionary NodeInfo {
     PublicKey pubkey;
     u64 num_channels;
     u64 num_peers;
@@ -35,38 +37,38 @@ dictionary NodeInfoV1 {
     u64 network_channels;
 };
 
-dictionary PaymentV1 {
+dictionary Payment {
     u64? amt_msat;
     u64? asset_amount;
     ContractId? asset_id;
     PaymentHash payment_hash;
     boolean inbound;
-    HtlcStatusV1 status;
+    HtlcStatus status;
     u64 created_at;
     u64 updated_at;
     PublicKey payee_pubkey;
 };
 
-enum HtlcStatusV1 {
+enum HtlcStatus {
     "Pending",
     "Succeeded",
     "Failed",
 };
 
-dictionary SwapV1 {
+dictionary Swap {
     u64 qty_from;
     u64 qty_to;
     ContractId? from_asset;
     ContractId? to_asset;
     PaymentHash payment_hash;
-    SwapStatusV1 status;
+    SwapStatus status;
     u64 requested_at;
     u64? initiated_at;
     u64 expires_at;
     u64? completed_at;
 };
 
-enum SwapStatusV1 {
+enum SwapStatus {
     "Waiting",
     "Pending",
     "Succeeded",
@@ -74,18 +76,18 @@ enum SwapStatusV1 {
     "Failed",
 };
 
-dictionary LnInvoiceRequestV1 {
+dictionary LnInvoiceRequest {
     u64? amt_msat;
     u32 expiry_sec;
     ContractId? asset_id;
     u64? asset_amount;
 };
 
-dictionary LnInvoiceResponseV1 {
+dictionary LnInvoiceResponse {
     Bolt11Invoice invoice;
 };
 
-dictionary SdkInitRequestV1 {
+dictionary SdkInitRequest {
     string storage_dir_path;
     u16 daemon_listening_port;
     u16 ldk_peer_listening_port;
@@ -93,38 +95,38 @@ dictionary SdkInitRequestV1 {
     u16 max_media_upload_size_mb;
 };
 
-dictionary SendRgbRequestV1 {
+dictionary SendRgbRequest {
     boolean donation;
     u64 fee_rate;
     u8 min_confirmations;
     boolean skip_sync;
-    sequence<AssetRecipientsV1> recipient_groups;
+    sequence<AssetRecipients> recipient_groups;
 };
 
-dictionary SendRgbResponseV1 {
+dictionary SendRgbResponse {
     Txid txid;
     i32 batch_transfer_idx;
 };
 
-dictionary AssetRecipientsV1 {
+dictionary AssetRecipients {
     ContractId asset_id;
-    sequence<RgbRecipientV1> recipients;
+    sequence<RgbRecipient> recipients;
 };
 
-dictionary RgbRecipientV1 {
+dictionary RgbRecipient {
     RecipientId recipient_id;
-    WitnessDataV1? witness_data;
-    AssignmentKindV1 assignment_kind;
+    WitnessData? witness_data;
+    AssignmentKind assignment_kind;
     u64? assignment_amount;
     sequence<TransportEndpoint> transport_endpoints;
 };
 
-dictionary WitnessDataV1 {
+dictionary WitnessData {
     u64 amount_sat;
     u64? blinding;
 };
 
-enum AssignmentKindV1 {
+enum AssignmentKind {
     "Fungible",
     "NonFungible",
     "InflationRight",

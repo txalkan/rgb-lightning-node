@@ -32,7 +32,7 @@ fn network_from_str(network: &str) -> Result<rgb_lib::BitcoinNetwork, RlnError> 
     }
 }
 
-fn handle_from_request(request: SdkInitRequestV1) -> Result<NodeHandle, RlnError> {
+fn handle_from_request(request: SdkInitRequest) -> Result<NodeHandle, RlnError> {
     let network = network_from_str(&request.network)?;
     let config = NodeConfig {
         storage_dir_path: std::path::PathBuf::from(request.storage_dir_path),
@@ -47,8 +47,8 @@ fn handle_from_request(request: SdkInitRequestV1) -> Result<NodeHandle, RlnError
 
 fn send_rgb_from_state(
     state: std::sync::Arc<crate::utils::AppState>,
-    request: SendRgbRequestV1,
-) -> Result<SendRgbResponseV1, RlnError> {
+    request: SendRgbRequest,
+) -> Result<SendRgbResponse, RlnError> {
     if request.recipient_groups.is_empty() {
         return Err(RlnError::InvalidRequest);
     }
@@ -62,13 +62,13 @@ fn send_rgb_from_state(
                 .into_iter()
                 .map(|r| {
                     let assignment = match (r.assignment_kind, r.assignment_amount) {
-                        (AssignmentKindV1::Fungible, Some(v)) => crate::routes::Assignment::Fungible(v),
-                        (AssignmentKindV1::InflationRight, Some(v)) => {
+                        (AssignmentKind::Fungible, Some(v)) => crate::routes::Assignment::Fungible(v),
+                        (AssignmentKind::InflationRight, Some(v)) => {
                             crate::routes::Assignment::InflationRight(v)
                         }
-                        (AssignmentKindV1::NonFungible, None) => crate::routes::Assignment::NonFungible,
-                        (AssignmentKindV1::ReplaceRight, None) => crate::routes::Assignment::ReplaceRight,
-                        (AssignmentKindV1::Any, None) => crate::routes::Assignment::Any,
+                        (AssignmentKind::NonFungible, None) => crate::routes::Assignment::NonFungible,
+                        (AssignmentKind::ReplaceRight, None) => crate::routes::Assignment::ReplaceRight,
+                        (AssignmentKind::Any, None) => crate::routes::Assignment::Any,
                         _ => return Err(RlnError::InvalidRequest),
                     };
                     let recipient = crate::routes::Recipient {
@@ -96,11 +96,11 @@ fn send_rgb_from_state(
         request.skip_sync,
     ))?;
     let txid = Txid::from_str(&data.txid).map_err(|_| RlnError::Internal)?;
-    Ok(SendRgbResponseV1 { txid, batch_transfer_idx: data.batch_transfer_idx })
+    Ok(SendRgbResponse { txid, batch_transfer_idx: data.batch_transfer_idx })
 }
 
-impl SdkNodeV1 {
-    pub fn create(request: SdkInitRequestV1) -> Result<Self, RlnError> {
+impl SdkNode {
+    pub fn create(request: SdkInitRequest) -> Result<Self, RlnError> {
         let handle = handle_from_request(request)?;
         Ok(Self { handle })
     }
@@ -113,12 +113,12 @@ impl SdkNodeV1 {
         });
     }
 
-    pub fn node_info(&self) -> Result<NodeInfoV1, RlnError> {
+    pub fn node_info(&self) -> Result<NodeInfo, RlnError> {
         let state = self.handle.app_state();
         let data = block_on_sdk(sdk::node_info(state))?;
         let pubkey =
             bitcoin::secp256k1::PublicKey::from_str(&data.pubkey).map_err(|_| RlnError::Internal)?;
-        Ok(NodeInfoV1 {
+        Ok(NodeInfo {
             pubkey,
             num_channels: data.num_channels as u64,
             num_peers: data.num_peers as u64,
@@ -143,7 +143,7 @@ impl SdkNodeV1 {
         Ok(lightning::ln::types::ChannelId(arr))
     }
 
-    pub fn get_payment(&self, payment_hash: PaymentHash) -> Result<PaymentV1, RlnError> {
+    pub fn get_payment(&self, payment_hash: PaymentHash) -> Result<Payment, RlnError> {
         use bitcoin::hex::DisplayHex;
 
         let state = self.handle.app_state();
@@ -157,12 +157,12 @@ impl SdkNodeV1 {
         let payment_hash = <PaymentHash as UniffiCustomTypeConverter>::into_custom(data.payment_hash)
             .map_err(|_| RlnError::Internal)?;
         let status = match data.status {
-            crate::sdk::HtlcStatus::Pending => HtlcStatusV1::Pending,
-            crate::sdk::HtlcStatus::Succeeded => HtlcStatusV1::Succeeded,
-            crate::sdk::HtlcStatus::Failed => HtlcStatusV1::Failed,
+            crate::sdk::HtlcStatus::Pending => HtlcStatus::Pending,
+            crate::sdk::HtlcStatus::Succeeded => HtlcStatus::Succeeded,
+            crate::sdk::HtlcStatus::Failed => HtlcStatus::Failed,
         };
 
-        Ok(PaymentV1 {
+        Ok(Payment {
             amt_msat: data.amt_msat,
             asset_amount: data.asset_amount,
             asset_id,
@@ -175,7 +175,7 @@ impl SdkNodeV1 {
         })
     }
 
-    pub fn get_swap(&self, payment_hash: PaymentHash, taker: bool) -> Result<SwapV1, RlnError> {
+    pub fn get_swap(&self, payment_hash: PaymentHash, taker: bool) -> Result<Swap, RlnError> {
         use bitcoin::hex::DisplayHex;
 
         let state = self.handle.app_state();
@@ -191,14 +191,14 @@ impl SdkNodeV1 {
         let payment_hash = <PaymentHash as UniffiCustomTypeConverter>::into_custom(data.payment_hash)
             .map_err(|_| RlnError::Internal)?;
         let status = match data.status {
-            crate::sdk::SwapStatus::Waiting => SwapStatusV1::Waiting,
-            crate::sdk::SwapStatus::Pending => SwapStatusV1::Pending,
-            crate::sdk::SwapStatus::Succeeded => SwapStatusV1::Succeeded,
-            crate::sdk::SwapStatus::Expired => SwapStatusV1::Expired,
-            crate::sdk::SwapStatus::Failed => SwapStatusV1::Failed,
+            crate::sdk::SwapStatus::Waiting => SwapStatus::Waiting,
+            crate::sdk::SwapStatus::Pending => SwapStatus::Pending,
+            crate::sdk::SwapStatus::Succeeded => SwapStatus::Succeeded,
+            crate::sdk::SwapStatus::Expired => SwapStatus::Expired,
+            crate::sdk::SwapStatus::Failed => SwapStatus::Failed,
         };
 
-        Ok(SwapV1 {
+        Ok(Swap {
             qty_from: data.qty_from,
             qty_to: data.qty_to,
             from_asset,
@@ -212,7 +212,7 @@ impl SdkNodeV1 {
         })
     }
 
-    pub fn ln_invoice(&self, request: LnInvoiceRequestV1) -> Result<LnInvoiceResponseV1, RlnError> {
+    pub fn ln_invoice(&self, request: LnInvoiceRequest) -> Result<LnInvoiceResponse, RlnError> {
         let state = self.handle.app_state();
         let asset_id = request.asset_id.map(|a| a.to_string());
         let data = block_on_sdk(sdk::create_ln_invoice(
@@ -224,15 +224,15 @@ impl SdkNodeV1 {
             crate::routes::INVOICE_MIN_MSAT,
         ))?;
         let invoice = Bolt11Invoice::from_str(&data.invoice).map_err(|_| RlnError::Internal)?;
-        Ok(LnInvoiceResponseV1 { invoice })
+        Ok(LnInvoiceResponse { invoice })
     }
 
-    pub fn send_rgb(&self, request: SendRgbRequestV1) -> Result<SendRgbResponseV1, RlnError> {
+    pub fn send_rgb(&self, request: SendRgbRequest) -> Result<SendRgbResponse, RlnError> {
         send_rgb_from_state(self.handle.app_state(), request)
     }
 }
 
-pub fn sdk_initialize(request: SdkInitRequestV1) -> Result<(), RlnError> {
+pub fn sdk_initialize(request: SdkInitRequest) -> Result<(), RlnError> {
     // Compatibility path for existing clients using process-global state.
     let handle = handle_from_request(request)?;
     set_uniffi_node_handle(handle);
@@ -250,34 +250,34 @@ pub fn sdk_shutdown() {
     clear_uniffi_node_handle();
 }
 
-pub fn sdk_node_info() -> Result<NodeInfoV1, RlnError> {
+pub fn sdk_node_info() -> Result<NodeInfo, RlnError> {
     let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
-    SdkNodeV1 { handle }.node_info()
+    SdkNode { handle }.node_info()
 }
 
 pub fn sdk_get_channel_id(temporary_channel_id: ChannelId) -> Result<ChannelId, RlnError> {
     let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
-    SdkNodeV1 { handle }.get_channel_id(temporary_channel_id)
+    SdkNode { handle }.get_channel_id(temporary_channel_id)
 }
 
-pub fn sdk_get_payment(payment_hash: PaymentHash) -> Result<PaymentV1, RlnError> {
+pub fn sdk_get_payment(payment_hash: PaymentHash) -> Result<Payment, RlnError> {
     let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
-    SdkNodeV1 { handle }.get_payment(payment_hash)
+    SdkNode { handle }.get_payment(payment_hash)
 }
 
-pub fn sdk_get_swap(payment_hash: PaymentHash, taker: bool) -> Result<SwapV1, RlnError> {
+pub fn sdk_get_swap(payment_hash: PaymentHash, taker: bool) -> Result<Swap, RlnError> {
     let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
-    SdkNodeV1 { handle }.get_swap(payment_hash, taker)
+    SdkNode { handle }.get_swap(payment_hash, taker)
 }
 
-pub fn sdk_ln_invoice(request: LnInvoiceRequestV1) -> Result<LnInvoiceResponseV1, RlnError> {
+pub fn sdk_ln_invoice(request: LnInvoiceRequest) -> Result<LnInvoiceResponse, RlnError> {
     let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
-    SdkNodeV1 { handle }.ln_invoice(request)
+    SdkNode { handle }.ln_invoice(request)
 }
 
-pub fn sdk_send_rgb(request: SendRgbRequestV1) -> Result<SendRgbResponseV1, RlnError> {
+pub fn sdk_send_rgb(request: SendRgbRequest) -> Result<SendRgbResponse, RlnError> {
     let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
-    SdkNodeV1 { handle }.send_rgb(request)
+    SdkNode { handle }.send_rgb(request)
 }
 
 uniffi::include_scaffolding!("rgb_lightning_node");

@@ -10,7 +10,7 @@ pub type Bolt11Invoice = lightning_invoice::Bolt11Invoice;
 pub struct RecipientId(pub String);
 pub struct TransportEndpoint(pub String);
 
-pub struct SdkNodeV1 {
+pub struct SdkNode {
     pub(crate) handle: NodeHandle,
 }
 
@@ -20,11 +20,15 @@ pub enum RlnError {
     NotInitialized,
     #[error("invalid request")]
     InvalidRequest,
+    #[error("resource not found")]
+    NotFound,
+    #[error("conflict with current node state")]
+    Conflict,
     #[error("internal error")]
     Internal,
 }
 
-pub struct NodeInfoV1 {
+pub struct NodeInfo {
     pub pubkey: PublicKey,
     pub num_channels: u64,
     pub num_peers: u64,
@@ -32,38 +36,38 @@ pub struct NodeInfoV1 {
     pub network_channels: u64,
 }
 
-pub struct PaymentV1 {
+pub struct Payment {
     pub amt_msat: Option<u64>,
     pub asset_amount: Option<u64>,
     pub asset_id: Option<ContractId>,
     pub payment_hash: PaymentHash,
     pub inbound: bool,
-    pub status: HtlcStatusV1,
+    pub status: HtlcStatus,
     pub created_at: u64,
     pub updated_at: u64,
     pub payee_pubkey: PublicKey,
 }
 
-pub enum HtlcStatusV1 {
+pub enum HtlcStatus {
     Pending,
     Succeeded,
     Failed,
 }
 
-pub struct SwapV1 {
+pub struct Swap {
     pub qty_from: u64,
     pub qty_to: u64,
     pub from_asset: Option<ContractId>,
     pub to_asset: Option<ContractId>,
     pub payment_hash: PaymentHash,
-    pub status: SwapStatusV1,
+    pub status: SwapStatus,
     pub requested_at: u64,
     pub initiated_at: Option<u64>,
     pub expires_at: u64,
     pub completed_at: Option<u64>,
 }
 
-pub enum SwapStatusV1 {
+pub enum SwapStatus {
     Waiting,
     Pending,
     Succeeded,
@@ -71,18 +75,18 @@ pub enum SwapStatusV1 {
     Failed,
 }
 
-pub struct LnInvoiceRequestV1 {
+pub struct LnInvoiceRequest {
     pub amt_msat: Option<u64>,
     pub expiry_sec: u32,
     pub asset_id: Option<ContractId>,
     pub asset_amount: Option<u64>,
 }
 
-pub struct LnInvoiceResponseV1 {
+pub struct LnInvoiceResponse {
     pub invoice: Bolt11Invoice,
 }
 
-pub struct SdkInitRequestV1 {
+pub struct SdkInitRequest {
     pub storage_dir_path: String,
     pub daemon_listening_port: u16,
     pub ldk_peer_listening_port: u16,
@@ -90,38 +94,38 @@ pub struct SdkInitRequestV1 {
     pub max_media_upload_size_mb: u16,
 }
 
-pub struct SendRgbRequestV1 {
+pub struct SendRgbRequest {
     pub donation: bool,
     pub fee_rate: u64,
     pub min_confirmations: u8,
     pub skip_sync: bool,
-    pub recipient_groups: Vec<AssetRecipientsV1>,
+    pub recipient_groups: Vec<AssetRecipients>,
 }
 
-pub struct SendRgbResponseV1 {
+pub struct SendRgbResponse {
     pub txid: Txid,
     pub batch_transfer_idx: i32,
 }
 
-pub struct AssetRecipientsV1 {
+pub struct AssetRecipients {
     pub asset_id: ContractId,
-    pub recipients: Vec<RgbRecipientV1>,
+    pub recipients: Vec<RgbRecipient>,
 }
 
-pub struct RgbRecipientV1 {
+pub struct RgbRecipient {
     pub recipient_id: RecipientId,
-    pub witness_data: Option<WitnessDataV1>,
-    pub assignment_kind: AssignmentKindV1,
+    pub witness_data: Option<WitnessData>,
+    pub assignment_kind: AssignmentKind,
     pub assignment_amount: Option<u64>,
     pub transport_endpoints: Vec<TransportEndpoint>,
 }
 
-pub struct WitnessDataV1 {
+pub struct WitnessData {
     pub amount_sat: u64,
     pub blinding: Option<u64>,
 }
 
-pub enum AssignmentKindV1 {
+pub enum AssignmentKind {
     Fungible,
     NonFungible,
     InflationRight,

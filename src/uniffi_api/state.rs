@@ -59,18 +59,20 @@ where
     F: std::future::Future<Output = Result<T, APIError>>,
 {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        // If we're already inside a Tokio runtime, reuse it.
-        tokio::task::block_in_place(|| handle.block_on(fut)).map_err(map_api_error)
+        match handle.runtime_flavor() {
+            // Reuse multithread runtime safely from sync boundary.
+            tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(|| handle.block_on(fut)).map_err(map_api_error)
+            }
+            // `block_in_place` panics on current-thread runtime; run on dedicated runtime instead.
+            tokio::runtime::RuntimeFlavor::CurrentThread => {
+                shared_uniffi_runtime().block_on(fut).map_err(map_api_error)
+            }
+            _ => shared_uniffi_runtime().block_on(fut).map_err(map_api_error),
+        }
     } else {
-        // Otherwise use a shared runtime for UniFFI calls from non-async hosts.
-        static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
-        let rt = RT.get_or_init(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("failed to build uniffi runtime")
-        });
-        rt.block_on(fut).map_err(map_api_error)
+        // Use a shared runtime for UniFFI calls from non-async hosts.
+        shared_uniffi_runtime().block_on(fut).map_err(map_api_error)
     }
 }
 
@@ -79,22 +81,51 @@ where
     F: std::future::Future<Output = Result<T, AppError>>,
 {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        tokio::task::block_in_place(|| handle.block_on(fut)).map_err(map_app_error)
+        match handle.runtime_flavor() {
+            tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(|| handle.block_on(fut)).map_err(map_app_error)
+            }
+            tokio::runtime::RuntimeFlavor::CurrentThread => {
+                shared_uniffi_runtime().block_on(fut).map_err(map_app_error)
+            }
+            _ => shared_uniffi_runtime().block_on(fut).map_err(map_app_error),
+        }
     } else {
-        static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
-        let rt = RT.get_or_init(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("failed to build uniffi runtime")
-        });
-        rt.block_on(fut).map_err(map_app_error)
+        shared_uniffi_runtime().block_on(fut).map_err(map_app_error)
     }
+}
+
+fn shared_uniffi_runtime() -> &'static tokio::runtime::Runtime {
+    // Fallback runtime for sync UniFFI calls when we're not in Tokio, or when
+    // host code uses a current-thread Tokio runtime where `block_in_place` is invalid.
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build uniffi runtime")
+    })
 }
 
 pub(crate) fn map_api_error(err: APIError) -> RlnError {
     match err {
         APIError::LockedNode | APIError::NotInitialized => RlnError::NotInitialized,
+        APIError::PaymentNotFound(_)
+        | APIError::SwapNotFound(_)
+        | APIError::BatchTransferNotFound
+        | APIError::UnknownChannelId
+        | APIError::UnknownContractId
+        | APIError::UnknownLNInvoice
+        | APIError::UnknownTemporaryChannelId => RlnError::NotFound,
+        APIError::AlreadyInitialized
+        | APIError::AlreadyUnlocked
+        | APIError::UnlockedNode
+        | APIError::ChangingState
+        | APIError::OpenChannelInProgress
+        | APIError::DuplicatePayment(_)
+        | APIError::RecipientIDAlreadyUsed
+        | APIError::TemporaryChannelIdAlreadyUsed
+        | APIError::CannotFailBatchTransfer => RlnError::Conflict,
         APIError::InvalidAddress(_)
         | APIError::InvalidAmount(_)
         | APIError::InvalidAssetID(_)
@@ -106,12 +137,6 @@ pub(crate) fn map_api_error(err: APIError) -> RlnError {
         | APIError::InvalidRecipientNetwork
         | APIError::InvalidTransportEndpoint(_)
         | APIError::InvalidTransportEndpoints(_)
-        | APIError::PaymentNotFound(_)
-        | APIError::SwapNotFound(_)
-        | APIError::UnknownChannelId
-        | APIError::UnknownContractId
-        | APIError::UnknownLNInvoice
-        | APIError::UnknownTemporaryChannelId
         | APIError::IncompleteRGBInfo => RlnError::InvalidRequest,
         _ => RlnError::Internal,
     }

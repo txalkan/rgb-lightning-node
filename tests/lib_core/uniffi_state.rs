@@ -5,7 +5,7 @@ use rgb_lightning_node::test_utils::{
 };
 use rgb_lightning_node::{
     sdk_get_channel_id, sdk_get_payment, sdk_get_swap, sdk_ln_invoice, sdk_node_info, sdk_send_rgb,
-    uniffi_is_initialized, LnInvoiceRequestV1, RlnError, SendRgbRequestV1,
+    uniffi_is_initialized, LnInvoiceRequest, RlnError, SendRgbRequest,
 };
 
 #[test]
@@ -48,7 +48,7 @@ fn locked_state_does_not_bypass_unlock_guards() {
     let state = mock_locked_app_state();
     register_uniffi_state_for_tests(&state);
 
-    let invoice = sdk_ln_invoice(LnInvoiceRequestV1 {
+    let invoice = sdk_ln_invoice(LnInvoiceRequest {
         amt_msat: Some(1000),
         expiry_sec: 3600,
         asset_id: None,
@@ -56,7 +56,7 @@ fn locked_state_does_not_bypass_unlock_guards() {
     });
     assert!(matches!(invoice, Err(RlnError::NotInitialized)));
 
-    let send_rgb = sdk_send_rgb(SendRgbRequestV1 {
+    let send_rgb = sdk_send_rgb(SendRgbRequest {
         donation: false,
         fee_rate: 1,
         min_confirmations: 1,

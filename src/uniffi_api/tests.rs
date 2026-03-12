@@ -28,7 +28,7 @@ mod uniffi_smoke_tests {
         let swap = sdk_get_swap(lightning::types::payment::PaymentHash([0u8; 32]), true);
         assert!(matches!(swap, Err(RlnError::NotInitialized)));
 
-        let invoice = sdk_ln_invoice(LnInvoiceRequestV1 {
+        let invoice = sdk_ln_invoice(LnInvoiceRequest {
             amt_msat: Some(1000),
             expiry_sec: 3600,
             asset_id: None,
@@ -36,7 +36,7 @@ mod uniffi_smoke_tests {
         });
         assert!(matches!(invoice, Err(RlnError::NotInitialized)));
 
-        let send_rgb = sdk_send_rgb(SendRgbRequestV1 {
+        let send_rgb = sdk_send_rgb(SendRgbRequest {
             donation: false,
             fee_rate: 1,
             min_confirmations: 1,
@@ -79,7 +79,7 @@ mod uniffi_smoke_tests {
         let channel_id = sdk_get_channel_id(lightning::ln::types::ChannelId([0u8; 32]));
         assert!(matches!(channel_id, Err(RlnError::NotInitialized)));
 
-        let send_rgb = sdk_send_rgb(SendRgbRequestV1 {
+        let send_rgb = sdk_send_rgb(SendRgbRequest {
             donation: false,
             fee_rate: 1,
             min_confirmations: 1,
@@ -96,11 +96,11 @@ mod uniffi_smoke_tests {
         clear_uniffi_app_state();
         assert!(!uniffi_is_initialized());
 
-        let node = SdkNodeV1 { handle: crate::NodeHandle::from_app_state(mock_locked_state()) };
+        let node = SdkNode { handle: crate::NodeHandle::from_app_state(mock_locked_state()) };
         let node_info = node.node_info();
         assert!(matches!(node_info, Err(RlnError::NotInitialized)));
 
-        let send_rgb = node.send_rgb(SendRgbRequestV1 {
+        let send_rgb = node.send_rgb(SendRgbRequest {
             donation: false,
             fee_rate: 1,
             min_confirmations: 1,
@@ -188,13 +188,17 @@ mod uniffi_smoke_tests {
             super::super::state::map_api_error(crate::error::APIError::PaymentNotFound(
                 "x".to_string()
             )),
-            RlnError::InvalidRequest
+            RlnError::NotFound
         ));
         assert!(matches!(
             super::super::state::map_api_error(crate::error::APIError::SwapNotFound(
                 "x".to_string()
             )),
-            RlnError::InvalidRequest
+            RlnError::NotFound
+        ));
+        assert!(matches!(
+            super::super::state::map_api_error(crate::error::APIError::OpenChannelInProgress),
+            RlnError::Conflict
         ));
         assert!(matches!(
             super::super::state::map_api_error(crate::error::APIError::IO(std::io::Error::other(
