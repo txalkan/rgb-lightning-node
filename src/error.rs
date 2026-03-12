@@ -1,6 +1,5 @@
 use amplify::s;
 use axum::{
-    extract::rejection::JsonRejection,
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -90,7 +89,7 @@ pub enum APIError {
     #[error("Failed to send onion message: {0}")]
     FailedSendingOnionMessage(String),
 
-    #[error("For an RGB operation both asset_id and asset_amount must be set")]
+    #[error("For an RGB operation both the asset ID and amount are necessary")]
     IncompleteRGBInfo,
 
     #[error("Not enough assets")]
@@ -150,6 +149,9 @@ pub enum APIError {
     #[error("Invalid media digest")]
     InvalidMediaDigest,
 
+    #[error("Invalid mnemonic: {0}")]
+    InvalidMnemonic(String),
+
     #[error("Invalid name: {0}")]
     InvalidName(String),
 
@@ -192,6 +194,9 @@ pub enum APIError {
     #[error("The provided recipient ID is for a different network than the wallet's one")]
     InvalidRecipientNetwork,
 
+    #[error("Invalid request: {0}")]
+    InvalidRequest(String),
+
     #[error("Invalid swap: {0}")]
     InvalidSwap(String),
 
@@ -212,9 +217,6 @@ pub enum APIError {
 
     #[error("IO error: {0}")]
     IO(#[from] std::io::Error),
-
-    #[error(transparent)]
-    JsonExtractorRejection(#[from] JsonRejection),
 
     #[error("Node is locked (hint: call unlock)")]
     LockedNode,
@@ -314,6 +316,18 @@ impl APIError {
     }
 }
 
+impl From<axum::extract::rejection::JsonRejection> for APIError {
+    fn from(err: axum::extract::rejection::JsonRejection) -> Self {
+        APIError::InvalidRequest(err.to_string())
+    }
+}
+
+impl From<axum::extract::multipart::MultipartRejection> for APIError {
+    fn from(err: axum::extract::multipart::MultipartRejection) -> Self {
+        APIError::InvalidRequest(err.to_string())
+    }
+}
+
 impl From<RgbLibError> for APIError {
     fn from(error: RgbLibError) -> Self {
         match error {
@@ -395,11 +409,6 @@ impl From<RgbLibError> for APIError {
 impl IntoResponse for APIError {
     fn into_response(self) -> Response {
         let (status, error, name) = match self {
-            APIError::JsonExtractorRejection(ref json_rejection) => (
-                json_rejection.status(),
-                json_rejection.body_text(),
-                self.name(),
-            ),
             APIError::FailedClosingChannel(_)
             | APIError::FailedInvoiceCreation(_)
             | APIError::FailedIssuingAsset(_)
@@ -432,6 +441,7 @@ impl IntoResponse for APIError {
             | APIError::InvalidFeeRate(_)
             | APIError::InvalidInvoice(_)
             | APIError::InvalidMediaDigest
+            | APIError::InvalidMnemonic(_)
             | APIError::InvalidName(_)
             | APIError::InvalidNodeIds(_)
             | APIError::InvalidOnionData(_)
@@ -444,6 +454,7 @@ impl IntoResponse for APIError {
             | APIError::InvalidRecipientData(_)
             | APIError::InvalidRecipientID
             | APIError::InvalidRecipientNetwork
+            | APIError::InvalidRequest(_)
             | APIError::InvalidSwap(_)
             | APIError::InvalidSwapString(_, _)
             | APIError::InvalidTicker(_)
@@ -540,4 +551,36 @@ pub enum AppError {
 
     #[error("Port {0} is unavailable")]
     UnavailablePort(u16),
+}
+
+/// The error variants returned by the authentication checks
+#[derive(Debug)]
+pub enum AuthError {
+    Unauthorized,
+    Forbidden,
+}
+
+impl IntoResponse for AuthError {
+    fn into_response(self) -> Response {
+        match self {
+            AuthError::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                Json(APIErrorResponse {
+                    code: StatusCode::UNAUTHORIZED.as_u16(),
+                    error: s!("Missing or invalid credentials"),
+                    name: s!("Unauthorized"),
+                }),
+            )
+                .into_response(),
+            AuthError::Forbidden => (
+                StatusCode::FORBIDDEN,
+                Json(APIErrorResponse {
+                    code: StatusCode::FORBIDDEN.as_u16(),
+                    error: s!("You don't have access to this resource"),
+                    name: s!("Forbidden"),
+                }),
+            )
+                .into_response(),
+        }
+    }
 }

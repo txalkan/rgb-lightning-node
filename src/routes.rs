@@ -36,6 +36,7 @@ use lightning::{
 use lightning_invoice::{Bolt11Invoice, PaymentSecret};
 use regex::Regex;
 use rgb_lib::{
+    bdk_wallet::keys::bip39::Mnemonic,
     generate_keys,
     utils::recipient_id_from_script_buf,
     wallet::{
@@ -492,6 +493,7 @@ pub(crate) enum IndexerProtocol {
 #[derive(Deserialize, Serialize)]
 pub(crate) struct InitRequest {
     pub(crate) password: String,
+    pub(crate) mnemonic: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -838,6 +840,8 @@ pub(crate) struct SendOnionMessageRequest {
 pub(crate) struct SendPaymentRequest {
     pub(crate) invoice: String,
     pub(crate) amt_msat: Option<u64>,
+    pub(crate) asset_id: Option<String>,
+    pub(crate) asset_amount: Option<u64>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -2098,9 +2102,12 @@ pub(crate) async fn init(
         let mnemonic_path = get_mnemonic_path(&state.static_state.storage_dir_path);
         check_already_initialized(&mnemonic_path)?;
 
-        let keys = generate_keys(state.static_state.network);
-
-        let mnemonic = keys.mnemonic;
+        let mnemonic = match payload.mnemonic {
+            Some(mnemonic) => Mnemonic::from_str(&mnemonic)
+                .map_err(|e| APIError::InvalidMnemonic(e.to_string()))?
+                .to_string(),
+            None => generate_keys(state.static_state.network).mnemonic,
+        };
 
         encrypt_and_save_mnemonic(payload.password, mnemonic.clone(), &mnemonic_path)?;
 
@@ -2999,16 +3006,17 @@ pub(crate) async fn keysend(
         let created_at = get_current_timestamp();
         unlocked_state.add_outbound_payment(
             payment_id,
-            PaymentInfo {
-                preimage: None,
-                secret: None,
-                status: HTLCStatus::Pending.into(),
-                amt_msat: Some(amt_msat),
-                created_at,
-                updated_at: created_at,
-                payee_pubkey: dest_pubkey,
-            },
-        )?;
+                PaymentInfo {
+                    preimage: None,
+                    secret: None,
+                    status: HTLCStatus::Pending.into(),
+                    amt_msat: Some(amt_msat),
+                    created_at,
+                    updated_at: created_at,
+                    payee_pubkey: dest_pubkey,
+                    expires_at: None,
+                },
+            )?;
         if let Some((contract_id, rgb_amount)) = rgb_payment {
             write_rgb_payment_info_file(
                 &PathBuf::from(&state.static_state.ldk_data_dir),
@@ -3118,6 +3126,7 @@ pub(crate) async fn send_payment(
                     created_at,
                     updated_at: created_at,
                     payee_pubkey: offer.issuer_signing_pubkey().ok_or(APIError::InvalidInvoice(s!("missing signing pubkey")))?,
+                    expires_at: None,
                 },
             )?;
 
@@ -3172,12 +3181,25 @@ pub(crate) async fn send_payment(
                     }
                     Some((rgb_contract_id, rgb_amount))
                 },
-                (None, None) => None,
-                (Some(_), None) => {
-                    return Err(APIError::InvalidInvoice(s!(
-                        "invoice has an RGB contract ID but not an RGB amount"
-                    )))
+                (Some(rgb_contract_id), None) => {
+                    if amt_msat < INVOICE_MIN_MSAT {
+                        return Err(APIError::InvalidAmount(format!(
+                            "msat amount in invoice sending an RGB asset cannot be less than {INVOICE_MIN_MSAT}"
+                        )));
+                    }
+                    if let Some(asset_id) = payload.asset_id.as_ref() {
+                        let payload_contract_id = ContractId::from_str(asset_id)
+                            .map_err(|_| APIError::InvalidAssetID(asset_id.clone()))?;
+                        if payload_contract_id != rgb_contract_id {
+                            return Err(APIError::InvalidInvoice(s!(
+                                "invoice RGB contract ID doesn't match the requested one"
+                            )));
+                        }
+                    }
+                    let rgb_amount = payload.asset_amount.ok_or(APIError::IncompleteRGBInfo)?;
+                    Some((rgb_contract_id, rgb_amount))
                 }
+                (None, None) => None,
                 (None, Some(_)) => {
                     return Err(APIError::InvalidInvoice(s!(
                         "invoice has an RGB amount but not an RGB contract ID"
@@ -3192,10 +3214,11 @@ pub(crate) async fn send_payment(
                     preimage: None,
                     secret,
                     status: status.into(),
-                    amt_msat: invoice.amount_milli_satoshis(),
+                    amt_msat: Some(amt_msat),
                     created_at,
                     updated_at: created_at,
                     payee_pubkey: invoice.get_payee_pub_key(),
+                    expires_at: None,
                 },
             )?;
             let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());

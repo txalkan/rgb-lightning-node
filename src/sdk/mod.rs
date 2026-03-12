@@ -1138,6 +1138,7 @@ pub(crate) async fn create_ln_invoice(
             created_at,
             updated_at: created_at,
             payee_pubkey: unlocked_state.channel_manager.get_our_node_id(),
+            expires_at: Some(created_at + expiry_sec as u64),
         },
     );
 
