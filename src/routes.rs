@@ -75,7 +75,9 @@ use tokio::{
     sync::MutexGuard as TokioMutexGuard,
 };
 
-use crate::ldk::{start_ldk, stop_ldk, LdkBackgroundServices, MIN_CHANNEL_CONFIRMATIONS};
+use crate::ldk::{
+    start_ldk, stop_ldk, LdkBackgroundServices, VirtualChannelDraft, MIN_CHANNEL_CONFIRMATIONS,
+};
 use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{
     check_already_initialized, check_channel_id, check_password_strength, check_password_validity,
@@ -104,6 +106,7 @@ const OPENRGBCHANNEL_MIN_SAT: u64 = HTLC_MIN_MSAT / 1000 * 10 + 10;
 const OPENCHANNEL_MIN_SAT: u64 = 5506;
 const OPENCHANNEL_MAX_SAT: u64 = 16777215;
 const OPENCHANNEL_MIN_RGB_AMT: u64 = 1;
+const VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST: &str = "trusted_no_broadcast";
 
 pub const DUST_LIMIT_MSAT: u64 = 546000;
 
@@ -402,6 +405,7 @@ pub(crate) struct Channel {
     pub(crate) asset_id: Option<String>,
     pub(crate) asset_local_amount: Option<u64>,
     pub(crate) asset_remote_amount: Option<u64>,
+    pub(crate) virtual_open_mode: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -845,6 +849,7 @@ pub(crate) struct OpenChannelRequest {
     pub(crate) fee_base_msat: Option<u32>,
     pub(crate) fee_proportional_millionths: Option<u32>,
     pub(crate) temporary_channel_id: Option<String>,
+    pub(crate) virtual_open_mode: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -2212,6 +2217,7 @@ pub(crate) async fn list_channels(
     let unlocked_state = guard.as_ref().unwrap();
 
     let mut channels = vec![];
+    let virtual_sessions = unlocked_state.virtual_channel_session_store();
     for chan_info in unlocked_state.channel_manager.list_channels() {
         let status = match chan_info.channel_shutdown_state.unwrap() {
             ChannelShutdownState::NotShuttingDown => {
@@ -2237,6 +2243,10 @@ pub(crate) async fn list_channels(
             public: chan_info.is_announced,
             ..Default::default()
         };
+
+        if virtual_sessions.contains_key(&chan_info.channel_id) {
+            channel.virtual_open_mode = Some(VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST.to_string());
+        }
 
         if let Some(funding_txo) = chan_info.funding_txo {
             channel.funding_txid = Some(funding_txo.txid.to_string());
@@ -2997,9 +3007,34 @@ pub(crate) async fn open_channel(
             return Err(APIError::OpenChannelInProgress);
         }
 
-        let temporary_channel_id = if let Some(tmp_chan_id_str) = payload.temporary_channel_id {
+        let is_virtual_open = match payload.virtual_open_mode.as_deref() {
+            None => false,
+            Some(VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST) => true,
+            Some(other) => {
+                return Err(APIError::InvalidRequest(format!(
+                    "unknown virtual_open_mode: {other}"
+                )));
+            }
+        };
+
+        if is_virtual_open && !state.static_state.enable_virtual_channels_v0 {
+            return Err(APIError::InvalidRequest(
+                "trusted virtual channels v0 are disabled".to_string(),
+            ));
+        }
+
+        if is_virtual_open && payload.public {
+            return Err(APIError::InvalidRequest(
+                "trusted_no_broadcast requires public=false".to_string(),
+            ));
+        }
+
+        let existing_virtual_drafts = unlocked_state.virtual_channel_draft_store();
+        let mut temporary_channel_id = if let Some(tmp_chan_id_str) = payload.temporary_channel_id {
             let tmp_chan_id = check_channel_id(&tmp_chan_id_str)?;
-            if unlocked_state.channel_ids().contains_key(&tmp_chan_id) {
+            if unlocked_state.channel_ids().contains_key(&tmp_chan_id)
+                || existing_virtual_drafts.contains_key(&tmp_chan_id)
+            {
                 return Err(APIError::TemporaryChannelIdAlreadyUsed);
             }
             Some(tmp_chan_id)
@@ -3067,6 +3102,21 @@ pub(crate) async fn open_channel(
         let (peer_pubkey, mut peer_addr) =
             parse_peer_info(payload.peer_pubkey_and_opt_addr.to_string())?;
 
+        if is_virtual_open {
+            let duplicate_virtual_draft = existing_virtual_drafts
+                .values()
+                .any(|draft| draft.peer_id == peer_pubkey);
+            let duplicate_virtual_session = unlocked_state
+                .virtual_channel_session_store()
+                .values()
+                .any(|session| session.peer_id == peer_pubkey);
+            if duplicate_virtual_draft || duplicate_virtual_session {
+                return Err(APIError::InvalidRequest(
+                    "trusted_no_broadcast already exists for this peer pair".to_string(),
+                ));
+            }
+        }
+
         let peer_data_path = state.static_state.ldk_data_dir.join(CHANNEL_PEER_DATA);
         if peer_addr.is_none() {
             if let Some(peer) = unlocked_state.peer_manager.peer_by_node_id(&peer_pubkey) {
@@ -3106,14 +3156,24 @@ pub(crate) async fn open_channel(
         }
         let config = UserConfig {
             channel_handshake_limits: ChannelHandshakeLimits {
+                trust_own_funding_0conf: true,
                 // lnd's max to_self_delay is 2016, so we want to be compatible.
                 their_to_self_delay: 2016,
                 ..Default::default()
             },
             channel_handshake_config: ChannelHandshakeConfig {
-                announce_for_forwarding: payload.public,
+                announce_for_forwarding: if is_virtual_open {
+                    false
+                } else {
+                    payload.public
+                },
                 our_htlc_minimum_msat: HTLC_MIN_MSAT,
-                minimum_depth: MIN_CHANNEL_CONFIRMATIONS as u32,
+                minimum_depth: if is_virtual_open {
+                    0
+                } else {
+                    MIN_CHANNEL_CONFIRMATIONS as u32
+                },
+                negotiate_scid_privacy: is_virtual_open,
                 negotiate_anchors_zero_fee_htlc_tx: payload.with_anchors,
                 ..Default::default()
             },
@@ -3181,6 +3241,31 @@ pub(crate) async fn open_channel(
         *unlocked_state.rgb_send_lock.lock().unwrap() = true;
         tracing::debug!("RGB send lock set to true");
 
+        if is_virtual_open && temporary_channel_id.is_none() {
+            loop {
+                let mut tmp_channel_id_bytes = [0u8; 32];
+                tmp_channel_id_bytes
+                    .copy_from_slice(&unlocked_state.keys_manager.get_secure_random_bytes()[..32]);
+                let candidate = ChannelId::from_bytes(tmp_channel_id_bytes);
+                if !unlocked_state.channel_ids().contains_key(&candidate)
+                    && !unlocked_state
+                        .virtual_channel_draft_store()
+                        .contains_key(&candidate)
+                {
+                    temporary_channel_id = Some(candidate);
+                    break;
+                }
+            }
+        }
+
+        if is_virtual_open {
+            unlocked_state.virtual_channel_draft_add(VirtualChannelDraft {
+                temporary_channel_id: temporary_channel_id.expect("virtual open temp id"),
+                peer_id: peer_pubkey,
+                created_at: get_current_timestamp(),
+            });
+        }
+
         let temporary_channel_id = unlocked_state
             .channel_manager
             .create_channel(
@@ -3196,6 +3281,10 @@ pub(crate) async fn open_channel(
             .map_err(|e| {
                 *unlocked_state.rgb_send_lock.lock().unwrap() = false;
                 tracing::debug!("RGB send lock set to false (open channel failure: {e:?})");
+                if is_virtual_open {
+                    unlocked_state
+                        .virtual_channel_draft_delete(&temporary_channel_id.expect("draft id"));
+                }
                 match e {
                     LDKAPIError::APIMisuseError { err }
                         if err.contains("fee for initial commitment transaction") =>

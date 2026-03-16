@@ -1,0 +1,541 @@
+use super::*;
+
+const TEST_DIR_BASE: &str = "tmp/openchannel_virtual/";
+const VIRTUAL_TIMEOUT_BOUNDARY_CHUNK_SIZE: u16 = 144;
+const VIRTUAL_TIMEOUT_BOUNDARY_SYNC_TIMEOUT_SECS: f32 = 30.0;
+
+fn next_peer_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+async fn mine_blocks_and_wait_for_sync(
+    host_node_address: SocketAddr,
+    client_node_address: SocketAddr,
+    blocks_to_mine: u16,
+) {
+    mine_n_blocks(false, blocks_to_mine);
+
+    let expected_block_height = get_block_count();
+    let mut poll_interval = tokio::time::interval(std::time::Duration::from_secs(1));
+    let mut host_node_last_height = 0;
+    let mut client_node_last_height = 0;
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs_f32(VIRTUAL_TIMEOUT_BOUNDARY_SYNC_TIMEOUT_SECS),
+        async {
+            loop {
+                poll_interval.tick().await;
+                host_node_last_height = network_info(host_node_address).await.height;
+                client_node_last_height = network_info(client_node_address).await.height;
+                if host_node_last_height == expected_block_height
+                    && client_node_last_height == expected_block_height
+                {
+                    break;
+                }
+            }
+        },
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "nodes did not sync to block height {expected_block_height} after mining \
+             {blocks_to_mine} blocks (host={host_node_last_height}, \
+             client={client_node_last_height})"
+        )
+    });
+}
+
+#[tokio::test]
+#[traced_test]
+#[serial_test::serial]
+async fn virtual_open_rejects_duplicate_synthetic_funding_outpoint() {
+    initialize();
+
+    let test_storage_root = format!("{TEST_DIR_BASE}duplicate/");
+    let host_node_peer_port = next_peer_port();
+    let client_node_peer_port = next_peer_port();
+
+    let (host_node_address, _host_node_password) = start_node_with_virtual_flag(
+        &format!("{test_storage_root}host_node"),
+        host_node_peer_port,
+        false,
+        true,
+    )
+    .await;
+    let (client_node_address, _client_node_password) = start_node_with_virtual_flag(
+        &format!("{test_storage_root}client_node"),
+        client_node_peer_port,
+        false,
+        true,
+    )
+    .await;
+
+    fund_and_create_utxos(host_node_address, None).await;
+    let issued_asset_id = issue_asset_nia(host_node_address).await.asset_id;
+    let client_node_info = node_info(client_node_address).await;
+    let client_node_pubkey_with_addr = format!(
+        "{}@127.0.0.1:{}",
+        client_node_info.pubkey, client_node_peer_port
+    );
+
+    let opened_virtual_channel = open_virtual_channel(
+        host_node_address,
+        &client_node_info.pubkey,
+        Some(client_node_peer_port),
+        Some(100_000),
+        Some(0),
+        Some(200),
+        Some(&issued_asset_id),
+    )
+    .await;
+    assert_eq!(
+        opened_virtual_channel.virtual_open_mode.as_deref(),
+        Some("trusted_no_broadcast")
+    );
+
+    let duplicate_virtual_open_request = OpenChannelRequest {
+        peer_pubkey_and_opt_addr: client_node_pubkey_with_addr,
+        capacity_sat: 100_000,
+        push_msat: 0,
+        asset_amount: Some(200),
+        asset_id: Some(issued_asset_id),
+        public: false,
+        with_anchors: true,
+        fee_base_msat: None,
+        fee_proportional_millionths: None,
+        temporary_channel_id: None,
+        virtual_open_mode: Some("trusted_no_broadcast".to_string()),
+    };
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{host_node_address}/openchannel"))
+        .json(&duplicate_virtual_open_request)
+        .send()
+        .await
+        .unwrap();
+    check_response_is_nok(
+        response,
+        reqwest::StatusCode::BAD_REQUEST,
+        "trusted_no_broadcast already exists for this peer pair",
+        "InvalidRequest",
+    )
+    .await;
+
+    let host_node_channels = list_channels(host_node_address).await;
+    let matching_virtual_channel_count = host_node_channels
+        .iter()
+        .filter(|channel| {
+            channel.peer_pubkey == client_node_info.pubkey
+                && channel.virtual_open_mode.as_deref() == Some("trusted_no_broadcast")
+        })
+        .count();
+    assert_eq!(matching_virtual_channel_count, 1);
+}
+
+#[tokio::test]
+#[traced_test]
+#[serial_test::serial]
+async fn virtual_open_rejects_invalid_requests() {
+    initialize();
+
+    let test_storage_root = format!("{TEST_DIR_BASE}negative/");
+    let host_node_virtual_disabled_peer_port = next_peer_port();
+    let host_node_virtual_enabled_peer_port = next_peer_port();
+    let client_node_peer_port = next_peer_port();
+
+    let (host_node_virtual_disabled_address, _host_node_virtual_disabled_password) = start_node(
+        &format!("{test_storage_root}host_node_virtual_disabled"),
+        host_node_virtual_disabled_peer_port,
+        false,
+    )
+    .await;
+    let (host_node_virtual_enabled_address, _host_node_virtual_enabled_password) =
+        start_node_with_virtual_flag(
+            &format!("{test_storage_root}host_node_virtual_enabled"),
+            host_node_virtual_enabled_peer_port,
+            false,
+            true,
+        )
+        .await;
+    let (client_node_address, _client_node_password) = start_node(
+        &format!("{test_storage_root}client_node"),
+        client_node_peer_port,
+        false,
+    )
+    .await;
+
+    fund_and_create_utxos(host_node_virtual_enabled_address, None).await;
+    let issued_asset_id = issue_asset_nia(host_node_virtual_enabled_address)
+        .await
+        .asset_id;
+    let client_node_info = node_info(client_node_address).await;
+    let client_node_pubkey_with_addr = format!(
+        "{}@127.0.0.1:{}",
+        client_node_info.pubkey, client_node_peer_port
+    );
+
+    let request_when_virtual_feature_disabled = OpenChannelRequest {
+        peer_pubkey_and_opt_addr: client_node_pubkey_with_addr.clone(),
+        capacity_sat: 100_000,
+        push_msat: 0,
+        asset_amount: Some(100),
+        asset_id: Some(issued_asset_id.clone()),
+        public: false,
+        with_anchors: true,
+        fee_base_msat: None,
+        fee_proportional_millionths: None,
+        temporary_channel_id: None,
+        virtual_open_mode: Some("trusted_no_broadcast".to_string()),
+    };
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://{host_node_virtual_disabled_address}/openchannel"
+        ))
+        .json(&request_when_virtual_feature_disabled)
+        .send()
+        .await
+        .unwrap();
+    check_response_is_nok(
+        response,
+        reqwest::StatusCode::BAD_REQUEST,
+        "trusted virtual channels v0 are disabled",
+        "InvalidRequest",
+    )
+    .await;
+
+    let request_with_unknown_virtual_mode = OpenChannelRequest {
+        peer_pubkey_and_opt_addr: client_node_pubkey_with_addr.clone(),
+        capacity_sat: 100_000,
+        push_msat: 0,
+        asset_amount: Some(100),
+        asset_id: Some(issued_asset_id.clone()),
+        public: false,
+        with_anchors: true,
+        fee_base_msat: None,
+        fee_proportional_millionths: None,
+        temporary_channel_id: None,
+        virtual_open_mode: Some("wrong_mode".to_string()),
+    };
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://{host_node_virtual_enabled_address}/openchannel"
+        ))
+        .json(&request_with_unknown_virtual_mode)
+        .send()
+        .await
+        .unwrap();
+    check_response_is_nok(
+        response,
+        reqwest::StatusCode::BAD_REQUEST,
+        "unknown virtual_open_mode: wrong_mode",
+        "InvalidRequest",
+    )
+    .await;
+
+    let request_with_public_channel_true = OpenChannelRequest {
+        peer_pubkey_and_opt_addr: client_node_pubkey_with_addr,
+        capacity_sat: 100_000,
+        push_msat: 0,
+        asset_amount: Some(100),
+        asset_id: Some(issued_asset_id),
+        public: true,
+        with_anchors: true,
+        fee_base_msat: None,
+        fee_proportional_millionths: None,
+        temporary_channel_id: None,
+        virtual_open_mode: Some("trusted_no_broadcast".to_string()),
+    };
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://{host_node_virtual_enabled_address}/openchannel"
+        ))
+        .json(&request_with_public_channel_true)
+        .send()
+        .await
+        .unwrap();
+    check_response_is_nok(
+        response,
+        reqwest::StatusCode::BAD_REQUEST,
+        "trusted_no_broadcast requires public=false",
+        "InvalidRequest",
+    )
+    .await;
+}
+
+#[tokio::test]
+#[traced_test]
+#[serial_test::serial]
+async fn virtual_trusted_no_broadcast_survives_funding_timeout_and_routes_btc_and_rgb_payments() {
+    initialize();
+
+    let test_storage_root = format!("{TEST_DIR_BASE}positive/");
+    let host_node_peer_port = next_peer_port();
+    let client_node_peer_port = next_peer_port();
+
+    let (host_node_address, _host_node_password) = start_node_with_virtual_flag(
+        &format!("{test_storage_root}host_node"),
+        host_node_peer_port,
+        false,
+        true,
+    )
+    .await;
+    fund_and_create_utxos(host_node_address, None).await;
+    let issued_asset_id = issue_asset_nia(host_node_address).await.asset_id;
+    let funded_rgb_amount = 200;
+    let host_node_onchain_spendable_before_open =
+        asset_balance_spendable(host_node_address, &issued_asset_id).await;
+
+    let (client_node_address, _client_node_password) = start_node_with_virtual_flag(
+        &format!("{test_storage_root}client_node"),
+        client_node_peer_port,
+        false,
+        true,
+    )
+    .await;
+
+    let client_node_info = node_info(client_node_address).await;
+    let opened_virtual_channel = open_virtual_channel(
+        host_node_address,
+        &client_node_info.pubkey,
+        Some(client_node_peer_port),
+        Some(100_000),
+        Some(0),
+        Some(funded_rgb_amount),
+        Some(&issued_asset_id),
+    )
+    .await;
+    assert_eq!(
+        opened_virtual_channel.virtual_open_mode.as_deref(),
+        Some("trusted_no_broadcast")
+    );
+    assert!(!opened_virtual_channel.public);
+    assert!(opened_virtual_channel.ready);
+    assert!(opened_virtual_channel.is_usable);
+    assert!(matches!(
+        opened_virtual_channel.status,
+        ChannelStatus::Opened
+    ));
+
+    let host_node_onchain_spendable_after_open =
+        asset_balance_spendable(host_node_address, &issued_asset_id).await;
+    assert_eq!(
+        host_node_onchain_spendable_after_open,
+        host_node_onchain_spendable_before_open
+    );
+
+    for _ in 0..14 {
+        mine_blocks_and_wait_for_sync(
+            host_node_address,
+            client_node_address,
+            VIRTUAL_TIMEOUT_BOUNDARY_CHUNK_SIZE,
+        )
+        .await;
+    }
+    mine_blocks_and_wait_for_sync(host_node_address, client_node_address, 1).await;
+
+    let host_node_channels = list_channels(host_node_address).await;
+    let virtual_channel_after_timeout = host_node_channels
+        .iter()
+        .find(|channel| channel.channel_id == opened_virtual_channel.channel_id)
+        .expect("virtual channel should still exist after 2017 blocks");
+    assert!(virtual_channel_after_timeout.ready);
+    assert!(virtual_channel_after_timeout.is_usable);
+    assert!(matches!(
+        virtual_channel_after_timeout.status,
+        ChannelStatus::Opened
+    ));
+    assert_eq!(
+        virtual_channel_after_timeout.virtual_open_mode.as_deref(),
+        Some("trusted_no_broadcast")
+    );
+    assert_eq!(
+        virtual_channel_after_timeout.asset_id.as_deref(),
+        Some(issued_asset_id.as_str())
+    );
+    assert_eq!(
+        virtual_channel_after_timeout.asset_local_amount,
+        Some(funded_rgb_amount)
+    );
+
+    let expected_virtual_marker_path = PathBuf::from(format!(
+        "{test_storage_root}host_node/.ldk/virtual_channel_{}",
+        virtual_channel_after_timeout.channel_id
+    ));
+    assert!(expected_virtual_marker_path.exists());
+
+    let btc_ln_invoice = ln_invoice(client_node_address, Some(3_000_000), None, None, 3600)
+        .await
+        .invoice;
+    send_payment_with_status(host_node_address, btc_ln_invoice, HTLCStatus::Succeeded).await;
+
+    let host_to_client_a_rgb_payment_amount = 50;
+    let rgb_ln_invoice = ln_invoice(
+        client_node_address,
+        Some(3_000_000),
+        Some(&issued_asset_id),
+        Some(host_to_client_a_rgb_payment_amount),
+        3600,
+    )
+    .await
+    .invoice;
+    send_payment_with_status(host_node_address, rgb_ln_invoice, HTLCStatus::Succeeded).await;
+
+    wait_for_ln_balance(
+        host_node_address,
+        &issued_asset_id,
+        funded_rgb_amount - host_to_client_a_rgb_payment_amount,
+    )
+    .await;
+    wait_for_ln_balance(
+        client_node_address,
+        &issued_asset_id,
+        host_to_client_a_rgb_payment_amount,
+    )
+    .await;
+
+    let client_to_host_rgb_payment_amount = 5;
+    let client_a_to_host_rgb_invoice = ln_invoice(
+        host_node_address,
+        Some(3_000_000),
+        Some(&issued_asset_id),
+        Some(client_to_host_rgb_payment_amount),
+        3600,
+    )
+    .await
+    .invoice;
+    let client_a_to_host_rgb_payment =
+        send_payment_raw(client_node_address, client_a_to_host_rgb_invoice).await;
+    wait_for_ln_payment(
+        client_node_address,
+        &client_a_to_host_rgb_payment
+            .payment_hash
+            .expect("client A -> host RGB payment hash"),
+        HTLCStatus::Succeeded,
+    )
+    .await;
+
+    wait_for_ln_balance(
+        host_node_address,
+        &issued_asset_id,
+        funded_rgb_amount - host_to_client_a_rgb_payment_amount + client_to_host_rgb_payment_amount,
+    )
+    .await;
+    wait_for_ln_balance(
+        client_node_address,
+        &issued_asset_id,
+        host_to_client_a_rgb_payment_amount - client_to_host_rgb_payment_amount,
+    )
+    .await;
+
+    let host_node_onchain_spendable_after_payments =
+        asset_balance_spendable(host_node_address, &issued_asset_id).await;
+    assert_eq!(
+        host_node_onchain_spendable_after_payments,
+        host_node_onchain_spendable_after_open
+    );
+
+    /* Deferred to Phase 1:
+    let client_b_node_peer_port = next_peer_port();
+    let (client_b_node_address, _client_b_node_password) = start_node_with_virtual_flag(
+        &format!("{test_storage_root}client_b_node"),
+        client_b_node_peer_port,
+        false,
+        true,
+    )
+    .await;
+
+    let client_b_node_info = node_info(client_b_node_address).await;
+    let channel_b_funded_rgb_amount = 300;
+    let opened_virtual_channel_b = open_virtual_channel(
+        host_node_address,
+        &client_b_node_info.pubkey,
+        Some(client_b_node_peer_port),
+        Some(100_000),
+        Some(0),
+        Some(channel_b_funded_rgb_amount),
+        Some(&issued_asset_id),
+    )
+    .await;
+    assert_eq!(
+        opened_virtual_channel_b.virtual_open_mode.as_deref(),
+        Some("trusted_no_broadcast")
+    );
+    assert!(!opened_virtual_channel_b.public);
+    assert!(opened_virtual_channel_b.ready);
+    assert!(opened_virtual_channel_b.is_usable);
+    assert!(matches!(
+        opened_virtual_channel_b.status,
+        ChannelStatus::Opened
+    ));
+
+    let expected_virtual_marker_path_b = PathBuf::from(format!(
+        "{test_storage_root}host_node/.ldk/virtual_channel_{}",
+        opened_virtual_channel_b.channel_id
+    ));
+    assert!(expected_virtual_marker_path_b.exists());
+
+    let client_a_to_client_b_btc_payment_msat = 1_500_000;
+    let btc_ln_invoice_b = ln_invoice(
+        client_b_node_address,
+        Some(client_a_to_client_b_btc_payment_msat),
+        None,
+        None,
+        3600,
+    )
+    .await
+    .invoice;
+    let client_a_to_client_b_btc_payment =
+        send_payment_raw(client_node_address, btc_ln_invoice_b).await;
+    wait_for_ln_payment(
+        client_node_address,
+        &client_a_to_client_b_btc_payment
+            .payment_hash
+            .expect("client A -> client B BTC payment hash"),
+        HTLCStatus::Succeeded,
+    )
+    .await;
+
+    let client_a_to_client_b_rgb_payment_amount = 10;
+    let rgb_ln_invoice_b = ln_invoice(
+        client_b_node_address,
+        Some(3_000_000),
+        Some(&issued_asset_id),
+        Some(client_a_to_client_b_rgb_payment_amount),
+        3600,
+    )
+    .await
+    .invoice;
+    let client_a_to_client_b_rgb_payment =
+        send_payment_raw(client_node_address, rgb_ln_invoice_b).await;
+    wait_for_ln_payment(
+        client_node_address,
+        &client_a_to_client_b_rgb_payment
+            .payment_hash
+            .expect("client A -> client B RGB payment hash"),
+        HTLCStatus::Succeeded,
+    )
+    .await;
+
+    wait_for_ln_balance(
+        client_node_address,
+        &issued_asset_id,
+        host_to_client_a_rgb_payment_amount
+            - client_to_host_rgb_payment_amount
+            - client_a_to_client_b_rgb_payment_amount,
+    )
+    .await;
+    wait_for_ln_balance(
+        client_b_node_address,
+        &issued_asset_id,
+        client_a_to_client_b_rgb_payment_amount,
+    )
+    .await;
+    */
+}

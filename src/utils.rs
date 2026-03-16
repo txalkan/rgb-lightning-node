@@ -30,7 +30,7 @@ use std::{
 use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
 use tokio_util::sync::CancellationToken;
 
-use crate::ldk::{ChannelIdsMap, Router};
+use crate::ldk::{ChannelIdsMap, Router, VirtualChannelDraftStore, VirtualChannelSessionStore};
 use crate::rgb::{get_rgb_channel_info_optional, RgbLibWalletWrapper};
 use crate::routes::{DEFAULT_FINAL_CLTV_EXPIRY_DELTA, HTLC_MIN_MSAT};
 use crate::{
@@ -84,6 +84,7 @@ impl AppState {
 }
 
 pub(crate) struct StaticState {
+    pub(crate) enable_virtual_channels_v0: bool,
     pub(crate) ldk_peer_listening_port: u16,
     pub(crate) network: BitcoinNetwork,
     pub(crate) storage_dir_path: PathBuf,
@@ -111,6 +112,8 @@ pub(crate) struct UnlockedAppState {
     pub(crate) rgb_send_lock: Arc<Mutex<bool>>,
     pub(crate) channel_ids_map: Arc<Mutex<ChannelIdsMap>>,
     pub(crate) proxy_endpoint: String,
+    pub(crate) virtual_channel_draft_store: Arc<Mutex<VirtualChannelDraftStore>>,
+    pub(crate) virtual_channel_session_store: Arc<Mutex<VirtualChannelSessionStore>>,
 }
 
 impl UnlockedAppState {
@@ -132,6 +135,18 @@ impl UnlockedAppState {
 
     pub(crate) fn get_channel_ids_map(&self) -> MutexGuard<'_, ChannelIdsMap> {
         self.channel_ids_map.lock().unwrap()
+    }
+
+    pub(crate) fn get_virtual_channel_draft_store(
+        &self,
+    ) -> MutexGuard<'_, VirtualChannelDraftStore> {
+        self.virtual_channel_draft_store.lock().unwrap()
+    }
+
+    pub(crate) fn get_virtual_channel_session_store(
+        &self,
+    ) -> MutexGuard<'_, VirtualChannelSessionStore> {
+        self.virtual_channel_session_store.lock().unwrap()
     }
 }
 
@@ -353,6 +368,7 @@ pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppEr
     let cancel_token = CancellationToken::new();
 
     let static_state = Arc::new(StaticState {
+        enable_virtual_channels_v0: args.enable_virtual_channels_v0,
         ldk_peer_listening_port: args.ldk_peer_listening_port,
         network: args.network,
         storage_dir_path: args.storage_dir_path.clone(),

@@ -35,6 +35,9 @@ struct Args {
     /// Disable authentication
     #[arg(long, default_value_t = false)]
     disable_authentication: bool,
+
+    #[arg(long, default_value_t = false)]
+    enable_virtual_channels_v0: bool,
 }
 
 pub(crate) struct UserArgs {
@@ -44,6 +47,7 @@ pub(crate) struct UserArgs {
     pub(crate) network: BitcoinNetwork,
     pub(crate) max_media_upload_size_mb: u16,
     pub(crate) root_public_key: Option<biscuit_auth::PublicKey>,
+    pub(crate) enable_virtual_channels_v0: bool,
 }
 
 pub(crate) fn parse_startup_args() -> Result<UserArgs, AppError> {
@@ -65,5 +69,6 @@ pub(crate) fn parse_startup_args() -> Result<UserArgs, AppError> {
         network,
         max_media_upload_size_mb: args.max_media_upload_size_mb,
         root_public_key,
+        enable_virtual_channels_v0: args.enable_virtual_channels_v0,
     })
 }
