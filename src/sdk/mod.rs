@@ -2,6 +2,10 @@
 // If route-level business logic changes, keep SDK equivalents in sync.
 
 use crate::error::APIError;
+use crate::core_types::{
+    HtlcStatus as CoreHtlcStatus, SwapStatus as CoreSwapStatus,
+    UnlockRequestData as CoreUnlockRequestData,
+};
 use crate::disk::{self, CHANNEL_PEER_DATA};
 use crate::ldk::{start_ldk, PaymentInfo, FEE_RATE, MIN_CHANNEL_CONFIRMATIONS};
 use crate::rgb::check_rgb_proxy_endpoint;
@@ -30,6 +34,7 @@ use lightning::sign::EntropySource;
 use lightning::types::payment::PaymentHash;
 use lightning::util::config::{ChannelConfig, ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
 use lightning::util::errors::APIError as LDKAPIError;
+use lightning::impl_writeable_tlv_based_enum;
 use lightning_invoice::Bolt11Invoice;
 use regex::Regex;
 use rgb_lib::wallet::rust_only::check_indexer_url as rgb_lib_check_indexer_url;
@@ -45,7 +50,6 @@ use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, BufReader};
 
-use lightning::impl_writeable_tlv_based_enum;
 use rgb_lib::wallet::rust_only::IndexerProtocol as RgbLibIndexerProtocol;
 use rgb_lib::wallet::RecipientType as RgbLibRecipientType;
 use rgb_lib::wallet::{
@@ -397,6 +401,26 @@ impl_writeable_tlv_based_enum!(HtlcStatus,
     (2, Failed) => {},
 );
 
+impl From<CoreHtlcStatus> for HtlcStatus {
+    fn from(value: CoreHtlcStatus) -> Self {
+        match value {
+            CoreHtlcStatus::Pending => Self::Pending,
+            CoreHtlcStatus::Succeeded => Self::Succeeded,
+            CoreHtlcStatus::Failed => Self::Failed,
+        }
+    }
+}
+
+impl From<HtlcStatus> for CoreHtlcStatus {
+    fn from(value: HtlcStatus) -> Self {
+        match value {
+            HtlcStatus::Pending => Self::Pending,
+            HtlcStatus::Succeeded => Self::Succeeded,
+            HtlcStatus::Failed => Self::Failed,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum InvoiceStatus {
     Pending,
@@ -421,6 +445,30 @@ impl_writeable_tlv_based_enum!(SwapStatus,
     (3, Expired) => {},
     (4, Failed) => {},
 );
+
+impl From<CoreSwapStatus> for SwapStatus {
+    fn from(value: CoreSwapStatus) -> Self {
+        match value {
+            CoreSwapStatus::Waiting => Self::Waiting,
+            CoreSwapStatus::Pending => Self::Pending,
+            CoreSwapStatus::Succeeded => Self::Succeeded,
+            CoreSwapStatus::Expired => Self::Expired,
+            CoreSwapStatus::Failed => Self::Failed,
+        }
+    }
+}
+
+impl From<SwapStatus> for CoreSwapStatus {
+    fn from(value: SwapStatus) -> Self {
+        match value {
+            SwapStatus::Waiting => Self::Waiting,
+            SwapStatus::Pending => Self::Pending,
+            SwapStatus::Succeeded => Self::Succeeded,
+            SwapStatus::Expired => Self::Expired,
+            SwapStatus::Failed => Self::Failed,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct BlockTime {
@@ -1240,8 +1288,18 @@ pub(crate) async fn unlock(
     };
 
     tracing::debug!("Starting LDK...");
+    let unlock_request = CoreUnlockRequestData {
+        bitcoind_rpc_username: request.bitcoind_rpc_username,
+        bitcoind_rpc_password: request.bitcoind_rpc_password,
+        bitcoind_rpc_host: request.bitcoind_rpc_host,
+        bitcoind_rpc_port: request.bitcoind_rpc_port,
+        indexer_url: request.indexer_url,
+        proxy_endpoint: request.proxy_endpoint,
+        announce_addresses: request.announce_addresses,
+        announce_alias: request.announce_alias,
+    };
     let (new_ldk_background_services, new_unlocked_app_state) =
-        match start_ldk(state.clone(), mnemonic, request).await {
+        match start_ldk(state.clone(), mnemonic, unlock_request).await {
             Ok((nlbs, nuap)) => (nlbs, nuap),
             Err(e) => {
                 state.update_changing_state(false);
@@ -1543,7 +1601,7 @@ pub(crate) async fn send_payment(
                 PaymentInfo {
                     preimage: None,
                     secret,
-                    status,
+                    status: status.into(),
                     amt_msat: Some(amt_msat),
                     created_at,
                     updated_at: created_at,
@@ -1563,9 +1621,10 @@ pub(crate) async fn send_payment(
                 .pay_for_offer(&offer, Some(amt_msat), payment_id, params);
             if pay.is_err() {
                 tracing::error!("ERROR: failed to pay: {:?}", pay);
-                unlocked_state.update_outbound_payment_status(payment_id, HtlcStatus::Failed);
+                unlocked_state
+                    .update_outbound_payment_status(payment_id, HtlcStatus::Failed.into());
                 status = HtlcStatus::Failed;
-                unlocked_state.update_outbound_payment_status(payment_id, status);
+                unlocked_state.update_outbound_payment_status(payment_id, status.into());
             }
             (payment_id, None, secret)
         } else {
@@ -1636,7 +1695,7 @@ pub(crate) async fn send_payment(
                 PaymentInfo {
                     preimage: None,
                     secret,
-                    status,
+                    status: status.into(),
                     amt_msat: Some(amt_msat),
                     created_at,
                     updated_at: created_at,
@@ -1670,7 +1729,7 @@ pub(crate) async fn send_payment(
                 Err(e) => {
                     tracing::error!("ERROR: failed to send payment: {:?}", e);
                     status = HtlcStatus::Failed;
-                    unlocked_state.update_outbound_payment_status(payment_id, status);
+                    unlocked_state.update_outbound_payment_status(payment_id, status.into());
                 }
             };
 
@@ -1752,7 +1811,7 @@ pub(crate) async fn invoice_status(
         Bolt11Invoice::from_str(&invoice).map_err(|e| APIError::InvalidInvoice(e.to_string()))?;
     let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
     let status = match unlocked_state.inbound_payments().get(&payment_hash) {
-        Some(v) => match v.status {
+        Some(v) => match HtlcStatus::from(v.status) {
             HtlcStatus::Pending if invoice.is_expired() => InvoiceStatus::Expired,
             HtlcStatus::Pending => InvoiceStatus::Pending,
             HtlcStatus::Succeeded => InvoiceStatus::Succeeded,
@@ -1817,7 +1876,7 @@ pub(crate) async fn create_ln_invoice(
         PaymentInfo {
             preimage: None,
             secret: Some(*invoice.payment_secret()),
-            status: HtlcStatus::Pending,
+            status: HtlcStatus::Pending.into(),
             amt_msat,
             created_at,
             updated_at: created_at,
@@ -1858,7 +1917,7 @@ pub(crate) async fn list_payments(state: Arc<AppState>) -> Result<Vec<PaymentDat
             asset_id,
             payment_hash: hex_str(&payment_hash.0),
             inbound: true,
-            status: payment_info.status,
+            status: payment_info.status.into(),
             created_at: payment_info.created_at,
             updated_at: payment_info.updated_at,
             payee_pubkey: payment_info.payee_pubkey.to_string(),
@@ -1884,7 +1943,7 @@ pub(crate) async fn list_payments(state: Arc<AppState>) -> Result<Vec<PaymentDat
             asset_id,
             payment_hash: hex_str(&payment_hash.0),
             inbound: false,
-            status: payment_info.status,
+            status: payment_info.status.into(),
             created_at: payment_info.created_at,
             updated_at: payment_info.updated_at,
             payee_pubkey: payment_info.payee_pubkey.to_string(),
@@ -1929,7 +1988,7 @@ pub(crate) async fn get_payment(
                 asset_id,
                 payment_hash: hex_str(&payment_hash.0),
                 inbound: true,
-                status: payment_info.status,
+                status: payment_info.status.into(),
                 created_at: payment_info.created_at,
                 updated_at: payment_info.updated_at,
                 payee_pubkey: payment_info.payee_pubkey.to_string(),
@@ -1956,7 +2015,7 @@ pub(crate) async fn get_payment(
                 asset_id,
                 payment_hash: hex_str(&payment_hash.0),
                 inbound: false,
-                status: payment_info.status,
+                status: payment_info.status.into(),
                 created_at: payment_info.created_at,
                 updated_at: payment_info.updated_at,
                 payee_pubkey: payment_info.payee_pubkey.to_string(),
@@ -1974,7 +2033,7 @@ fn map_swap(
     taker: bool,
     state: &crate::utils::UnlockedAppState,
 ) -> SwapViewData {
-    let mut status: SwapStatus = swap_data.status;
+    let mut status: SwapStatus = swap_data.status.into();
     if status == SwapStatus::Waiting && get_current_timestamp() > swap_data.swap_info.expiry {
         status = SwapStatus::Expired;
     } else if status == SwapStatus::Pending
@@ -1982,12 +2041,12 @@ fn map_swap(
     {
         status = SwapStatus::Failed;
     }
-    let current_status: SwapStatus = swap_data.status;
+    let current_status: SwapStatus = swap_data.status.into();
     if status != current_status {
         if taker {
-            state.update_taker_swap_status(payment_hash, status);
+            state.update_taker_swap_status(payment_hash, status.into());
         } else {
-            state.update_maker_swap_status(payment_hash, status);
+            state.update_maker_swap_status(payment_hash, status.into());
         }
     }
 

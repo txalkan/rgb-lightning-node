@@ -87,6 +87,10 @@ use crate::utils::{
 };
 use crate::{
     backup::{do_backup, restore_backup},
+    core_types::{
+        HtlcStatus as CoreHtlcStatus, SwapStatus as CoreSwapStatus,
+        UnlockRequestData as CoreUnlockRequestData,
+    },
     rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional},
 };
 use crate::{
@@ -606,6 +610,26 @@ impl From<HTLCStatus> for crate::sdk::HtlcStatus {
     }
 }
 
+impl From<CoreHtlcStatus> for HTLCStatus {
+    fn from(value: CoreHtlcStatus) -> Self {
+        match value {
+            CoreHtlcStatus::Pending => HTLCStatus::Pending,
+            CoreHtlcStatus::Succeeded => HTLCStatus::Succeeded,
+            CoreHtlcStatus::Failed => HTLCStatus::Failed,
+        }
+    }
+}
+
+impl From<HTLCStatus> for CoreHtlcStatus {
+    fn from(value: HTLCStatus) -> Self {
+        match value {
+            HTLCStatus::Pending => CoreHtlcStatus::Pending,
+            HTLCStatus::Succeeded => CoreHtlcStatus::Succeeded,
+            HTLCStatus::Failed => CoreHtlcStatus::Failed,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) enum IndexerProtocol {
     Electrum,
@@ -1097,6 +1121,30 @@ impl From<SwapStatus> for crate::sdk::SwapStatus {
             SwapStatus::Succeeded => crate::sdk::SwapStatus::Succeeded,
             SwapStatus::Expired => crate::sdk::SwapStatus::Expired,
             SwapStatus::Failed => crate::sdk::SwapStatus::Failed,
+        }
+    }
+}
+
+impl From<CoreSwapStatus> for SwapStatus {
+    fn from(value: CoreSwapStatus) -> Self {
+        match value {
+            CoreSwapStatus::Waiting => SwapStatus::Waiting,
+            CoreSwapStatus::Pending => SwapStatus::Pending,
+            CoreSwapStatus::Succeeded => SwapStatus::Succeeded,
+            CoreSwapStatus::Expired => SwapStatus::Expired,
+            CoreSwapStatus::Failed => SwapStatus::Failed,
+        }
+    }
+}
+
+impl From<SwapStatus> for CoreSwapStatus {
+    fn from(value: SwapStatus) -> Self {
+        match value {
+            SwapStatus::Waiting => CoreSwapStatus::Waiting,
+            SwapStatus::Pending => CoreSwapStatus::Pending,
+            SwapStatus::Succeeded => CoreSwapStatus::Succeeded,
+            SwapStatus::Expired => CoreSwapStatus::Expired,
+            SwapStatus::Failed => CoreSwapStatus::Failed,
         }
     }
 }
@@ -3850,8 +3898,7 @@ pub(crate) async fn unlock(
         };
 
         tracing::debug!("Starting LDK...");
-        let unlock_request = crate::sdk::UnlockRequestData {
-            password: payload.password,
+        let unlock_request = CoreUnlockRequestData {
             bitcoind_rpc_username: payload.bitcoind_rpc_username,
             bitcoind_rpc_password: payload.bitcoind_rpc_password,
             bitcoind_rpc_host: payload.bitcoind_rpc_host,

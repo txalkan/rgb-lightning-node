@@ -4,6 +4,7 @@ mod args;
 mod auth;
 mod backup;
 mod bitcoind;
+mod core_types;
 mod disk;
 mod error;
 #[cfg(feature = "uniffi")]
