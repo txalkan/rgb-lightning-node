@@ -49,54 +49,160 @@ fn send_rgb_from_state(
     state: std::sync::Arc<crate::utils::AppState>,
     request: SendRgbRequest,
 ) -> Result<SendRgbResponse, RlnError> {
-    if request.recipient_groups.is_empty() {
-        return Err(RlnError::InvalidRequest);
-    }
-    let recipient_map = request
-        .recipient_groups
-        .into_iter()
-        .map(|group| {
-            let asset_id = group.asset_id.to_string();
-            let recipients = group
-                .recipients
-                .into_iter()
-                .map(|r| {
-                    let assignment = match (r.assignment_kind, r.assignment_amount) {
-                        (AssignmentKind::Fungible, Some(v)) => crate::routes::Assignment::Fungible(v),
-                        (AssignmentKind::InflationRight, Some(v)) => {
-                            crate::routes::Assignment::InflationRight(v)
-                        }
-                        (AssignmentKind::NonFungible, None) => crate::routes::Assignment::NonFungible,
-                        (AssignmentKind::ReplaceRight, None) => crate::routes::Assignment::ReplaceRight,
-                        (AssignmentKind::Any, None) => crate::routes::Assignment::Any,
-                        _ => return Err(RlnError::InvalidRequest),
-                    };
-                    let recipient = crate::routes::Recipient {
+    let sdk_request = sdk::SendRgbRequestData {
+        donation: request.donation,
+        fee_rate: request.fee_rate,
+        min_confirmations: request.min_confirmations,
+        skip_sync: request.skip_sync,
+        recipient_groups: request
+            .recipient_groups
+            .into_iter()
+            .map(|group| sdk::AssetRecipientsInput {
+                asset_id: group.asset_id.to_string(),
+                recipients: group
+                    .recipients
+                    .into_iter()
+                    .map(|r| sdk::RecipientInput {
                         recipient_id: r.recipient_id.0,
-                        witness_data: r.witness_data.map(|w| crate::routes::WitnessData {
+                        witness_data: r.witness_data.map(|w| sdk::WitnessDataInput {
                             amount_sat: w.amount_sat,
                             blinding: w.blinding,
                         }),
-                        assignment,
+                        assignment_kind: match r.assignment_kind {
+                            AssignmentKind::Fungible => sdk::AssignmentKindData::Fungible,
+                            AssignmentKind::NonFungible => sdk::AssignmentKindData::NonFungible,
+                            AssignmentKind::InflationRight => sdk::AssignmentKindData::InflationRight,
+                            AssignmentKind::ReplaceRight => sdk::AssignmentKindData::ReplaceRight,
+                            AssignmentKind::Any => sdk::AssignmentKindData::Any,
+                        },
+                        assignment_amount: r.assignment_amount,
                         transport_endpoints: r.transport_endpoints.into_iter().map(|e| e.0).collect(),
-                    };
-                    Ok::<rgb_lib::wallet::Recipient, RlnError>(recipient.into())
-                })
-                .collect::<Result<Vec<_>, RlnError>>()?;
-            Ok((asset_id, recipients))
-        })
-        .collect::<Result<std::collections::HashMap<_, _>, RlnError>>()?;
+                    })
+                    .collect(),
+            })
+            .collect(),
+    };
 
-    let data = block_on_sdk(sdk::send_rgb(
+    let data = block_on_sdk(sdk::send_rgb_from_groups(
         state,
-        recipient_map,
-        request.donation,
-        request.fee_rate,
-        request.min_confirmations,
-        request.skip_sync,
+        sdk_request,
     ))?;
     let txid = Txid::from_str(&data.txid).map_err(|_| RlnError::Internal)?;
     Ok(SendRgbResponse { txid, batch_transfer_idx: data.batch_transfer_idx })
+}
+
+fn map_payment_data(data: crate::sdk::PaymentData) -> Result<Payment, RlnError> {
+    let payee_pubkey = PublicKey::from_str(&data.payee_pubkey).map_err(|_| RlnError::Internal)?;
+    let asset_id = match data.asset_id {
+        Some(asset_id) => Some(ContractId::from_str(&asset_id).map_err(|_| RlnError::Internal)?),
+        None => None,
+    };
+    let payment_hash = <PaymentHash as UniffiCustomTypeConverter>::into_custom(data.payment_hash)
+        .map_err(|_| RlnError::Internal)?;
+    let status = match data.status {
+        crate::sdk::HtlcStatus::Pending => HtlcStatus::Pending,
+        crate::sdk::HtlcStatus::Succeeded => HtlcStatus::Succeeded,
+        crate::sdk::HtlcStatus::Failed => HtlcStatus::Failed,
+    };
+
+    Ok(Payment {
+        amt_msat: data.amt_msat,
+        asset_amount: data.asset_amount,
+        asset_id,
+        payment_hash,
+        inbound: data.inbound,
+        status,
+        created_at: data.created_at,
+        updated_at: data.updated_at,
+        payee_pubkey,
+    })
+}
+
+fn map_swap_data(data: crate::sdk::SwapViewData) -> Result<Swap, RlnError> {
+    let from_asset = match data.from_asset {
+        Some(asset_id) => Some(ContractId::from_str(&asset_id).map_err(|_| RlnError::Internal)?),
+        None => None,
+    };
+    let to_asset = match data.to_asset {
+        Some(asset_id) => Some(ContractId::from_str(&asset_id).map_err(|_| RlnError::Internal)?),
+        None => None,
+    };
+    let payment_hash = <PaymentHash as UniffiCustomTypeConverter>::into_custom(data.payment_hash)
+        .map_err(|_| RlnError::Internal)?;
+    let status = match data.status {
+        crate::sdk::SwapStatus::Waiting => SwapStatus::Waiting,
+        crate::sdk::SwapStatus::Pending => SwapStatus::Pending,
+        crate::sdk::SwapStatus::Succeeded => SwapStatus::Succeeded,
+        crate::sdk::SwapStatus::Expired => SwapStatus::Expired,
+        crate::sdk::SwapStatus::Failed => SwapStatus::Failed,
+    };
+
+    Ok(Swap {
+        qty_from: data.qty_from,
+        qty_to: data.qty_to,
+        from_asset,
+        to_asset,
+        payment_hash,
+        status,
+        requested_at: data.requested_at,
+        initiated_at: data.initiated_at,
+        expires_at: data.expires_at,
+        completed_at: data.completed_at,
+    })
+}
+
+fn map_asset_balance_data(data: crate::sdk::AssetBalanceData) -> AssetBalanceInfo {
+    AssetBalanceInfo {
+        settled: data.settled,
+        future: data.future,
+        spendable: data.spendable,
+        offchain_outbound: data.offchain_outbound,
+        offchain_inbound: data.offchain_inbound,
+    }
+}
+
+fn map_asset_balance(data: crate::sdk::AssetBalance) -> AssetBalanceInfo {
+    AssetBalanceInfo {
+        settled: data.settled,
+        future: data.future,
+        spendable: data.spendable,
+        offchain_outbound: data.offchain_outbound,
+        offchain_inbound: data.offchain_inbound,
+    }
+}
+
+fn map_media(data: crate::sdk::Media) -> Media {
+    Media {
+        file_path: data.file_path,
+        digest: data.digest,
+        mime: data.mime,
+    }
+}
+
+fn map_token(data: crate::sdk::Token) -> Token {
+    Token {
+        index: data.index,
+        ticker: data.ticker,
+        name: data.name,
+        details: data.details,
+        embedded_media: data.embedded_media.map(|m| EmbeddedMedia {
+            mime: m.mime,
+            data: m.data,
+        }),
+        media: data.media.map(map_media),
+        attachments: data
+            .attachments
+            .into_iter()
+            .map(|(k, v)| MediaAttachment {
+                key: k,
+                media: map_media(v),
+            })
+            .collect(),
+        reserves: data.reserves.map(|r| ProofOfReserves {
+            utxo: r.utxo,
+            proof: r.proof,
+        }),
+    }
 }
 
 impl SdkNode {
@@ -113,6 +219,114 @@ impl SdkNode {
         });
     }
 
+    pub fn init(&self, password: String, mnemonic: Option<String>) -> Result<String, RlnError> {
+        let state = self.handle.app_state();
+        let response = block_on_sdk(sdk::init(state, password, mnemonic))?;
+        Ok(response.mnemonic)
+    }
+
+    pub fn unlock(&self, request: SdkUnlockRequest) -> Result<(), RlnError> {
+        let state = self.handle.app_state();
+        block_on_sdk(sdk::unlock(
+            state,
+            sdk::UnlockRequestData {
+                password: request.password,
+                bitcoind_rpc_username: request.bitcoind_rpc_username,
+                bitcoind_rpc_password: request.bitcoind_rpc_password,
+                bitcoind_rpc_host: request.bitcoind_rpc_host,
+                bitcoind_rpc_port: request.bitcoind_rpc_port,
+                indexer_url: request.indexer_url,
+                proxy_endpoint: request.proxy_endpoint,
+                announce_addresses: request.announce_addresses,
+                announce_alias: request.announce_alias,
+            },
+        ))?;
+        Ok(())
+    }
+
+    pub fn connectpeer(&self, peer_pubkey_and_addr: String) -> Result<(), RlnError> {
+        let state = self.handle.app_state();
+        block_on_sdk(sdk::connect_peer(state, peer_pubkey_and_addr))?;
+        Ok(())
+    }
+
+    pub fn openchannel(
+        &self,
+        request: SdkOpenChannelRequest,
+    ) -> Result<SdkOpenChannelResponse, RlnError> {
+        use bitcoin::hex::DisplayHex;
+        use bitcoin::hex::FromHex;
+
+        let state = self.handle.app_state();
+        let response = block_on_sdk(sdk::open_channel(
+            state,
+            sdk::OpenChannelRequestData {
+                peer_pubkey_and_opt_addr: request.peer_pubkey_and_opt_addr,
+                capacity_sat: request.capacity_sat,
+                push_msat: request.push_msat,
+                asset_amount: request.asset_amount,
+                asset_id: request.asset_id.map(|id| id.to_string()),
+                public: request.public,
+                with_anchors: request.with_anchors,
+                fee_base_msat: request.fee_base_msat,
+                fee_proportional_millionths: request.fee_proportional_millionths,
+                temporary_channel_id: request
+                    .temporary_channel_id
+                    .map(|id| id.0.as_hex().to_string()),
+            },
+        ))?;
+        let hex = response.temporary_channel_id;
+        let bytes = Vec::<u8>::from_hex(&hex).map_err(|_| RlnError::Internal)?;
+        if bytes.len() != 32 {
+            return Err(RlnError::Internal);
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(SdkOpenChannelResponse {
+            temporary_channel_id: lightning::ln::types::ChannelId(arr),
+        })
+    }
+
+    pub fn sendpayment(
+        &self,
+        request: SdkSendPaymentRequest,
+    ) -> Result<SdkSendPaymentResponse, RlnError> {
+        let state = self.handle.app_state();
+        let response = block_on_sdk(sdk::send_payment(
+            state,
+            sdk::SendPaymentRequestData {
+                invoice: request.invoice,
+                amt_msat: request.amt_msat,
+                asset_id: request.asset_id.map(|id| id.to_string()),
+                asset_amount: request.asset_amount,
+            },
+        ))?;
+        let status = match response.status {
+            crate::sdk::HtlcStatus::Pending => HtlcStatus::Pending,
+            crate::sdk::HtlcStatus::Succeeded => HtlcStatus::Succeeded,
+            crate::sdk::HtlcStatus::Failed => HtlcStatus::Failed,
+        };
+        let payment_hash = response
+            .payment_hash
+            .map(|s| {
+                <PaymentHash as UniffiCustomTypeConverter>::into_custom(s)
+                    .map_err(|_| RlnError::Internal)
+            })
+            .transpose()?;
+        Ok(SdkSendPaymentResponse {
+            payment_id: response.payment_id,
+            payment_hash,
+            payment_secret: response.payment_secret,
+            status,
+        })
+    }
+
+    pub fn sync(&self) -> Result<(), RlnError> {
+        let state = self.handle.app_state();
+        block_on_sdk(sdk::sync(state))?;
+        Ok(())
+    }
+
     pub fn node_info(&self) -> Result<NodeInfo, RlnError> {
         let state = self.handle.app_state();
         let data = block_on_sdk(sdk::node_info(state))?;
@@ -121,7 +335,13 @@ impl SdkNode {
         Ok(NodeInfo {
             pubkey,
             num_channels: data.num_channels as u64,
+            num_usable_channels: data.num_usable_channels as u64,
+            local_balance_sat: data.local_balance_sat,
+            eventual_close_fees_sat: data.eventual_close_fees_sat,
+            pending_outbound_payments_sat: data.pending_outbound_payments_sat,
             num_peers: data.num_peers as u64,
+            account_xpub_vanilla: data.account_xpub_vanilla,
+            account_xpub_colored: data.account_xpub_colored,
             network_nodes: data.network_nodes as u64,
             network_channels: data.network_channels as u64,
         })
@@ -148,31 +368,13 @@ impl SdkNode {
 
         let state = self.handle.app_state();
         let data = block_on_sdk(sdk::get_payment(state, payment_hash.0.as_hex().to_string()))?;
-        let payee_pubkey =
-            PublicKey::from_str(&data.payee_pubkey).map_err(|_| RlnError::Internal)?;
-        let asset_id = match data.asset_id {
-            Some(asset_id) => Some(ContractId::from_str(&asset_id).map_err(|_| RlnError::Internal)?),
-            None => None,
-        };
-        let payment_hash = <PaymentHash as UniffiCustomTypeConverter>::into_custom(data.payment_hash)
-            .map_err(|_| RlnError::Internal)?;
-        let status = match data.status {
-            crate::sdk::HtlcStatus::Pending => HtlcStatus::Pending,
-            crate::sdk::HtlcStatus::Succeeded => HtlcStatus::Succeeded,
-            crate::sdk::HtlcStatus::Failed => HtlcStatus::Failed,
-        };
+        map_payment_data(data)
+    }
 
-        Ok(Payment {
-            amt_msat: data.amt_msat,
-            asset_amount: data.asset_amount,
-            asset_id,
-            payment_hash,
-            inbound: data.inbound,
-            status,
-            created_at: data.created_at,
-            updated_at: data.updated_at,
-            payee_pubkey,
-        })
+    pub fn list_payments(&self) -> Result<Vec<Payment>, RlnError> {
+        let state = self.handle.app_state();
+        let payments = block_on_sdk(sdk::list_payments(state))?;
+        payments.into_iter().map(map_payment_data).collect()
     }
 
     pub fn get_swap(&self, payment_hash: PaymentHash, taker: bool) -> Result<Swap, RlnError> {
@@ -180,36 +382,423 @@ impl SdkNode {
 
         let state = self.handle.app_state();
         let data = block_on_sdk(sdk::get_swap(state, payment_hash.0.as_hex().to_string(), taker))?;
-        let from_asset = match data.from_asset {
-            Some(asset_id) => Some(ContractId::from_str(&asset_id).map_err(|_| RlnError::Internal)?),
-            None => None,
-        };
-        let to_asset = match data.to_asset {
-            Some(asset_id) => Some(ContractId::from_str(&asset_id).map_err(|_| RlnError::Internal)?),
-            None => None,
-        };
-        let payment_hash = <PaymentHash as UniffiCustomTypeConverter>::into_custom(data.payment_hash)
-            .map_err(|_| RlnError::Internal)?;
-        let status = match data.status {
-            crate::sdk::SwapStatus::Waiting => SwapStatus::Waiting,
-            crate::sdk::SwapStatus::Pending => SwapStatus::Pending,
-            crate::sdk::SwapStatus::Succeeded => SwapStatus::Succeeded,
-            crate::sdk::SwapStatus::Expired => SwapStatus::Expired,
-            crate::sdk::SwapStatus::Failed => SwapStatus::Failed,
-        };
+        map_swap_data(data)
+    }
 
-        Ok(Swap {
-            qty_from: data.qty_from,
-            qty_to: data.qty_to,
-            from_asset,
-            to_asset,
-            payment_hash,
-            status,
-            requested_at: data.requested_at,
-            initiated_at: data.initiated_at,
-            expires_at: data.expires_at,
-            completed_at: data.completed_at,
+    pub fn list_swaps(&self) -> Result<SwapList, RlnError> {
+        let state = self.handle.app_state();
+        let data = block_on_sdk(sdk::list_swaps(state))?;
+        let taker = data
+            .taker
+            .into_iter()
+            .map(map_swap_data)
+            .collect::<Result<Vec<_>, _>>()?;
+        let maker = data
+            .maker
+            .into_iter()
+            .map(map_swap_data)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SwapList { taker, maker })
+    }
+
+    pub fn list_channels(&self) -> Result<Vec<Channel>, RlnError> {
+        use bitcoin::hex::FromHex;
+
+        let state = self.handle.app_state();
+        let channels = block_on_sdk(sdk::list_channels(state))?;
+        channels
+            .into_iter()
+            .map(|c| {
+                let channel_id_bytes = Vec::<u8>::from_hex(&c.channel_id).map_err(|_| RlnError::Internal)?;
+                if channel_id_bytes.len() != 32 {
+                    return Err(RlnError::Internal);
+                }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&channel_id_bytes);
+                let channel_id = lightning::ln::types::ChannelId(arr);
+                let peer_pubkey = PublicKey::from_str(&c.peer_pubkey).map_err(|_| RlnError::Internal)?;
+                let funding_txid = c
+                    .funding_txid
+                    .map(|txid| Txid::from_str(&txid).map_err(|_| RlnError::Internal))
+                    .transpose()?;
+                let asset_id = c
+                    .asset_id
+                    .map(|id| ContractId::from_str(&id).map_err(|_| RlnError::Internal))
+                    .transpose()?;
+                let status = match c.status {
+                    crate::sdk::ChannelStatus::Opening => ChannelStatus::Opening,
+                    crate::sdk::ChannelStatus::Opened => ChannelStatus::Opened,
+                    crate::sdk::ChannelStatus::Closing => ChannelStatus::Closing,
+                };
+                Ok(Channel {
+                    channel_id,
+                    peer_pubkey,
+                    status,
+                    ready: c.ready,
+                    capacity_sat: c.capacity_sat,
+                    local_balance_sat: c.local_balance_sat,
+                    outbound_balance_msat: c.outbound_balance_msat,
+                    inbound_balance_msat: c.inbound_balance_msat,
+                    next_outbound_htlc_limit_msat: c.next_outbound_htlc_limit_msat,
+                    next_outbound_htlc_minimum_msat: c.next_outbound_htlc_minimum_msat,
+                    is_usable: c.is_usable,
+                    public: c.public,
+                    funding_txid,
+                    peer_alias: c.peer_alias,
+                    short_channel_id: c.short_channel_id,
+                    asset_id,
+                    asset_local_amount: c.asset_local_amount,
+                    asset_remote_amount: c.asset_remote_amount,
+                })
+            })
+            .collect()
+    }
+
+    pub fn list_peers(&self) -> Result<Vec<Peer>, RlnError> {
+        let state = self.handle.app_state();
+        let peers = block_on_sdk(sdk::list_peers(state))?;
+        peers
+            .into_iter()
+            .map(|p| {
+                let pubkey = PublicKey::from_str(&p.pubkey).map_err(|_| RlnError::Internal)?;
+                Ok(Peer { pubkey })
+            })
+            .collect()
+    }
+
+    pub fn list_transactions(&self, skip_sync: bool) -> Result<Vec<Transaction>, RlnError> {
+        let state = self.handle.app_state();
+        let txs = block_on_sdk(sdk::list_transactions(state, skip_sync))?;
+        txs.into_iter()
+            .map(|tx| {
+                let txid = Txid::from_str(&tx.txid).map_err(|_| RlnError::Internal)?;
+                let transaction_type = match tx.transaction_type {
+                    crate::sdk::TransactionType::RgbSend => TransactionType::RgbSend,
+                    crate::sdk::TransactionType::Drain => TransactionType::Drain,
+                    crate::sdk::TransactionType::CreateUtxos => TransactionType::CreateUtxos,
+                    crate::sdk::TransactionType::User => TransactionType::User,
+                };
+                Ok(Transaction {
+                    transaction_type,
+                    txid,
+                    received: tx.received,
+                    sent: tx.sent,
+                    fee: tx.fee,
+                    confirmation_time: tx.confirmation_time.map(|ct| BlockTime {
+                        height: ct.height,
+                        timestamp: ct.timestamp,
+                    }),
+                })
+            })
+            .collect()
+    }
+
+    pub fn network_info(&self) -> Result<NetworkInfo, RlnError> {
+        let state = self.handle.app_state();
+        let info = block_on_sdk(sdk::network_info(state))?;
+        Ok(NetworkInfo {
+            network: format!("{:?}", info.network),
+            height: info.height,
         })
+    }
+
+    pub fn address(&self) -> Result<AddressInfo, RlnError> {
+        let state = self.handle.app_state();
+        let info = block_on_sdk(sdk::address(state))?;
+        Ok(AddressInfo { address: info.address })
+    }
+
+    pub fn btc_balance(&self, skip_sync: bool) -> Result<BtcBalanceInfo, RlnError> {
+        let state = self.handle.app_state();
+        let bal = block_on_sdk(sdk::btc_balance(state, skip_sync))?;
+        Ok(BtcBalanceInfo {
+            vanilla: BtcBalance {
+                settled: bal.vanilla.settled,
+                future: bal.vanilla.future,
+                spendable: bal.vanilla.spendable,
+            },
+            colored: BtcBalance {
+                settled: bal.colored.settled,
+                future: bal.colored.future,
+                spendable: bal.colored.spendable,
+            },
+        })
+    }
+
+    pub fn sign_message(&self, message: String) -> Result<SignMessageResponse, RlnError> {
+        let state = self.handle.app_state();
+        let resp = block_on_sdk(sdk::sign_message(state, message))?;
+        Ok(SignMessageResponse {
+            signed_message: resp.signed_message,
+        })
+    }
+
+    pub fn estimate_fee(&self, blocks: u16) -> Result<EstimateFeeResponse, RlnError> {
+        let state = self.handle.app_state();
+        let resp = block_on_sdk(sdk::estimate_fee(state, blocks))?;
+        Ok(EstimateFeeResponse { fee_rate: resp.fee_rate })
+    }
+
+    pub fn check_indexer_url(&self, indexer_url: String) -> Result<CheckIndexerUrlResponse, RlnError> {
+        let state = self.handle.app_state();
+        let resp = block_on_sdk(sdk::check_indexer_url(state, indexer_url))?;
+        Ok(CheckIndexerUrlResponse {
+            indexer_protocol: format!("{:?}", resp.indexer_protocol),
+        })
+    }
+
+    pub fn check_proxy_endpoint(&self, proxy_endpoint: String) -> Result<(), RlnError> {
+        block_on_sdk(sdk::check_proxy_endpoint(proxy_endpoint))
+    }
+
+    pub fn asset_balance(&self, asset_id: ContractId) -> Result<AssetBalanceInfo, RlnError> {
+        let state = self.handle.app_state();
+        let resp = block_on_sdk(sdk::asset_balance(state, asset_id.to_string()))?;
+        Ok(map_asset_balance_data(resp))
+    }
+
+    pub fn asset_metadata(&self, asset_id: ContractId) -> Result<AssetMetadataInfo, RlnError> {
+        let state = self.handle.app_state();
+        let resp = block_on_sdk(sdk::asset_metadata(state, asset_id.to_string()))?;
+        Ok(AssetMetadataInfo {
+            asset_schema: format!("{:?}", resp.asset_schema),
+            initial_supply: resp.initial_supply,
+            max_supply: resp.max_supply,
+            known_circulating_supply: resp.known_circulating_supply,
+            timestamp: resp.timestamp,
+            name: resp.name,
+            precision: resp.precision,
+            ticker: resp.ticker,
+            details: resp.details,
+            token: resp.token.map(map_token),
+        })
+    }
+
+    pub fn get_asset_media(&self, digest: String) -> Result<AssetMediaResponse, RlnError> {
+        let state = self.handle.app_state();
+        let resp = block_on_sdk(sdk::get_asset_media(state, digest))?;
+        Ok(AssetMediaResponse {
+            bytes_hex: resp.bytes_hex,
+        })
+    }
+
+    pub fn list_assets(&self, filter_asset_schemas: Vec<String>) -> Result<ListAssetsResponse, RlnError> {
+        let state = self.handle.app_state();
+        let filters = filter_asset_schemas
+            .into_iter()
+            .map(|s| match s.to_lowercase().as_str() {
+                "nia" => Ok(rgb_lib::AssetSchema::Nia),
+                "uda" => Ok(rgb_lib::AssetSchema::Uda),
+                "cfa" => Ok(rgb_lib::AssetSchema::Cfa),
+                _ => Err(RlnError::InvalidRequest),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let resp = block_on_sdk(sdk::list_assets(state, filters))?;
+        let nia = resp
+            .nia
+            .map(|v| {
+                v.into_iter()
+                    .map(|a| {
+                        Ok(AssetNia {
+                            asset_id: ContractId::from_str(&a.asset_id)
+                                .map_err(|_| RlnError::Internal)?,
+                            ticker: a.ticker,
+                            name: a.name,
+                            details: a.details,
+                            precision: a.precision,
+                            issued_supply: a.issued_supply,
+                            timestamp: a.timestamp,
+                            added_at: a.added_at,
+                            balance: map_asset_balance(a.balance),
+                            media: a.media.map(map_media),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, RlnError>>()
+            })
+            .transpose()?;
+        let uda = resp
+            .uda
+            .map(|v| {
+                v.into_iter()
+                    .map(|a| {
+                        Ok(AssetUda {
+                            asset_id: ContractId::from_str(&a.asset_id)
+                                .map_err(|_| RlnError::Internal)?,
+                            ticker: a.ticker,
+                            name: a.name,
+                            details: a.details,
+                            precision: a.precision,
+                            timestamp: a.timestamp,
+                            added_at: a.added_at,
+                            balance: map_asset_balance(a.balance),
+                            token: a.token.map(|t| TokenLight {
+                                index: t.index,
+                                ticker: t.ticker,
+                                name: t.name,
+                                details: t.details,
+                                embedded_media: t.embedded_media,
+                                media: t.media.map(map_media),
+                                attachments: t
+                                    .attachments
+                                    .into_iter()
+                                    .map(|(k, v)| MediaAttachment {
+                                        key: k,
+                                        media: map_media(v),
+                                    })
+                                    .collect(),
+                                reserves: t.reserves,
+                            }),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, RlnError>>()
+            })
+            .transpose()?;
+        let cfa = resp
+            .cfa
+            .map(|v| {
+                v.into_iter()
+                    .map(|a| {
+                        Ok(AssetCfa {
+                            asset_id: ContractId::from_str(&a.asset_id)
+                                .map_err(|_| RlnError::Internal)?,
+                            name: a.name,
+                            details: a.details,
+                            precision: a.precision,
+                            issued_supply: a.issued_supply,
+                            timestamp: a.timestamp,
+                            added_at: a.added_at,
+                            balance: map_asset_balance(a.balance),
+                            media: a.media.map(map_media),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, RlnError>>()
+            })
+            .transpose()?;
+        Ok(ListAssetsResponse { nia, uda, cfa })
+    }
+
+    pub fn decode_ln_invoice(&self, invoice: Bolt11Invoice) -> Result<DecodeLnInvoiceResponse, RlnError> {
+        let state = self.handle.app_state();
+        let resp = block_on_sdk(sdk::decode_ln_invoice(state, invoice.to_string()))?;
+        let asset_id = resp
+            .asset_id
+            .map(|id| ContractId::from_str(&id).map_err(|_| RlnError::Internal))
+            .transpose()?;
+        let payment_hash =
+            <PaymentHash as UniffiCustomTypeConverter>::into_custom(resp.payment_hash)
+                .map_err(|_| RlnError::Internal)?;
+        let payee_pubkey = resp
+            .payee_pubkey
+            .map(|p| PublicKey::from_str(&p).map_err(|_| RlnError::Internal))
+            .transpose()?;
+        Ok(DecodeLnInvoiceResponse {
+            amt_msat: resp.amt_msat,
+            expiry_sec: resp.expiry_sec,
+            timestamp: resp.timestamp,
+            asset_id,
+            asset_amount: resp.asset_amount,
+            payment_hash,
+            payment_secret: resp.payment_secret,
+            payee_pubkey,
+            network: format!("{:?}", resp.network),
+        })
+    }
+
+    pub fn decode_rgb_invoice(&self, invoice: String) -> Result<DecodeRgbInvoiceResponse, RlnError> {
+        let state = self.handle.app_state();
+        let resp = block_on_sdk(sdk::decode_rgb_invoice(state, invoice))?;
+        let asset_id = resp
+            .asset_id
+            .map(|id| ContractId::from_str(&id).map_err(|_| RlnError::Internal))
+            .transpose()?;
+        Ok(DecodeRgbInvoiceResponse {
+            recipient_id: resp.recipient_id,
+            recipient_type: format!("{:?}", resp.recipient_type),
+            asset_schema: resp.asset_schema.map(|s| format!("{:?}", s)),
+            asset_id,
+            assignment: format!("{:?}", resp.assignment),
+            network: format!("{:?}", resp.network),
+            expiration_timestamp: resp.expiration_timestamp,
+            transport_endpoints: resp.transport_endpoints,
+        })
+    }
+
+    pub fn invoice_status(&self, invoice: Bolt11Invoice) -> Result<InvoiceStatus, RlnError> {
+        let state = self.handle.app_state();
+        let resp = block_on_sdk(sdk::invoice_status(state, invoice.to_string()))?;
+        Ok(match resp.status {
+            crate::sdk::InvoiceStatus::Pending => InvoiceStatus::Pending,
+            crate::sdk::InvoiceStatus::Succeeded => InvoiceStatus::Succeeded,
+            crate::sdk::InvoiceStatus::Failed => InvoiceStatus::Failed,
+            crate::sdk::InvoiceStatus::Expired => InvoiceStatus::Expired,
+        })
+    }
+
+    pub fn list_transfers(&self, asset_id: ContractId) -> Result<Vec<Transfer>, RlnError> {
+        let state = self.handle.app_state();
+        let resp = block_on_sdk(sdk::list_transfers(state, asset_id.to_string()))?;
+        resp.into_iter()
+            .map(|t| {
+                let txid = t
+                    .txid
+                    .map(|v| Txid::from_str(&v).map_err(|_| RlnError::Internal))
+                    .transpose()?;
+                Ok(Transfer {
+                    idx: t.idx,
+                    created_at: t.created_at,
+                    updated_at: t.updated_at,
+                    status: format!("{:?}", t.status),
+                    requested_assignment: t.requested_assignment.map(|a| format!("{:?}", a)),
+                    assignments: t.assignments.into_iter().map(|a| format!("{:?}", a)).collect(),
+                    kind: format!("{:?}", t.kind),
+                    txid,
+                    recipient_id: t.recipient_id,
+                    receive_utxo: t.receive_utxo,
+                    change_utxo: t.change_utxo,
+                    expiration: t.expiration,
+                    transport_endpoints: t
+                        .transport_endpoints
+                        .into_iter()
+                        .map(|e| TransferTransportEndpoint {
+                            endpoint: e.endpoint,
+                            transport_type: format!("{:?}", e.transport_type),
+                            used: e.used,
+                        })
+                        .collect(),
+                })
+            })
+            .collect()
+    }
+
+    pub fn list_unspents(&self, skip_sync: bool) -> Result<Vec<Unspent>, RlnError> {
+        let state = self.handle.app_state();
+        let resp = block_on_sdk(sdk::list_unspents(state, skip_sync))?;
+        resp.into_iter()
+            .map(|u| {
+                Ok(Unspent {
+                    utxo: Utxo {
+                        outpoint: u.utxo.outpoint,
+                        btc_amount: u.utxo.btc_amount,
+                        colorable: u.utxo.colorable,
+                    },
+                    rgb_allocations: u
+                        .rgb_allocations
+                        .into_iter()
+                        .map(|a| {
+                            let asset_id = a
+                                .asset_id
+                                .map(|id| ContractId::from_str(&id).map_err(|_| RlnError::Internal))
+                                .transpose()?;
+                            Ok(RgbAllocation {
+                                asset_id,
+                                assignment: format!("{:?}", a.assignment),
+                                settled: a.settled,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, RlnError>>()?,
+                })
+            })
+            .collect()
     }
 
     pub fn ln_invoice(&self, request: LnInvoiceRequest) -> Result<LnInvoiceResponse, RlnError> {
@@ -221,7 +810,6 @@ impl SdkNode {
             request.expiry_sec,
             asset_id,
             request.asset_amount,
-            crate::routes::INVOICE_MIN_MSAT,
         ))?;
         let invoice = Bolt11Invoice::from_str(&data.invoice).map_err(|_| RlnError::Internal)?;
         Ok(LnInvoiceResponse { invoice })
@@ -265,9 +853,114 @@ pub fn sdk_get_payment(payment_hash: PaymentHash) -> Result<Payment, RlnError> {
     SdkNode { handle }.get_payment(payment_hash)
 }
 
+pub fn sdk_list_payments() -> Result<Vec<Payment>, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.list_payments()
+}
+
 pub fn sdk_get_swap(payment_hash: PaymentHash, taker: bool) -> Result<Swap, RlnError> {
     let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
     SdkNode { handle }.get_swap(payment_hash, taker)
+}
+
+pub fn sdk_list_swaps() -> Result<SwapList, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.list_swaps()
+}
+
+pub fn sdk_list_channels() -> Result<Vec<Channel>, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.list_channels()
+}
+
+pub fn sdk_list_peers() -> Result<Vec<Peer>, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.list_peers()
+}
+
+pub fn sdk_list_transactions(skip_sync: bool) -> Result<Vec<Transaction>, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.list_transactions(skip_sync)
+}
+
+pub fn sdk_network_info() -> Result<NetworkInfo, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.network_info()
+}
+
+pub fn sdk_address() -> Result<AddressInfo, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.address()
+}
+
+pub fn sdk_btc_balance(skip_sync: bool) -> Result<BtcBalanceInfo, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.btc_balance(skip_sync)
+}
+
+pub fn sdk_sign_message(message: String) -> Result<SignMessageResponse, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.sign_message(message)
+}
+
+pub fn sdk_estimate_fee(blocks: u16) -> Result<EstimateFeeResponse, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.estimate_fee(blocks)
+}
+
+pub fn sdk_check_indexer_url(indexer_url: String) -> Result<CheckIndexerUrlResponse, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.check_indexer_url(indexer_url)
+}
+
+pub fn sdk_check_proxy_endpoint(proxy_endpoint: String) -> Result<(), RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.check_proxy_endpoint(proxy_endpoint)
+}
+
+pub fn sdk_asset_balance(asset_id: ContractId) -> Result<AssetBalanceInfo, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.asset_balance(asset_id)
+}
+
+pub fn sdk_asset_metadata(asset_id: ContractId) -> Result<AssetMetadataInfo, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.asset_metadata(asset_id)
+}
+
+pub fn sdk_get_asset_media(digest: String) -> Result<AssetMediaResponse, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.get_asset_media(digest)
+}
+
+pub fn sdk_list_assets(filter_asset_schemas: Vec<String>) -> Result<ListAssetsResponse, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.list_assets(filter_asset_schemas)
+}
+
+pub fn sdk_decode_ln_invoice(invoice: Bolt11Invoice) -> Result<DecodeLnInvoiceResponse, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.decode_ln_invoice(invoice)
+}
+
+pub fn sdk_decode_rgb_invoice(invoice: String) -> Result<DecodeRgbInvoiceResponse, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.decode_rgb_invoice(invoice)
+}
+
+pub fn sdk_invoice_status(invoice: Bolt11Invoice) -> Result<InvoiceStatus, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.invoice_status(invoice)
+}
+
+pub fn sdk_list_transfers(asset_id: ContractId) -> Result<Vec<Transfer>, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.list_transfers(asset_id)
+}
+
+pub fn sdk_list_unspents(skip_sync: bool) -> Result<Vec<Unspent>, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.list_unspents(skip_sync)
 }
 
 pub fn sdk_ln_invoice(request: LnInvoiceRequest) -> Result<LnInvoiceResponse, RlnError> {

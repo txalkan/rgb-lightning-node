@@ -98,8 +98,8 @@ use crate::disk::{
 };
 use crate::error::APIError;
 use crate::rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional, RgbLibWalletWrapper};
-use crate::routes::{UnlockRequest, DUST_LIMIT_MSAT};
-use crate::sdk::{HtlcStatus as HTLCStatus, SwapStatus};
+use crate::routes::DUST_LIMIT_MSAT;
+use crate::sdk::{HtlcStatus as HTLCStatus, SwapStatus, UnlockRequestData};
 use crate::swap::SwapData;
 use crate::utils::{
     check_port_is_available, connect_peer_if_necessary, do_connect_peer, get_current_timestamp,
@@ -1531,7 +1531,7 @@ impl OutputSpender for RgbOutputSpender {
 pub(crate) async fn start_ldk(
     app_state: Arc<AppState>,
     mnemonic: Mnemonic,
-    unlock_request: UnlockRequest,
+    unlock_request: UnlockRequestData,
 ) -> Result<(LdkBackgroundServices, Arc<UnlockedAppState>), APIError> {
     let static_state = &app_state.static_state;
 

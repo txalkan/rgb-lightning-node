@@ -14,6 +14,23 @@ Current lifecycle/threading model:
   `CurrentThread` (or no runtime) uses a shared dedicated Tokio runtime to avoid
   `block_in_place` panic paths.
 
+## Dependency layering
+
+Current internal layering is:
+
+- `uniffi_api` -> `sdk` -> `ldk` (+ shared node/app state)
+- `routes` (HTTP compatibility layer) -> `sdk`/`ldk`
+
+Important notes:
+
+- UniFFI does not call HTTP route handlers; it calls SDK methods directly.
+- SDK is expected to depend on LDK core logic (it is a wrapper, not a separate node implementation).
+- `ldk::start_ldk` now accepts `sdk::UnlockRequestData` so SDK unlock flow is not typed against route-layer DTOs.
+- A small `routes` diff remains for shared `AppState` transition helpers (`pub(crate)` visibility), used by SDK unlock lifecycle handling.
+
+Manual mixed-language interop runbook:
+- `RUST_PYTHON_INTEROP_MANUAL.md` in this directory (Rust daemon node + Python UniFFI node).
+
 ## Main code changes in `uniffi_api/mod.rs`
 
 `mod.rs` is now the main UniFFI API surface and was reworked around four goals:
