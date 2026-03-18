@@ -78,7 +78,9 @@ use tokio::{
     sync::MutexGuard as TokioMutexGuard,
 };
 
-use crate::ldk::{start_ldk, stop_ldk, LdkBackgroundServices, MIN_CHANNEL_CONFIRMATIONS};
+use crate::ldk::{
+    start_ldk, stop_ldk, DUST_LIMIT_MSAT, LdkBackgroundServices, MIN_CHANNEL_CONFIRMATIONS,
+};
 use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{
     check_already_initialized, check_channel_id, check_password_strength, check_password_validity,
@@ -111,8 +113,6 @@ const OPENRGBCHANNEL_MIN_SAT: u64 = HTLC_MIN_MSAT / 1000 * 10 + 10;
 const OPENCHANNEL_MIN_SAT: u64 = 5506;
 const OPENCHANNEL_MAX_SAT: u64 = 16777215;
 const OPENCHANNEL_MIN_RGB_AMT: u64 = 1;
-
-pub const DUST_LIMIT_MSAT: u64 = 546000;
 
 pub(crate) const INVOICE_MIN_MSAT: u64 = HTLC_MIN_MSAT;
 

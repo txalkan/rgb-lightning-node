@@ -99,7 +99,6 @@ use crate::disk::{
 };
 use crate::error::APIError;
 use crate::rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional, RgbLibWalletWrapper};
-use crate::routes::DUST_LIMIT_MSAT;
 use crate::swap::SwapData;
 use crate::utils::{
     check_port_is_available, connect_peer_if_necessary, do_connect_peer, get_current_timestamp,
@@ -111,6 +110,7 @@ use crate::utils::{
 pub(crate) const FEE_RATE: u64 = 7;
 pub(crate) const UTXO_SIZE_SAT: u32 = 32000;
 pub(crate) const MIN_CHANNEL_CONFIRMATIONS: u8 = 6;
+pub(crate) const DUST_LIMIT_MSAT: u64 = 546000;
 
 pub(crate) struct LdkBackgroundServices {
     stop_processing: Arc<AtomicBool>,
