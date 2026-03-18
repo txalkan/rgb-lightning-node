@@ -76,7 +76,8 @@ use tokio::{
 };
 
 use crate::ldk::{
-    start_ldk, stop_ldk, LdkBackgroundServices, VirtualChannelDraft, MIN_CHANNEL_CONFIRMATIONS,
+    start_ldk, stop_ldk, LdkBackgroundServices, VirtualChannelDraft, VirtualChannelSessionStatus,
+    MIN_CHANNEL_CONFIRMATIONS,
 };
 use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{
@@ -1467,22 +1468,134 @@ pub(crate) async fn close_channel(
             Err(_) => return Err(APIError::InvalidPubkey),
         };
 
-        if let Some(chan_details) = unlocked_state
+        let virtual_session = unlocked_state.virtual_channel_session_get(&requested_cid);
+        if let Some(session) = virtual_session.as_ref() {
+            if session.peer_id != peer_pubkey {
+                return Err(APIError::CannotCloseChannel(
+                    "peer pubkey does not match trusted virtual channel session".to_string(),
+                ));
+            }
+        }
+
+        let chan_details = if let Some(chan_details) = unlocked_state
             .channel_manager
             .list_channels()
-            .iter()
+            .into_iter()
             .find(|c| c.channel_id == requested_cid)
         {
-            match chan_details.channel_shutdown_state {
-                Some(ChannelShutdownState::NotShuttingDown) => {}
-                _ => {
-                    return Err(APIError::CannotCloseChannel(s!(
-                        "Channel is already being closed"
-                    )))
+            if chan_details.trusted_no_broadcast {
+                if let Some(session) = virtual_session.as_ref() {
+                    match session.status {
+                        VirtualChannelSessionStatus::Abandoned => {
+                            tracing::warn!(
+                                "virtual session {} is persisted as abandoned but the live trusted channel is still present; retrying close without rewriting session state",
+                                requested_cid
+                            );
+                        }
+                        VirtualChannelSessionStatus::AbandonPending => {
+                            return Err(APIError::CannotCloseChannel(
+                                "virtual cleanup is already in progress".to_string(),
+                            ));
+                        }
+                        VirtualChannelSessionStatus::Active => {}
+                    }
                 }
             }
+            chan_details
         } else {
+            if let Some(session) = virtual_session.as_ref() {
+                if !matches!(session.status, VirtualChannelSessionStatus::Abandoned) {
+                    unlocked_state.virtual_channel_session_update_status(
+                        session,
+                        VirtualChannelSessionStatus::Abandoned,
+                    );
+                }
+                return Ok(Json(EmptyResponse {}));
+            }
             return Err(APIError::UnknownChannelId);
+        };
+
+        if virtual_session.is_some() && !chan_details.trusted_no_broadcast {
+            return Err(APIError::Unexpected(format!(
+                "virtual channel session exists for {requested_cid}, but live channel is not trusted_no_broadcast"
+            )));
+        }
+
+        match chan_details.channel_shutdown_state {
+            Some(ChannelShutdownState::NotShuttingDown) => {}
+            _ => return Err(APIError::CannotCloseChannel(s!("Channel is already being closed"))),
+        }
+
+        if chan_details.trusted_no_broadcast {
+            if !state.static_state.enable_virtual_channels_v0 {
+                return Err(APIError::CannotCloseChannel(
+                    "trusted virtual channels v0 are disabled".to_string(),
+                ));
+            }
+            let Some(session) = virtual_session else {
+                return Err(APIError::CannotCloseChannel(
+                    "virtual cleanup is host-only and requires a host-side session".to_string(),
+                ));
+            };
+            if payload.force {
+                return Err(APIError::CannotCloseChannel(
+                    "force=true is not supported for trusted virtual channels".to_string(),
+                ));
+            }
+            unlocked_state
+                .virtual_channel_ensure_no_client_value(
+                    &chan_details,
+                    &state.static_state.ldk_data_dir,
+                )
+                .map_err(APIError::CannotCloseChannel)?;
+
+            unlocked_state.virtual_channel_session_update_status(
+                &session,
+                VirtualChannelSessionStatus::AbandonPending,
+            );
+            match unlocked_state.channel_manager.abandon_virtual_channel(
+                &requested_cid,
+                &peer_pubkey,
+                true,
+            ) {
+                Ok(()) => {
+                    unlocked_state.virtual_channel_session_update_status(
+                        &session,
+                        VirtualChannelSessionStatus::Abandoned,
+                    );
+                    tracing::info!("EVENT: abandon_virtual_channel succeeded; session is now abandoned");
+                }
+                Err(e) => {
+                    let error = match e {
+                        LDKAPIError::APIMisuseError { err } => err,
+                        _ => format!("{e:?}"),
+                    };
+                    let live_virtual_channel_still_exists = unlocked_state
+                        .channel_manager
+                        .list_channels()
+                        .into_iter()
+                        .any(|c| c.channel_id == requested_cid && c.trusted_no_broadcast);
+                    if live_virtual_channel_still_exists {
+                        unlocked_state.virtual_channel_session_update_status(
+                            &session,
+                            VirtualChannelSessionStatus::Active,
+                        );
+                        return Err(APIError::CannotCloseChannel(error));
+                    }
+                    unlocked_state.virtual_channel_session_update_status(
+                        &session,
+                        VirtualChannelSessionStatus::Abandoned,
+                    );
+                    tracing::info!(
+                        "EVENT: abandon_virtual_channel returned error '{}' but channel {} is absent from live LDK state; reconciling session to abandoned",
+                        error,
+                        requested_cid,
+                    );
+                    return Ok(Json(EmptyResponse {}));
+                }
+            }
+
+            return Ok(Json(EmptyResponse {}));
         }
 
         if payload.force {
@@ -3175,6 +3288,11 @@ pub(crate) async fn open_channel(
                 },
                 negotiate_scid_privacy: is_virtual_open,
                 negotiate_anchors_zero_fee_htlc_tx: payload.with_anchors,
+                their_channel_reserve_satoshis_override: if is_virtual_open {
+                    Some(0)
+                } else {
+                    None
+                },
                 ..Default::default()
             },
             channel_config,

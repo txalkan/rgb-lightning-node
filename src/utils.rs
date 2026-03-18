@@ -91,6 +91,7 @@ pub(crate) struct StaticState {
     pub(crate) ldk_data_dir: PathBuf,
     pub(crate) logger: Arc<FilesystemLogger>,
     pub(crate) max_media_upload_size_mb: u16,
+    pub(crate) virtual_peer_pubkeys: Vec<PublicKey>,
 }
 
 pub(crate) struct UnlockedAppState {
@@ -375,6 +376,7 @@ pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppEr
         ldk_data_dir,
         logger,
         max_media_upload_size_mb: args.max_media_upload_size_mb,
+        virtual_peer_pubkeys: args.virtual_peer_pubkeys.clone(),
     });
 
     let app_state = Arc::new(AppState {

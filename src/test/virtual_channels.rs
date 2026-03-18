@@ -49,6 +49,25 @@ async fn mine_blocks_and_wait_for_sync(
     });
 }
 
+async fn close_channel_response(
+    node_address: SocketAddr,
+    channel_id: &str,
+    peer_pubkey: &str,
+    force: bool,
+) -> reqwest::Response {
+    let payload = CloseChannelRequest {
+        channel_id: channel_id.to_string(),
+        peer_pubkey: peer_pubkey.to_string(),
+        force,
+    };
+    reqwest::Client::new()
+        .post(format!("http://{node_address}/closechannel"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 #[traced_test]
 #[serial_test::serial]
@@ -59,18 +78,22 @@ async fn virtual_open_rejects_duplicate_synthetic_funding_outpoint() {
     let host_node_peer_port = next_peer_port();
     let client_node_peer_port = next_peer_port();
 
-    let (host_node_address, _host_node_password) = start_node_with_virtual_flag(
+    let (host_node_address, _host_node_password) = start_node_with_virtual_options(
         &format!("{test_storage_root}host_node"),
         host_node_peer_port,
         false,
         true,
+        vec![],
     )
     .await;
-    let (client_node_address, _client_node_password) = start_node_with_virtual_flag(
+    let host_node_info = node_info(host_node_address).await;
+
+    let (client_node_address, _client_node_password) = start_node_with_virtual_options(
         &format!("{test_storage_root}client_node"),
         client_node_peer_port,
         false,
         true,
+        vec![bitcoin::secp256k1::PublicKey::from_str(&host_node_info.pubkey).unwrap()],
     )
     .await;
 
@@ -154,11 +177,12 @@ async fn virtual_open_rejects_invalid_requests() {
     )
     .await;
     let (host_node_virtual_enabled_address, _host_node_virtual_enabled_password) =
-        start_node_with_virtual_flag(
+        start_node_with_virtual_options(
             &format!("{test_storage_root}host_node_virtual_enabled"),
             host_node_virtual_enabled_peer_port,
             false,
             true,
+            vec![],
         )
         .await;
     let (client_node_address, _client_node_password) = start_node(
@@ -279,24 +303,28 @@ async fn virtual_trusted_no_broadcast_survives_funding_timeout_and_routes_btc_an
     let host_node_peer_port = next_peer_port();
     let client_node_peer_port = next_peer_port();
 
-    let (host_node_address, _host_node_password) = start_node_with_virtual_flag(
+    let (host_node_address, _host_node_password) = start_node_with_virtual_options(
         &format!("{test_storage_root}host_node"),
         host_node_peer_port,
         false,
         true,
+        vec![],
     )
     .await;
+    let host_node_info = node_info(host_node_address).await;
+
     fund_and_create_utxos(host_node_address, None).await;
     let issued_asset_id = issue_asset_nia(host_node_address).await.asset_id;
     let funded_rgb_amount = 200;
     let host_node_onchain_spendable_before_open =
         asset_balance_spendable(host_node_address, &issued_asset_id).await;
 
-    let (client_node_address, _client_node_password) = start_node_with_virtual_flag(
+    let (client_node_address, _client_node_password) = start_node_with_virtual_options(
         &format!("{test_storage_root}client_node"),
         client_node_peer_port,
         false,
         true,
+        vec![bitcoin::secp256k1::PublicKey::from_str(&host_node_info.pubkey).unwrap()],
     )
     .await;
 
@@ -443,11 +471,12 @@ async fn virtual_trusted_no_broadcast_survives_funding_timeout_and_routes_btc_an
 
     /* Deferred to Phase 1:
     let client_b_node_peer_port = next_peer_port();
-    let (client_b_node_address, _client_b_node_password) = start_node_with_virtual_flag(
+    let (client_b_node_address, _client_b_node_password) = start_node_with_virtual_options(
         &format!("{test_storage_root}client_b_node"),
         client_b_node_peer_port,
         false,
         true,
+        vec![bitcoin::secp256k1::PublicKey::from_str(&host_node_info.pubkey).unwrap()],
     )
     .await;
 
@@ -538,4 +567,473 @@ async fn virtual_trusted_no_broadcast_survives_funding_timeout_and_routes_btc_an
     )
     .await;
     */
+}
+
+#[tokio::test]
+#[traced_test]
+#[serial_test::serial]
+async fn virtual_close_rejects_client_side_without_host_session() {
+    initialize();
+
+    let test_storage_root = format!("{TEST_DIR_BASE}close_client_side/");
+    let host_node_peer_port = next_peer_port();
+    let client_node_peer_port = next_peer_port();
+
+    let (host_node_address, _host_node_password) = start_node_with_virtual_options(
+        &format!("{test_storage_root}host_node"),
+        host_node_peer_port,
+        false,
+        true,
+        vec![],
+    )
+    .await;
+    let host_node_info = node_info(host_node_address).await;
+
+    let (client_node_address, _client_node_password) = start_node_with_virtual_options(
+        &format!("{test_storage_root}client_node"),
+        client_node_peer_port,
+        false,
+        true,
+        vec![bitcoin::secp256k1::PublicKey::from_str(&host_node_info.pubkey).unwrap()],
+    )
+    .await;
+
+    fund_and_create_utxos(host_node_address, None).await;
+    let client_node_info = node_info(client_node_address).await;
+    let opened_virtual_channel = open_virtual_channel(
+        host_node_address,
+        &client_node_info.pubkey,
+        Some(client_node_peer_port),
+        Some(100_000),
+        Some(0),
+        None,
+        None,
+    )
+    .await;
+
+    let response = close_channel_response(
+        client_node_address,
+        &opened_virtual_channel.channel_id,
+        &host_node_info.pubkey,
+        false,
+    )
+    .await;
+    check_response_is_nok(
+        response,
+        reqwest::StatusCode::FORBIDDEN,
+        "host-side session",
+        "CannotCloseChannel",
+    )
+    .await;
+}
+
+#[tokio::test]
+#[traced_test]
+#[serial_test::serial]
+async fn virtual_close_rejects_force_true_on_host() {
+    initialize();
+
+    let test_storage_root = format!("{TEST_DIR_BASE}close_force/");
+    let host_node_peer_port = next_peer_port();
+    let client_node_peer_port = next_peer_port();
+
+    let (host_node_address, _host_node_password) = start_node_with_virtual_options(
+        &format!("{test_storage_root}host_node"),
+        host_node_peer_port,
+        false,
+        true,
+        vec![],
+    )
+    .await;
+    let host_node_info = node_info(host_node_address).await;
+
+    let (client_node_address, _client_node_password) = start_node_with_virtual_options(
+        &format!("{test_storage_root}client_node"),
+        client_node_peer_port,
+        false,
+        true,
+        vec![bitcoin::secp256k1::PublicKey::from_str(&host_node_info.pubkey).unwrap()],
+    )
+    .await;
+
+    fund_and_create_utxos(host_node_address, None).await;
+    let client_node_info = node_info(client_node_address).await;
+    let opened_virtual_channel = open_virtual_channel(
+        host_node_address,
+        &client_node_info.pubkey,
+        Some(client_node_peer_port),
+        Some(100_000),
+        Some(0),
+        None,
+        None,
+    )
+    .await;
+
+    let response = close_channel_response(
+        host_node_address,
+        &opened_virtual_channel.channel_id,
+        &client_node_info.pubkey,
+        true,
+    )
+    .await;
+    check_response_is_nok(
+        response,
+        reqwest::StatusCode::FORBIDDEN,
+        "force=true is not supported",
+        "CannotCloseChannel",
+    )
+    .await;
+}
+
+#[tokio::test]
+#[traced_test]
+#[serial_test::serial]
+async fn virtual_close_succeeds_without_remote_value_and_is_idempotent() {
+    initialize();
+
+    let test_storage_root = format!("{TEST_DIR_BASE}close_success/");
+    let host_node_peer_port = next_peer_port();
+    let client_node_peer_port = next_peer_port();
+
+    let (host_node_address, _host_node_password) = start_node_with_virtual_options(
+        &format!("{test_storage_root}host_node"),
+        host_node_peer_port,
+        false,
+        true,
+        vec![],
+    )
+    .await;
+    let host_node_info = node_info(host_node_address).await;
+
+    let (client_node_address, _client_node_password) = start_node_with_virtual_options(
+        &format!("{test_storage_root}client_node"),
+        client_node_peer_port,
+        false,
+        true,
+        vec![bitcoin::secp256k1::PublicKey::from_str(&host_node_info.pubkey).unwrap()],
+    )
+    .await;
+
+    fund_and_create_utxos(host_node_address, None).await;
+    let issued_asset_id = issue_asset_nia(host_node_address).await.asset_id;
+    let client_node_info = node_info(client_node_address).await;
+    let opened_virtual_channel = open_virtual_channel(
+        host_node_address,
+        &client_node_info.pubkey,
+        Some(client_node_peer_port),
+        Some(100_000),
+        Some(0),
+        Some(200),
+        Some(&issued_asset_id),
+    )
+    .await;
+
+    close_channel(
+        host_node_address,
+        &opened_virtual_channel.channel_id,
+        &client_node_info.pubkey,
+        false,
+    )
+    .await;
+
+    let response = close_channel_response(
+        host_node_address,
+        &opened_virtual_channel.channel_id,
+        &client_node_info.pubkey,
+        false,
+    )
+    .await;
+    _check_response_is_ok(response)
+        .await
+        .json::<EmptyResponse>()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[traced_test]
+#[serial_test::serial]
+async fn virtual_close_rejects_after_rgb_round_trip_when_remote_btc_remains() {
+    initialize();
+
+    let test_storage_root = format!("{TEST_DIR_BASE}close_remote_rgb/");
+    let host_node_peer_port = next_peer_port();
+    let client_a_node_peer_port = next_peer_port();
+    let client_b_node_peer_port = next_peer_port();
+
+    let (host_node_address, _host_node_password) = start_node_with_virtual_options(
+        &format!("{test_storage_root}host_node"),
+        host_node_peer_port,
+        false,
+        true,
+        vec![],
+    )
+    .await;
+    let host_node_info = node_info(host_node_address).await;
+
+    let (client_a_node_address, _client_a_node_password) = start_node_with_virtual_options(
+        &format!("{test_storage_root}client_a_node"),
+        client_a_node_peer_port,
+        false,
+        true,
+        vec![bitcoin::secp256k1::PublicKey::from_str(&host_node_info.pubkey).unwrap()],
+    )
+    .await;
+
+    let (client_b_node_address, _client_b_node_password) = start_node_with_virtual_options(
+        &format!("{test_storage_root}client_b_node"),
+        client_b_node_peer_port,
+        false,
+        true,
+        vec![bitcoin::secp256k1::PublicKey::from_str(&host_node_info.pubkey).unwrap()],
+    )
+    .await;
+
+    fund_and_create_utxos(host_node_address, None).await;
+
+    let client_a_node_info = node_info(client_a_node_address).await;
+    let opened_virtual_channel = open_virtual_channel(
+        host_node_address,
+        &client_a_node_info.pubkey,
+        Some(client_a_node_peer_port),
+        Some(100_000),
+        Some(0),
+        None,
+        None,
+    )
+    .await;
+
+    let btc_ln_invoice = ln_invoice(client_a_node_address, Some(3_000_000), None, None, 3600)
+        .await
+        .invoice;
+    send_payment_with_status(host_node_address, btc_ln_invoice, HTLCStatus::Succeeded).await;
+
+    let response = close_channel_response(
+        host_node_address,
+        &opened_virtual_channel.channel_id,
+        &client_a_node_info.pubkey,
+        false,
+    )
+    .await;
+    check_response_is_nok(
+        response,
+        reqwest::StatusCode::FORBIDDEN,
+        "counterparty BTC balance floor is",
+        "CannotCloseChannel",
+    )
+    .await;
+
+    let issued_asset_id = issue_asset_nia(host_node_address).await.asset_id;
+    let funded_rgb_amount = 200;
+    let client_b_node_info = node_info(client_b_node_address).await;
+    let opened_virtual_channel_b = open_virtual_channel(
+        host_node_address,
+        &client_b_node_info.pubkey,
+        Some(client_b_node_peer_port),
+        Some(100_000),
+        Some(0),
+        Some(funded_rgb_amount),
+        Some(&issued_asset_id),
+    )
+    .await;
+
+    let btc_ln_invoice = ln_invoice(client_b_node_address, Some(3_000_000), None, None, 3600)
+        .await
+        .invoice;
+    send_payment_with_status(host_node_address, btc_ln_invoice, HTLCStatus::Succeeded).await;
+
+    let host_to_client_b_rgb_amount = 50;
+    let rgb_ln_invoice = ln_invoice(
+        client_b_node_address,
+        Some(3_000_000),
+        Some(&issued_asset_id),
+        Some(host_to_client_b_rgb_amount),
+        3600,
+    )
+    .await
+    .invoice;
+    send_payment_with_status(host_node_address, rgb_ln_invoice, HTLCStatus::Succeeded).await;
+    wait_for_ln_balance(
+        host_node_address,
+        &issued_asset_id,
+        funded_rgb_amount - host_to_client_b_rgb_amount,
+    )
+    .await;
+    wait_for_ln_balance(
+        client_b_node_address,
+        &issued_asset_id,
+        host_to_client_b_rgb_amount,
+    )
+    .await;
+
+    let response = close_channel_response(
+        host_node_address,
+        &opened_virtual_channel_b.channel_id,
+        &client_b_node_info.pubkey,
+        false,
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+    let api_error_response = response.json::<APIErrorResponse>().await.unwrap();
+    assert_eq!(
+        api_error_response.code,
+        reqwest::StatusCode::FORBIDDEN.as_u16()
+    );
+    assert_eq!(api_error_response.name, "CannotCloseChannel");
+    assert!(
+        api_error_response
+            .error
+            .contains("counterparty BTC balance floor is")
+            || api_error_response
+                .error
+                .contains("counterparty RGB balance is 50")
+    );
+
+    let client_b_to_host_rgb_invoice = ln_invoice(
+        host_node_address,
+        Some(3_000_000),
+        Some(&issued_asset_id),
+        Some(host_to_client_b_rgb_amount),
+        3600,
+    )
+    .await
+    .invoice;
+    send_payment_with_status(
+        client_b_node_address,
+        client_b_to_host_rgb_invoice,
+        HTLCStatus::Succeeded,
+    )
+    .await;
+    wait_for_ln_balance(host_node_address, &issued_asset_id, funded_rgb_amount).await;
+    wait_for_ln_balance(client_b_node_address, &issued_asset_id, 0).await;
+
+    let response = close_channel_response(
+        host_node_address,
+        &opened_virtual_channel_b.channel_id,
+        &client_b_node_info.pubkey,
+        false,
+    )
+    .await;
+    check_response_is_nok(
+        response,
+        reqwest::StatusCode::FORBIDDEN,
+        "counterparty BTC balance floor is",
+        "CannotCloseChannel",
+    )
+    .await;
+}
+
+#[tokio::test]
+#[traced_test]
+#[serial_test::serial]
+async fn virtual_close_succeeds_after_client_returns_full_btc_and_rgb() {
+    initialize();
+
+    let test_storage_root = format!("{TEST_DIR_BASE}close_success_after_return/");
+    let host_node_peer_port = next_peer_port();
+    let client_node_peer_port = next_peer_port();
+
+    let (host_node_address, _host_node_password) = start_node_with_virtual_options(
+        &format!("{test_storage_root}host_node"),
+        host_node_peer_port,
+        false,
+        true,
+        vec![],
+    )
+    .await;
+    let host_node_info = node_info(host_node_address).await;
+
+    let (client_node_address, _client_node_password) = start_node_with_virtual_options(
+        &format!("{test_storage_root}client_node"),
+        client_node_peer_port,
+        false,
+        true,
+        vec![bitcoin::secp256k1::PublicKey::from_str(&host_node_info.pubkey).unwrap()],
+    )
+    .await;
+
+    fund_and_create_utxos(host_node_address, None).await;
+    let issued_asset_id = issue_asset_nia(host_node_address).await.asset_id;
+    let funded_rgb_amount = 200;
+    let client_node_info = node_info(client_node_address).await;
+    let opened_virtual_channel = open_virtual_channel(
+        host_node_address,
+        &client_node_info.pubkey,
+        Some(client_node_peer_port),
+        Some(100_000),
+        Some(0),
+        Some(funded_rgb_amount),
+        Some(&issued_asset_id),
+    )
+    .await;
+
+    let btc_ln_invoice = ln_invoice(client_node_address, Some(3_000_000), None, None, 3600)
+        .await
+        .invoice;
+    send_payment_with_status(host_node_address, btc_ln_invoice, HTLCStatus::Succeeded).await;
+
+    let host_to_client_rgb_amount = 50;
+    let rgb_ln_invoice = ln_invoice(
+        client_node_address,
+        Some(3_000_000),
+        Some(&issued_asset_id),
+        Some(host_to_client_rgb_amount),
+        3600,
+    )
+    .await
+    .invoice;
+    send_payment_with_status(host_node_address, rgb_ln_invoice, HTLCStatus::Succeeded).await;
+    wait_for_ln_balance(
+        host_node_address,
+        &issued_asset_id,
+        funded_rgb_amount - host_to_client_rgb_amount,
+    )
+    .await;
+    wait_for_ln_balance(
+        client_node_address,
+        &issued_asset_id,
+        host_to_client_rgb_amount,
+    )
+    .await;
+
+    let response = close_channel_response(
+        host_node_address,
+        &opened_virtual_channel.channel_id,
+        &client_node_info.pubkey,
+        false,
+    )
+    .await;
+    check_response_is_nok(
+        response,
+        reqwest::StatusCode::FORBIDDEN,
+        "counterparty",
+        "CannotCloseChannel",
+    )
+    .await;
+
+    let client_to_host_full_invoice = ln_invoice(
+        host_node_address,
+        Some(6_000_000),
+        Some(&issued_asset_id),
+        Some(host_to_client_rgb_amount),
+        3600,
+    )
+    .await
+    .invoice;
+    send_payment_with_status(
+        client_node_address,
+        client_to_host_full_invoice,
+        HTLCStatus::Succeeded,
+    )
+    .await;
+    wait_for_ln_balance(host_node_address, &issued_asset_id, funded_rgb_amount).await;
+    wait_for_ln_balance(client_node_address, &issued_asset_id, 0).await;
+
+    close_channel(
+        host_node_address,
+        &opened_virtual_channel.channel_id,
+        &client_node_info.pubkey,
+        false,
+    )
+    .await;
 }

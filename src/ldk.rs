@@ -6,10 +6,12 @@ use bitcoin::secp256k1::{All, PublicKey, Secp256k1};
 use bitcoin::{io, Amount, Network};
 use bitcoin::{BlockHash, TxOut};
 use bitcoin_bech32::WitnessProgram;
+use hex::DisplayHex;
 use lightning::chain::{chainmonitor, transaction::OutPoint, ChannelMonitorUpdateStatus};
 use lightning::chain::{BestBlock, Filter};
 use lightning::events::bump_transaction::{BumpTransactionEventHandler, Wallet};
 use lightning::events::{Event, PaymentFailureReason, PaymentPurpose, ReplayEvent};
+use lightning::ln::channel_state::ChannelDetails;
 use lightning::ln::channelmanager::{self, ChannelFundingType, PaymentId, RecentPaymentDetails};
 use lightning::ln::channelmanager::{
     ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager,
@@ -25,8 +27,9 @@ use lightning::onion_message::messenger::{
 use lightning::rgb_utils::{
     get_rgb_channel_info_path, get_rgb_channel_info_pending, get_virtual_channel_marker_path,
     is_channel_rgb, parse_rgb_payment_info, read_rgb_transfer_info, update_rgb_channel_amount,
-    BITCOIN_NETWORK_FNAME, INDEXER_URL_FNAME, STATIC_BLINDING, WALLET_ACCOUNT_XPUB_COLORED_FNAME,
-    WALLET_ACCOUNT_XPUB_VANILLA_FNAME, WALLET_FINGERPRINT_FNAME, WALLET_MASTER_FINGERPRINT_FNAME,
+    RgbInfo, BITCOIN_NETWORK_FNAME, INDEXER_URL_FNAME, STATIC_BLINDING,
+    WALLET_ACCOUNT_XPUB_COLORED_FNAME, WALLET_ACCOUNT_XPUB_VANILLA_FNAME, WALLET_FINGERPRINT_FNAME,
+    WALLET_MASTER_FINGERPRINT_FNAME,
 };
 use lightning::routing::gossip;
 use lightning::routing::gossip::{NodeId, P2PGossipSync};
@@ -46,7 +49,7 @@ use lightning::util::persist::{
 };
 use lightning::util::ser::{ReadableArgs, Writeable};
 use lightning::util::sweep as ldk_sweep;
-use lightning::{chain, impl_writeable_tlv_based};
+use lightning::{chain, impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use lightning_background_processor::{process_events_async, GossipSync, NO_LIQUIDITY_MANAGER};
 use lightning_block_sync::gossip::TokioSpawner;
 use lightning_block_sync::init;
@@ -226,21 +229,42 @@ impl_writeable_tlv_based!(VirtualChannelDraftStore, {
     (0, entries, required),
 });
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VirtualChannelSessionStatus {
+    Active,
+    AbandonPending,
+    Abandoned,
+    Failed,
+}
+
+impl_writeable_tlv_based_enum!(VirtualChannelSessionStatus,
+    (0, Active) => {},
+    (2, AbandonPending) => {},
+    (4, Abandoned) => {},
+    (6, Failed) => {},
+);
+
 #[derive(Clone, Debug)]
 pub(crate) struct VirtualChannelSession {
     pub(crate) channel_id: ChannelId,
     pub(crate) created_at: u64,
     pub(crate) former_temporary_channel_id: ChannelId,
+    pub(crate) last_error: Option<String>,
     pub(crate) peer_id: PublicKey,
+    pub(crate) status: VirtualChannelSessionStatus,
     pub(crate) synthetic_funding_txo: OutPoint,
+    pub(crate) updated_at: u64,
 }
 
 impl_writeable_tlv_based!(VirtualChannelSession, {
     (0, channel_id, required),
-    (2, former_temporary_channel_id, required),
-    (4, peer_id, required),
-    (6, synthetic_funding_txo, required),
-    (10, created_at, required),
+    (2, created_at, required),
+    (4, former_temporary_channel_id, required),
+    (6, last_error, option),
+    (8, peer_id, required),
+    (10, status, (default_value, VirtualChannelSessionStatus::Active)),
+    (12, synthetic_funding_txo, required),
+    (14, updated_at, (default_value, created_at)),
 });
 
 pub(crate) struct VirtualChannelSessionStore {
@@ -545,10 +569,164 @@ impl UnlockedAppState {
             .unwrap();
     }
 
+    pub(crate) fn virtual_channel_ensure_no_client_value(
+        &self,
+        chan_details: &ChannelDetails,
+        ldk_data_dir: &Path,
+    ) -> Result<(), String> {
+        if !chan_details.pending_inbound_htlcs.is_empty() {
+            return Err(
+                "virtual cleanup is blocked while inbound HTLCs are still in flight".to_string(),
+            );
+        }
+        if !chan_details.pending_outbound_htlcs.is_empty() {
+            return Err(
+                "virtual cleanup is blocked while outbound HTLCs are still in flight".to_string(),
+            );
+        }
+        match chan_details.counterparty_balance_sats_floor {
+            Some(0) => {}
+            Some(balance_floor) => {
+                return Err(format!(
+                    "virtual cleanup is blocked while counterparty BTC balance floor is {balance_floor} sat"
+                ))
+            }
+            None => {
+                return Err(
+                    "virtual cleanup requires an exact counterparty BTC balance floor proof"
+                        .to_string(),
+                )
+            }
+        }
+
+        let final_rgb_state_path = get_rgb_channel_info_path(
+            &chan_details.channel_id.0.as_hex().to_string(),
+            ldk_data_dir,
+            false,
+        );
+        let pending_rgb_state_path = get_rgb_channel_info_path(
+            &chan_details.channel_id.0.as_hex().to_string(),
+            ldk_data_dir,
+            true,
+        );
+        let is_rgb_backed = final_rgb_state_path.exists() || pending_rgb_state_path.exists();
+        if !is_rgb_backed {
+            return Ok(());
+        }
+
+        if !final_rgb_state_path.exists() || !pending_rgb_state_path.exists() {
+            return Err(
+                "virtual cleanup requires both final and pending RGB channel state".to_string(),
+            );
+        }
+
+        let read_rgb_info_strict = |path: &Path| -> Result<RgbInfo, String> {
+            let serialized = fs::read_to_string(path).map_err(|_| {
+                format!(
+                    "virtual cleanup requires readable RGB state at {}",
+                    path.display()
+                )
+            })?;
+            serde_json::from_str(&serialized).map_err(|_| {
+                format!(
+                    "virtual cleanup requires parseable RGB state at {}",
+                    path.display()
+                )
+            })
+        };
+
+        let final_rgb_state = read_rgb_info_strict(&final_rgb_state_path)?;
+        let pending_rgb_state = read_rgb_info_strict(&pending_rgb_state_path)?;
+
+        if final_rgb_state.contract_id != pending_rgb_state.contract_id
+            || final_rgb_state.schema != pending_rgb_state.schema
+            || final_rgb_state.local_rgb_amount != pending_rgb_state.local_rgb_amount
+            || final_rgb_state.remote_rgb_amount != pending_rgb_state.remote_rgb_amount
+        {
+            return Err(
+                "virtual cleanup is blocked while RGB channel state is still diverged".to_string(),
+            );
+        }
+
+        if final_rgb_state.remote_rgb_amount != 0 {
+            return Err(format!(
+                "virtual cleanup is blocked while counterparty RGB balance is {}",
+                final_rgb_state.remote_rgb_amount
+            ));
+        }
+
+        let has_related_rgb_pending_artifacts = {
+            let channel_id_hex = chan_details.channel_id.0.as_hex().to_string();
+            let entries = fs::read_dir(ldk_data_dir)
+                .map_err(|_| "virtual cleanup could not inspect RGB temp artifacts".to_string())?;
+
+            let mut has_related_rgb_pending_artifacts = false;
+
+            for entry in entries {
+                let entry = entry.map_err(|_| {
+                    "virtual cleanup could not inspect RGB temp artifacts".to_string()
+                })?;
+                let path = entry.path();
+                let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
+                    continue;
+                };
+                let Some(payment_hash) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                    continue;
+                };
+                let Some(base_extension) = extension.strip_suffix("_pending") else {
+                    continue;
+                };
+                let proxy_path =
+                    ldk_data_dir.join(format!("{channel_id_hex}{payment_hash}.{base_extension}"));
+                if proxy_path.exists() {
+                    has_related_rgb_pending_artifacts = true;
+                    break;
+                }
+            }
+            has_related_rgb_pending_artifacts
+        };
+        if has_related_rgb_pending_artifacts {
+            return Err(
+                "virtual cleanup is blocked while RGB payment temp artifacts remain".to_string(),
+            );
+        }
+
+        Ok(())
+    }
+
     pub(crate) fn virtual_channel_session_add(&self, session: VirtualChannelSession) {
         let mut sessions = self.get_virtual_channel_session_store();
         sessions.entries.insert(session.channel_id, session);
         self.virtual_channel_session_store_save(sessions);
+    }
+
+    pub(crate) fn virtual_channel_session_get(
+        &self,
+        channel_id: &ChannelId,
+    ) -> Option<VirtualChannelSession> {
+        self.get_virtual_channel_session_store()
+            .entries
+            .get(channel_id)
+            .cloned()
+    }
+
+    pub(crate) fn virtual_channel_session_update(&self, session: VirtualChannelSession) {
+        let mut sessions = self.get_virtual_channel_session_store();
+        sessions.entries.insert(session.channel_id, session);
+        self.virtual_channel_session_store_save(sessions);
+    }
+
+    pub(crate) fn virtual_channel_session_update_status(
+        &self,
+        session: &VirtualChannelSession,
+        status: VirtualChannelSessionStatus,
+        last_error: Option<String>,
+    ) {
+        let mut updated_session = session.clone();
+        updated_session.status = status;
+        updated_session.last_error = last_error;
+        updated_session.updated_at = get_current_timestamp();
+        self.virtual_channel_session_update(updated_session);
     }
 
     pub(crate) fn virtual_channel_session_store(
@@ -919,10 +1097,13 @@ async fn handle_ldk_events(
                             .expect("able to persist virtual channel marker");
                         unlocked_state.virtual_channel_session_add(VirtualChannelSession {
                             channel_id,
-                            former_temporary_channel_id: temporary_channel_id,
-                            peer_id: virtual_draft.peer_id,
-                            synthetic_funding_txo,
                             created_at: virtual_draft.created_at,
+                            former_temporary_channel_id: temporary_channel_id,
+                            last_error: None,
+                            peer_id: virtual_draft.peer_id,
+                            status: VirtualChannelSessionStatus::Active,
+                            synthetic_funding_txo,
+                            updated_at: get_current_timestamp(),
                         });
                         unlocked_state.virtual_channel_draft_delete(&temporary_channel_id);
                         *unlocked_state.rgb_send_lock.lock().unwrap() = false;
@@ -1227,8 +1408,31 @@ async fn handle_ldk_events(
                 .copy_from_slice(&unlocked_state.keys_manager.get_secure_random_bytes()[..16]);
             let user_channel_id = u128::from_be_bytes(random_bytes);
 
-            let res = if static_state.enable_virtual_channels_v0 {
-                if !channel_type.supports_scid_privacy() {
+            let (res, accepted) = if static_state.enable_virtual_channels_v0 {
+                let trusted_virtual_peer = static_state.virtual_peer_pubkeys.is_empty()
+                    || static_state
+                        .virtual_peer_pubkeys
+                        .iter()
+                        .any(|trusted_peer| trusted_peer == counterparty_node_id);
+                if !trusted_virtual_peer {
+                    let err = "untrusted_virtual_peer".to_string();
+                    tracing::error!(
+                        "EVENT: Rejected inbound trusted virtual channel ({}) from {}: {}",
+                        temporary_channel_id,
+                        hex_str(&counterparty_node_id.serialize()),
+                        err,
+                    );
+                    (
+                        unlocked_state
+                            .channel_manager
+                            .force_close_broadcasting_latest_txn(
+                                temporary_channel_id,
+                                counterparty_node_id,
+                                err,
+                            ),
+                        false,
+                    )
+                } else if !channel_type.supports_scid_privacy() {
                     let err = "unsupported_scid_alias".to_string();
                     tracing::error!(
                         "EVENT: Rejected inbound channel ({}) from {}: {}",
@@ -1236,30 +1440,39 @@ async fn handle_ldk_events(
                         hex_str(&counterparty_node_id.serialize()),
                         err,
                     );
-                    unlocked_state
-                        .channel_manager
-                        .force_close_broadcasting_latest_txn(
-                            temporary_channel_id,
-                            counterparty_node_id,
-                            err,
-                        )
+                    (
+                        unlocked_state
+                            .channel_manager
+                            .force_close_broadcasting_latest_txn(
+                                temporary_channel_id,
+                                counterparty_node_id,
+                                err,
+                            ),
+                        false,
+                    )
                 } else {
-                    unlocked_state
-                        .channel_manager
-                        .accept_inbound_channel_from_trusted_peer_0conf(
-                            temporary_channel_id,
-                            counterparty_node_id,
-                            user_channel_id,
-                            None,
-                            ChannelFundingType::Virtual,
-                        )
+                    (
+                        unlocked_state
+                            .channel_manager
+                            .accept_inbound_channel_from_trusted_peer_0conf(
+                                temporary_channel_id,
+                                counterparty_node_id,
+                                user_channel_id,
+                                None,
+                                ChannelFundingType::Virtual,
+                            ),
+                        true,
+                    )
                 }
             } else {
-                unlocked_state.channel_manager.accept_inbound_channel(
-                    temporary_channel_id,
-                    counterparty_node_id,
-                    user_channel_id,
-                    None,
+                (
+                    unlocked_state.channel_manager.accept_inbound_channel(
+                        temporary_channel_id,
+                        counterparty_node_id,
+                        user_channel_id,
+                        None,
+                    ),
+                    true,
                 )
             };
 
@@ -1270,9 +1483,15 @@ async fn handle_ldk_events(
                     hex_str(&counterparty_node_id.serialize()),
                     e,
                 );
-            } else {
+            } else if accepted {
                 tracing::info!(
                     "EVENT: Accepted inbound channel ({}) from {}",
+                    temporary_channel_id,
+                    hex_str(&counterparty_node_id.serialize()),
+                );
+            } else {
+                tracing::info!(
+                    "EVENT: Rejected inbound channel ({}) from {}",
                     temporary_channel_id,
                     hex_str(&counterparty_node_id.serialize()),
                 );

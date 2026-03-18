@@ -1,5 +1,6 @@
 use amplify::s;
 use biscuit_auth::{builder::date, macros::*, KeyPair};
+use bitcoin::secp256k1::PublicKey;
 use chrono::{DateTime, Local, Utc};
 use electrum_client::ElectrumApi;
 use lazy_static::lazy_static;
@@ -68,6 +69,7 @@ impl Default for UserArgs {
             max_media_upload_size_mb: 3,
             root_public_key: None,
             enable_virtual_channels_v0: false,
+            virtual_peer_pubkeys: vec![],
         }
     }
 }
@@ -143,22 +145,24 @@ async fn start_daemon(
     root_public_key: Option<biscuit_auth::PublicKey>,
     keep_node_dir: bool,
 ) -> SocketAddr {
-    start_daemon_with_virtual_flag(
+    start_daemon_with_virtual_options(
         node_test_dir,
         node_peer_port,
         root_public_key,
         keep_node_dir,
         false,
+        vec![],
     )
     .await
 }
 
-async fn start_daemon_with_virtual_flag(
+async fn start_daemon_with_virtual_options(
     node_test_dir: &str,
     node_peer_port: u16,
     root_public_key: Option<biscuit_auth::PublicKey>,
     keep_node_dir: bool,
     enable_virtual_channels_v0: bool,
+    virtual_peer_pubkeys: Vec<PublicKey>,
 ) -> SocketAddr {
     if !keep_node_dir && Path::new(&node_test_dir).is_dir() {
         std::fs::remove_dir_all(node_test_dir).unwrap();
@@ -171,6 +175,7 @@ async fn start_daemon_with_virtual_flag(
         ldk_peer_listening_port: node_peer_port,
         root_public_key,
         enable_virtual_channels_v0,
+        virtual_peer_pubkeys,
         ..Default::default()
     };
     tokio::spawn(async move {
@@ -234,22 +239,25 @@ async fn start_node(
     node_peer_port: u16,
     keep_node_dir: bool,
 ) -> (SocketAddr, String) {
-    start_node_with_virtual_flag(node_test_dir, node_peer_port, keep_node_dir, false).await
+    start_node_with_virtual_options(node_test_dir, node_peer_port, keep_node_dir, false, vec![])
+        .await
 }
 
-async fn start_node_with_virtual_flag(
+async fn start_node_with_virtual_options(
     node_test_dir: &str,
     node_peer_port: u16,
     keep_node_dir: bool,
     enable_virtual_channels_v0: bool,
+    virtual_peer_pubkeys: Vec<PublicKey>,
 ) -> (SocketAddr, String) {
     println!("starting node with peer port {node_peer_port}");
-    let node_address = start_daemon_with_virtual_flag(
+    let node_address = start_daemon_with_virtual_options(
         node_test_dir,
         node_peer_port,
         None,
         keep_node_dir,
         enable_virtual_channels_v0,
+        virtual_peer_pubkeys,
     )
     .await;
 
