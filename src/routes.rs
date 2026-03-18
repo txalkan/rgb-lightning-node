@@ -2891,7 +2891,8 @@ pub(crate) async fn maker_execute(
             );
         }
 
-        unlocked_state.update_maker_swap_status(&swapstring.payment_hash, SwapStatus::Pending.into());
+        unlocked_state
+            .update_maker_swap_status(&swapstring.payment_hash, SwapStatus::Pending.into());
 
         let payment_hash: PaymentHash = payment_preimage.into();
         let (_status, err) = match unlocked_state

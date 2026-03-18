@@ -28,6 +28,69 @@ Important notes:
 - `ldk::start_ldk` now accepts `sdk::UnlockRequestData` so SDK unlock flow is not typed against route-layer DTOs.
 - A small `routes` diff remains for shared `AppState` transition helpers (`pub(crate)` visibility), used by SDK unlock lifecycle handling.
 
+## Route parity status (`routes.rs` -> SDK/UniFFI)
+
+Implemented mappings:
+- `address` -> `address`
+- `asset_balance` -> `asset_balance`
+- `asset_metadata` -> `asset_metadata`
+- `btc_balance` -> `btc_balance`
+- `check_indexer_url` -> `check_indexer_url`
+- `check_proxy_endpoint` -> `check_proxy_endpoint`
+- `close_channel` -> `closechannel`
+- `connect_peer` -> `connectpeer`
+- `create_utxos` -> `createutxos`
+- `decode_ln_invoice` -> `decode_ln_invoice`
+- `decode_rgb_invoice` -> `decode_rgb_invoice`
+- `disconnect_peer` -> `disconnectpeer`
+- `estimate_fee` -> `estimate_fee`
+- `fail_transfers` -> `failtransfers`
+- `get_asset_media` -> `get_asset_media`
+- `get_channel_id` -> `get_channel_id`
+- `get_payment` -> `get_payment`
+- `get_swap` -> `get_swap`
+- `init` -> `init`
+- `invoice_status` -> `invoice_status`
+- `issue_asset_cfa` -> `issueassetcfa`
+- `issue_asset_nia` -> `issueassetnia`
+- `issue_asset_uda` -> `issueassetuda`
+- `keysend` -> `keysend`
+- `list_assets` -> `list_assets`
+- `list_channels` -> `list_channels`
+- `list_payments` -> `list_payments`
+- `list_peers` -> `list_peers`
+- `list_swaps` -> `list_swaps`
+- `list_transactions` -> `list_transactions`
+- `list_transfers` -> `list_transfers`
+- `list_unspents` -> `list_unspents`
+- `ln_invoice` -> `ln_invoice` (SDK internals use `create_ln_invoice`)
+- `maker_execute` -> `makerexecute`
+- `maker_init` -> `makerinit`
+- `network_info` -> `network_info`
+- `node_info` -> `node_info`
+- `open_channel` -> `openchannel`
+- `post_asset_media` -> `postassetmedia`
+- `refresh_transfers` -> `refreshtransfers`
+- `rgb_invoice` -> `rgbinvoice`
+- `send_btc` -> `sendbtc`
+- `send_onion_message` -> `sendonionmessage`
+- `send_payment` -> `sendpayment`
+- `send_rgb` -> `send_rgb`
+- `sign_message` -> `sign_message`
+- `sync` -> `sync`
+- `taker` -> `taker`
+- `unlock` -> `unlock`
+
+Still missing route mappings in SDK/UniFFI:
+- `backup`
+- `change_password`
+- `lock`
+- `restore`
+- `revoke_token`
+
+Special note:
+- `shutdown` exists on `SdkNode` as a native node-handle operation, but there is no dedicated route-parity `sdk::shutdown` function matching `routes::shutdown`.
+
 Manual mixed-language interop runbook:
 - `RUST_PYTHON_INTEROP_MANUAL.md` in this directory (Rust daemon node + Python UniFFI node).
 

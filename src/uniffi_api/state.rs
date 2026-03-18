@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
-use crate::error::AppError;
 use crate::error::APIError;
+use crate::error::AppError;
 use crate::utils::AppState;
 use crate::NodeHandle;
 
 use super::types::{uniffi_state_slot, RlnError};
 
-fn lock_uniffi_state_slot(
-) -> Result<std::sync::MutexGuard<'static, Option<NodeHandle>>, RlnError> {
+fn lock_uniffi_state_slot() -> Result<std::sync::MutexGuard<'static, Option<NodeHandle>>, RlnError>
+{
     uniffi_state_slot().lock().map_err(|_| {
         tracing::error!("UniFFI global state mutex is poisoned");
         RlnError::Internal
@@ -144,7 +144,9 @@ pub(crate) fn map_api_error(err: APIError) -> RlnError {
 
 pub(super) fn map_app_error(err: AppError) -> RlnError {
     match err {
-        AppError::UnavailablePort(_) | AppError::InvalidAuthenticationArgs => RlnError::InvalidRequest,
+        AppError::UnavailablePort(_) | AppError::InvalidAuthenticationArgs => {
+            RlnError::InvalidRequest
+        }
         _ => RlnError::Internal,
     }
 }

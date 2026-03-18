@@ -39,9 +39,41 @@ interface SdkNode {
     [Throws=RlnError]
     void connectpeer(string peer_pubkey_and_addr);
     [Throws=RlnError]
+    void disconnectpeer(SdkDisconnectPeerRequest request);
+    [Throws=RlnError]
+    void closechannel(SdkCloseChannelRequest request);
+    [Throws=RlnError]
+    void createutxos(SdkCreateUtxosRequest request);
+    [Throws=RlnError]
+    AssetNia issueassetnia(SdkIssueAssetNiaRequest request);
+    [Throws=RlnError]
+    AssetCfa issueassetcfa(SdkIssueAssetCfaRequest request);
+    [Throws=RlnError]
+    AssetUda issueassetuda(SdkIssueAssetUdaRequest request);
+    [Throws=RlnError]
+    SdkPostAssetMediaResponse postassetmedia(SdkPostAssetMediaRequest request);
+    [Throws=RlnError]
+    SdkRgbInvoiceResponse rgbinvoice(SdkRgbInvoiceRequest request);
+    [Throws=RlnError]
+    SdkKeysendResponse keysend(SdkKeysendRequest request);
+    [Throws=RlnError]
+    SdkSendBtcResponse sendbtc(SdkSendBtcRequest request);
+    [Throws=RlnError]
+    SdkMakerInitResponse makerinit(SdkMakerInitRequest request);
+    [Throws=RlnError]
+    void makerexecute(SdkMakerExecuteRequest request);
+    [Throws=RlnError]
+    void taker(SdkTakerRequest request);
+    [Throws=RlnError]
+    void sendonionmessage(SdkSendOnionMessageRequest request);
+    [Throws=RlnError]
     SdkOpenChannelResponse openchannel(SdkOpenChannelRequest request);
     [Throws=RlnError]
     SdkSendPaymentResponse sendpayment(SdkSendPaymentRequest request);
+    [Throws=RlnError]
+    void refreshtransfers(SdkRefreshTransfersRequest request);
+    [Throws=RlnError]
+    SdkFailTransfersResponse failtransfers(SdkFailTransfersRequest request);
     [Throws=RlnError]
     void sync();
     [Throws=RlnError]
@@ -451,6 +483,140 @@ dictionary SdkOpenChannelRequest {
 
 dictionary SdkOpenChannelResponse {
     ChannelId temporary_channel_id;
+};
+
+dictionary SdkDisconnectPeerRequest {
+    PublicKey peer_pubkey;
+};
+
+dictionary SdkCloseChannelRequest {
+    ChannelId channel_id;
+    PublicKey peer_pubkey;
+    boolean force;
+};
+
+dictionary SdkRefreshTransfersRequest {
+    boolean skip_sync;
+};
+
+dictionary SdkFailTransfersRequest {
+    i32? batch_transfer_idx;
+    boolean no_asset_only;
+    boolean skip_sync;
+};
+
+dictionary SdkFailTransfersResponse {
+    boolean transfers_changed;
+};
+
+dictionary SdkCreateUtxosRequest {
+    boolean up_to;
+    u8? num;
+    u32? size;
+    u64 fee_rate;
+    boolean skip_sync;
+};
+
+dictionary SdkIssueAssetNiaRequest {
+    sequence<u64> amounts;
+    string ticker;
+    string name;
+    u8 precision;
+};
+
+dictionary SdkIssueAssetCfaRequest {
+    sequence<u64> amounts;
+    string name;
+    string? details;
+    u8 precision;
+    string? file_digest;
+};
+
+dictionary SdkIssueAssetUdaRequest {
+    string ticker;
+    string name;
+    string? details;
+    u8 precision;
+    string? media_file_digest;
+    sequence<string> attachments_file_digests;
+};
+
+dictionary SdkKeysendRequest {
+    PublicKey dest_pubkey;
+    u64 amt_msat;
+    ContractId? asset_id;
+    u64? asset_amount;
+};
+
+dictionary SdkKeysendResponse {
+    PaymentHash payment_hash;
+    string payment_preimage;
+    HtlcStatus status;
+};
+
+dictionary SdkSendBtcRequest {
+    u64 amount;
+    string address;
+    u64 fee_rate;
+    boolean skip_sync;
+};
+
+dictionary SdkSendBtcResponse {
+    Txid txid;
+};
+
+dictionary SdkMakerInitRequest {
+    u64 qty_from;
+    u64 qty_to;
+    ContractId? from_asset;
+    ContractId? to_asset;
+    u32 timeout_sec;
+};
+
+dictionary SdkMakerInitResponse {
+    PaymentHash payment_hash;
+    string payment_secret;
+    string swapstring;
+};
+
+dictionary SdkMakerExecuteRequest {
+    string swapstring;
+    string payment_secret;
+    PublicKey taker_pubkey;
+};
+
+dictionary SdkTakerRequest {
+    string swapstring;
+};
+
+dictionary SdkSendOnionMessageRequest {
+    sequence<PublicKey> node_ids;
+    u64 tlv_type;
+    string data;
+};
+
+dictionary SdkPostAssetMediaRequest {
+    sequence<u8> file_bytes;
+};
+
+dictionary SdkPostAssetMediaResponse {
+    string digest;
+};
+
+dictionary SdkRgbInvoiceRequest {
+    ContractId? asset_id;
+    AssignmentKind? assignment_kind;
+    u64? assignment_amount;
+    u32? duration_seconds;
+    u8 min_confirmations;
+    boolean witness;
+};
+
+dictionary SdkRgbInvoiceResponse {
+    RecipientId recipient_id;
+    string invoice;
+    i64? expiration_timestamp;
+    i32 batch_transfer_idx;
 };
 
 dictionary SdkSendPaymentRequest {

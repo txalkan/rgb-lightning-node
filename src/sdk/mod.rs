@@ -1,46 +1,67 @@
 // NOTE: This module mirrors core behavior from `src/routes.rs` for SDK consumers.
 // If route-level business logic changes, keep SDK equivalents in sync.
 
-use crate::error::APIError;
 use crate::core_types::{
     HtlcStatus as CoreHtlcStatus, SwapStatus as CoreSwapStatus,
     UnlockRequestData as CoreUnlockRequestData,
 };
 use crate::disk::{self, CHANNEL_PEER_DATA};
+use crate::error::APIError;
 use crate::ldk::{start_ldk, PaymentInfo, FEE_RATE, MIN_CHANNEL_CONFIRMATIONS};
-use crate::rgb::check_rgb_proxy_endpoint;
-use crate::swap::SwapData;
+use crate::rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional};
+use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{
     check_already_initialized, check_channel_id, check_password_strength, check_password_validity,
-    connect_peer_if_necessary, encrypt_and_save_mnemonic, get_current_timestamp, get_mnemonic_path,
-    hex_str, hex_str_to_vec, parse_peer_info, AppState,
+    connect_peer_if_necessary, encrypt_and_save_mnemonic, get_current_timestamp,
+    get_max_local_rgb_amount, get_mnemonic_path, get_route, hex_str, hex_str_to_vec,
+    parse_peer_info, AppState, UserOnionMessageContents,
 };
 use amplify::{map, s};
+use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::hex::DisplayHex;
+use bitcoin::secp256k1::PublicKey;
 use bitcoin::ScriptBuf;
 use lightning::chain::channelmonitor::Balance;
+use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::channel_state::ChannelShutdownState;
 use lightning::ln::channelmanager::Bolt11InvoiceParameters;
-use lightning::ln::channelmanager::{OptionalOfferPaymentParams, PaymentId, Retry};
+use lightning::ln::channelmanager::{
+    OptionalOfferPaymentParams, PaymentId, RecipientOnionFields, Retry,
+};
+use lightning::ln::types::ChannelId;
 use lightning::offers::offer::{self, Offer};
 use lightning::rgb_utils::{
-    get_rgb_channel_info_path, get_rgb_payment_info_path, parse_rgb_channel_info, parse_rgb_payment_info,
-    write_rgb_channel_info, write_rgb_payment_info_file, RgbInfo, STATIC_BLINDING,
+    get_rgb_channel_info_path, get_rgb_payment_info_path, parse_rgb_channel_info,
+    parse_rgb_payment_info, write_rgb_channel_info, write_rgb_payment_info_file, RgbInfo,
+    STATIC_BLINDING,
 };
+use lightning::routing::gossip::RoutingFees;
 use lightning::routing::gossip::NodeId;
-use lightning::routing::router::RouteParametersConfig;
+use lightning::routing::router::{
+    Path as LnPath, PaymentParameters, Route, RouteHint, RouteHintHop, RouteParameters,
+    RouteParametersConfig,
+};
 use lightning::sign::EntropySource;
-use lightning::types::payment::PaymentHash;
-use lightning::util::config::{ChannelConfig, ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
+use lightning::types::payment::{PaymentHash, PaymentPreimage};
+use lightning::util::config::{
+    ChannelConfig, ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig,
+};
 use lightning::util::errors::APIError as LDKAPIError;
-use lightning::impl_writeable_tlv_based_enum;
-use lightning_invoice::Bolt11Invoice;
+use lightning::util::IS_SWAP_SCID;
+use lightning_invoice::{Bolt11Invoice, PaymentSecret};
+use lightning::{
+    onion_message::messenger::Destination,
+    onion_message::messenger::MessageSendInstructions,
+};
 use regex::Regex;
-use rgb_lib::wallet::rust_only::check_indexer_url as rgb_lib_check_indexer_url;
-use rgb_lib::wallet::{Invoice as RgbLibInvoice, Recipient as RgbLibRecipient, RecipientInfo, WitnessData as RgbLibWitnessData};
-use rgb_lib::{bdk_wallet::keys::bip39::Mnemonic, generate_keys, ContractId, RgbTransport};
 use rgb_lib::utils::recipient_id_from_script_buf;
+use rgb_lib::wallet::rust_only::check_indexer_url as rgb_lib_check_indexer_url;
+use rgb_lib::wallet::{
+    Invoice as RgbLibInvoice, Recipient as RgbLibRecipient, RecipientInfo,
+    WitnessData as RgbLibWitnessData,
+};
+use rgb_lib::{bdk_wallet::keys::bip39::Mnemonic, generate_keys, ContractId, RgbTransport};
 use std::collections::HashMap;
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
@@ -48,7 +69,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs::File;
-use tokio::io::{AsyncReadExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 
 use rgb_lib::wallet::rust_only::IndexerProtocol as RgbLibIndexerProtocol;
 use rgb_lib::wallet::RecipientType as RgbLibRecipientType;
@@ -67,6 +88,11 @@ const SDK_OPENCHANNEL_MIN_SAT: u64 = 5506;
 const SDK_OPENCHANNEL_MAX_SAT: u64 = 16_777_215;
 const SDK_OPENCHANNEL_MIN_RGB_AMT: u64 = 1;
 const SDK_INVOICE_MIN_MSAT: u64 = SDK_HTLC_MIN_MSAT;
+const SDK_UTXO_NUM: u8 = 4;
+const SDK_UTXO_SIZE_SAT: u32 = 32_000;
+const SDK_DUST_LIMIT_MSAT: u64 = 546_000;
+const SDK_MAX_SWAP_FEE_MSAT: u64 = SDK_HTLC_MIN_MSAT;
+const SDK_DEFAULT_FINAL_CLTV_EXPIRY_DELTA: u32 = 14;
 
 pub(crate) struct NodeInfoData {
     pub(crate) pubkey: String,
@@ -183,6 +209,22 @@ pub(crate) enum AssignmentKindData {
     Any,
 }
 
+fn rgb_assignment_from_kind(
+    assignment_kind: AssignmentKindData,
+    assignment_amount: Option<u64>,
+) -> Result<RgbLibAssignment, APIError> {
+    match (assignment_kind, assignment_amount) {
+        (AssignmentKindData::Fungible, Some(v)) => Ok(RgbLibAssignment::Fungible(v)),
+        (AssignmentKindData::InflationRight, Some(v)) => Ok(RgbLibAssignment::InflationRight(v)),
+        (AssignmentKindData::NonFungible, None) => Ok(RgbLibAssignment::NonFungible),
+        (AssignmentKindData::ReplaceRight, None) => Ok(RgbLibAssignment::ReplaceRight),
+        (AssignmentKindData::Any, None) => Ok(RgbLibAssignment::Any),
+        _ => Err(APIError::InvalidAmount(
+            "invalid RGB assignment payload".to_string(),
+        )),
+    }
+}
+
 pub(crate) struct WitnessDataInput {
     pub(crate) amount_sat: u64,
     pub(crate) blinding: Option<u64>,
@@ -242,6 +284,16 @@ pub(crate) struct OpenChannelData {
     pub(crate) temporary_channel_id: String,
 }
 
+pub(crate) struct DisconnectPeerRequestData {
+    pub(crate) peer_pubkey: String,
+}
+
+pub(crate) struct CloseChannelRequestData {
+    pub(crate) channel_id: String,
+    pub(crate) peer_pubkey: String,
+    pub(crate) force: bool,
+}
+
 pub(crate) struct SendPaymentRequestData {
     pub(crate) invoice: String,
     pub(crate) amt_msat: Option<u64>,
@@ -254,6 +306,126 @@ pub(crate) struct SendPaymentData {
     pub(crate) payment_hash: Option<String>,
     pub(crate) payment_secret: Option<String>,
     pub(crate) status: HtlcStatus,
+}
+
+pub(crate) struct RefreshTransfersRequestData {
+    pub(crate) skip_sync: bool,
+}
+
+pub(crate) struct FailTransfersRequestData {
+    pub(crate) batch_transfer_idx: Option<i32>,
+    pub(crate) no_asset_only: bool,
+    pub(crate) skip_sync: bool,
+}
+
+pub(crate) struct FailTransfersData {
+    pub(crate) transfers_changed: bool,
+}
+
+pub(crate) struct CreateUtxosRequestData {
+    pub(crate) up_to: bool,
+    pub(crate) num: Option<u8>,
+    pub(crate) size: Option<u32>,
+    pub(crate) fee_rate: u64,
+    pub(crate) skip_sync: bool,
+}
+
+pub(crate) struct IssueAssetNiaRequestData {
+    pub(crate) amounts: Vec<u64>,
+    pub(crate) ticker: String,
+    pub(crate) name: String,
+    pub(crate) precision: u8,
+}
+
+pub(crate) struct IssueAssetCfaRequestData {
+    pub(crate) amounts: Vec<u64>,
+    pub(crate) name: String,
+    pub(crate) details: Option<String>,
+    pub(crate) precision: u8,
+    pub(crate) file_digest: Option<String>,
+}
+
+pub(crate) struct IssueAssetUdaRequestData {
+    pub(crate) ticker: String,
+    pub(crate) name: String,
+    pub(crate) details: Option<String>,
+    pub(crate) precision: u8,
+    pub(crate) media_file_digest: Option<String>,
+    pub(crate) attachments_file_digests: Vec<String>,
+}
+
+pub(crate) struct KeysendRequestData {
+    pub(crate) dest_pubkey: String,
+    pub(crate) amt_msat: u64,
+    pub(crate) asset_id: Option<String>,
+    pub(crate) asset_amount: Option<u64>,
+}
+
+pub(crate) struct KeysendData {
+    pub(crate) payment_hash: String,
+    pub(crate) payment_preimage: String,
+    pub(crate) status: HtlcStatus,
+}
+
+pub(crate) struct SendBtcRequestData {
+    pub(crate) amount: u64,
+    pub(crate) address: String,
+    pub(crate) fee_rate: u64,
+    pub(crate) skip_sync: bool,
+}
+
+pub(crate) struct SendBtcData {
+    pub(crate) txid: String,
+}
+
+pub(crate) struct MakerInitRequestData {
+    pub(crate) qty_from: u64,
+    pub(crate) qty_to: u64,
+    pub(crate) from_asset: Option<String>,
+    pub(crate) to_asset: Option<String>,
+    pub(crate) timeout_sec: u32,
+}
+
+pub(crate) struct MakerInitData {
+    pub(crate) payment_hash: String,
+    pub(crate) payment_secret: String,
+    pub(crate) swapstring: String,
+}
+
+pub(crate) struct MakerExecuteRequestData {
+    pub(crate) swapstring: String,
+    pub(crate) payment_secret: String,
+    pub(crate) taker_pubkey: String,
+}
+
+pub(crate) struct TakerRequestData {
+    pub(crate) swapstring: String,
+}
+
+pub(crate) struct SendOnionMessageRequestData {
+    pub(crate) node_ids: Vec<String>,
+    pub(crate) tlv_type: u64,
+    pub(crate) data: String,
+}
+
+pub(crate) struct PostAssetMediaData {
+    pub(crate) digest: String,
+}
+
+pub(crate) struct RgbInvoiceRequestData {
+    pub(crate) asset_id: Option<String>,
+    pub(crate) assignment_kind: Option<AssignmentKindData>,
+    pub(crate) assignment_amount: Option<u64>,
+    pub(crate) duration_seconds: Option<u32>,
+    pub(crate) min_confirmations: u8,
+    pub(crate) witness: bool,
+}
+
+pub(crate) struct RgbInvoiceData {
+    pub(crate) recipient_id: String,
+    pub(crate) invoice: String,
+    pub(crate) expiration_timestamp: Option<i64>,
+    pub(crate) batch_transfer_idx: i32,
 }
 
 pub(crate) struct ListAssetsData {
@@ -757,7 +929,6 @@ pub(crate) async fn check_proxy_endpoint(proxy_endpoint: String) -> Result<(), A
     Ok(())
 }
 
-
 pub(crate) async fn node_info(state: Arc<AppState>) -> Result<NodeInfoData, APIError> {
     let guard = state.check_unlocked().await?;
     let unlocked_state = guard.as_ref().unwrap();
@@ -874,7 +1045,6 @@ pub(crate) async fn sign_message(
     Ok(SignMessageData { signed_message })
 }
 
-
 pub(crate) async fn get_channel_id(
     state: Arc<AppState>,
     temporary_channel_id: String,
@@ -984,7 +1154,6 @@ pub(crate) async fn list_peers(state: Arc<AppState>) -> Result<Vec<PeerData>, AP
         })
         .collect())
 }
-
 
 pub(crate) async fn asset_balance(
     state: Arc<AppState>,
@@ -1186,7 +1355,9 @@ pub(crate) async fn send_rgb_from_groups(
     request: SendRgbRequestData,
 ) -> Result<SendRgbData, APIError> {
     if request.recipient_groups.is_empty() {
-        return Err(APIError::InvalidAmount("recipient_groups cannot be empty".to_string()));
+        return Err(APIError::InvalidAmount(
+            "recipient_groups cannot be empty".to_string(),
+        ));
     }
 
     let recipient_map = request
@@ -1197,20 +1368,8 @@ pub(crate) async fn send_rgb_from_groups(
                 .recipients
                 .into_iter()
                 .map(|r| {
-                    let assignment = match (r.assignment_kind, r.assignment_amount) {
-                        (AssignmentKindData::Fungible, Some(v)) => RgbLibAssignment::Fungible(v),
-                        (AssignmentKindData::InflationRight, Some(v)) => {
-                            RgbLibAssignment::InflationRight(v)
-                        }
-                        (AssignmentKindData::NonFungible, None) => RgbLibAssignment::NonFungible,
-                        (AssignmentKindData::ReplaceRight, None) => RgbLibAssignment::ReplaceRight,
-                        (AssignmentKindData::Any, None) => RgbLibAssignment::Any,
-                        _ => {
-                            return Err(APIError::InvalidAmount(
-                                "invalid RGB assignment payload".to_string(),
-                            ))
-                        }
-                    };
+                    let assignment =
+                        rgb_assignment_from_kind(r.assignment_kind, r.assignment_amount)?;
                     let recipient = RgbLibRecipient {
                         recipient_id: r.recipient_id,
                         witness_data: r.witness_data.map(|w| RgbLibWitnessData {
@@ -1278,14 +1437,14 @@ pub(crate) async fn unlock(
         }
     }
 
-    let mnemonic = match check_password_validity(&request.password, &state.static_state.storage_dir_path)
-    {
-        Ok(mnemonic) => mnemonic,
-        Err(e) => {
-            state.update_changing_state(false);
-            return Err(e);
-        }
-    };
+    let mnemonic =
+        match check_password_validity(&request.password, &state.static_state.storage_dir_path) {
+            Ok(mnemonic) => mnemonic,
+            Err(e) => {
+                state.update_changing_state(false);
+                return Err(e);
+            }
+        };
 
     tracing::debug!("Starting LDK...");
     let unlock_request = CoreUnlockRequestData {
@@ -1327,7 +1486,8 @@ pub(crate) async fn connect_peer(
     let (peer_pubkey, peer_addr) = parse_peer_info(peer_pubkey_and_addr.to_string())?;
 
     if let Some(peer_addr) = peer_addr {
-        connect_peer_if_necessary(peer_pubkey, peer_addr, unlocked_state.peer_manager.clone()).await?;
+        connect_peer_if_necessary(peer_pubkey, peer_addr, unlocked_state.peer_manager.clone())
+            .await?;
         disk::persist_channel_peer(
             &state.static_state.ldk_data_dir.join(CHANNEL_PEER_DATA),
             &peer_pubkey,
@@ -1340,6 +1500,414 @@ pub(crate) async fn connect_peer(
     }
 
     Ok(())
+}
+
+pub(crate) async fn disconnect_peer(
+    state: Arc<AppState>,
+    request: DisconnectPeerRequestData,
+) -> Result<(), APIError> {
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
+
+    let peer_pubkey = PublicKey::from_str(&request.peer_pubkey).map_err(|_| APIError::InvalidPubkey)?;
+
+    for channel in unlocked_state.channel_manager.list_channels() {
+        if channel.counterparty.node_id == peer_pubkey {
+            return Err(APIError::FailedPeerDisconnection(s!(
+                "node has an active channel with this peer, close any channels first"
+            )));
+        }
+    }
+
+    disk::delete_channel_peer(
+        &state.static_state.ldk_data_dir.join(CHANNEL_PEER_DATA),
+        request.peer_pubkey,
+    )?;
+
+    if unlocked_state
+        .peer_manager
+        .peer_by_node_id(&peer_pubkey)
+        .is_none()
+    {
+        return Err(APIError::FailedPeerDisconnection(format!(
+            "Could not find peer {peer_pubkey}"
+        )));
+    }
+
+    unlocked_state.peer_manager.disconnect_by_node_id(peer_pubkey);
+    Ok(())
+}
+
+pub(crate) async fn close_channel(
+    state: Arc<AppState>,
+    request: CloseChannelRequestData,
+) -> Result<(), APIError> {
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
+
+    let channel_id_vec = hex_str_to_vec(&request.channel_id);
+    if channel_id_vec.is_none() || channel_id_vec.as_ref().unwrap().len() != 32 {
+        return Err(APIError::InvalidChannelID);
+    }
+    let requested_cid = ChannelId(channel_id_vec.unwrap().try_into().unwrap());
+
+    let peer_pubkey_vec = match hex_str_to_vec(&request.peer_pubkey) {
+        Some(peer_pubkey_vec) => peer_pubkey_vec,
+        None => return Err(APIError::InvalidPubkey),
+    };
+    let peer_pubkey = match PublicKey::from_slice(&peer_pubkey_vec) {
+        Ok(peer_pubkey) => peer_pubkey,
+        Err(_) => return Err(APIError::InvalidPubkey),
+    };
+
+    if let Some(chan_details) = unlocked_state
+        .channel_manager
+        .list_channels()
+        .iter()
+        .find(|c| c.channel_id == requested_cid)
+    {
+        match chan_details.channel_shutdown_state {
+            Some(ChannelShutdownState::NotShuttingDown) => {}
+            _ => {
+                return Err(APIError::CannotCloseChannel(s!(
+                    "Channel is already being closed"
+                )))
+            }
+        }
+    } else {
+        return Err(APIError::UnknownChannelId);
+    }
+
+    if request.force {
+        match unlocked_state
+            .channel_manager
+            .force_close_broadcasting_latest_txn(
+                &requested_cid,
+                &peer_pubkey,
+                "Manually force-closed".to_string(),
+            ) {
+            Ok(()) => tracing::info!("EVENT: initiating channel force-close"),
+            Err(e) => match e {
+                LDKAPIError::APIMisuseError { err } => {
+                    return Err(APIError::FailedClosingChannel(err))
+                }
+                _ => return Err(APIError::CannotCloseChannel(format!("{e:?}"))),
+            },
+        }
+    } else {
+        match unlocked_state
+            .channel_manager
+            .close_channel(&requested_cid, &peer_pubkey)
+        {
+            Ok(()) => tracing::info!("EVENT: initiating channel close"),
+            Err(e) => match e {
+                LDKAPIError::APIMisuseError { err } => {
+                    return Err(APIError::FailedClosingChannel(err))
+                }
+                _ => return Err(APIError::CannotCloseChannel(format!("{e:?}"))),
+            },
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn create_utxos(
+    state: Arc<AppState>,
+    request: CreateUtxosRequestData,
+) -> Result<(), APIError> {
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
+
+    unlocked_state.rgb_create_utxos(
+        request.up_to,
+        request.num.unwrap_or(SDK_UTXO_NUM),
+        request.size.unwrap_or(SDK_UTXO_SIZE_SAT),
+        request.fee_rate,
+        request.skip_sync,
+    )?;
+    tracing::debug!("UTXO creation complete");
+
+    Ok(())
+}
+
+pub(crate) async fn issue_asset_nia(
+    state: Arc<AppState>,
+    request: IssueAssetNiaRequestData,
+) -> Result<AssetNIA, APIError> {
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
+
+    if *unlocked_state.rgb_send_lock.lock().unwrap() {
+        return Err(APIError::OpenChannelInProgress);
+    }
+
+    let asset = unlocked_state.rgb_issue_asset_nia(
+        request.ticker,
+        request.name,
+        request.precision,
+        request.amounts,
+    )?;
+
+    Ok(asset.into())
+}
+
+pub(crate) async fn issue_asset_cfa(
+    state: Arc<AppState>,
+    request: IssueAssetCfaRequestData,
+) -> Result<AssetCFA, APIError> {
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
+
+    if *unlocked_state.rgb_send_lock.lock().unwrap() {
+        return Err(APIError::OpenChannelInProgress);
+    }
+
+    let file_path = request.file_digest.map(|d| {
+        unlocked_state
+            .rgb_get_media_dir()
+            .join(d.to_lowercase())
+            .to_string_lossy()
+            .to_string()
+    });
+
+    let asset = unlocked_state.rgb_issue_asset_cfa(
+        request.name,
+        request.details,
+        request.precision,
+        request.amounts,
+        file_path,
+    )?;
+
+    Ok(asset.into())
+}
+
+pub(crate) async fn issue_asset_uda(
+    state: Arc<AppState>,
+    request: IssueAssetUdaRequestData,
+) -> Result<AssetUDA, APIError> {
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
+
+    if *unlocked_state.rgb_send_lock.lock().unwrap() {
+        return Err(APIError::OpenChannelInProgress);
+    }
+
+    let rgb_media_dir = unlocked_state.rgb_get_media_dir();
+    let get_string_path = |d: String| {
+        rgb_media_dir
+            .join(d.to_lowercase())
+            .to_string_lossy()
+            .to_string()
+    };
+    let media_file_path = request.media_file_digest.map(get_string_path);
+    let attachments_file_paths = request
+        .attachments_file_digests
+        .into_iter()
+        .map(get_string_path)
+        .collect();
+
+    let asset = unlocked_state.rgb_issue_asset_uda(
+        request.ticker,
+        request.name,
+        request.details,
+        request.precision,
+        media_file_path,
+        attachments_file_paths,
+    )?;
+
+    Ok(asset.into())
+}
+
+pub(crate) async fn keysend(
+    state: Arc<AppState>,
+    request: KeysendRequestData,
+) -> Result<KeysendData, APIError> {
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
+
+    let dest_pubkey_vec = match hex_str_to_vec(&request.dest_pubkey) {
+        Some(peer_pubkey_vec) => peer_pubkey_vec,
+        None => return Err(APIError::InvalidPubkey),
+    };
+    let dest_pubkey = match PublicKey::from_slice(&dest_pubkey_vec) {
+        Ok(peer_pubkey) => peer_pubkey,
+        Err(_) => return Err(APIError::InvalidPubkey),
+    };
+
+    let amt_msat = request.amt_msat;
+    if amt_msat < SDK_HTLC_MIN_MSAT {
+        return Err(APIError::InvalidAmount(format!(
+            "amt_msat cannot be less than {SDK_HTLC_MIN_MSAT}"
+        )));
+    }
+
+    let payment_preimage = PaymentPreimage(unlocked_state.keys_manager.get_secure_random_bytes());
+    let payment_hash_inner = Sha256::hash(&payment_preimage.0[..]).to_byte_array();
+    let payment_id = PaymentId(payment_hash_inner);
+    let payment_hash = PaymentHash(payment_hash_inner);
+
+    let rgb_payment = match (request.asset_id, request.asset_amount) {
+        (Some(asset_id), Some(rgb_amount)) => {
+            let contract_id =
+                ContractId::from_str(&asset_id).map_err(|_| APIError::InvalidAssetID(asset_id))?;
+            Some((contract_id, rgb_amount))
+        }
+        (None, None) => None,
+        _ => {
+            return Err(APIError::IncompleteRGBInfo);
+        }
+    };
+
+    let route_params = RouteParameters::from_payment_params_and_value(
+        PaymentParameters::for_keysend(dest_pubkey, 40, false),
+        amt_msat,
+        rgb_payment,
+    );
+    let created_at = get_current_timestamp();
+    unlocked_state.add_outbound_payment(
+        payment_id,
+        PaymentInfo {
+            preimage: None,
+            secret: None,
+            status: HtlcStatus::Pending.into(),
+            amt_msat: Some(amt_msat),
+            created_at,
+            updated_at: created_at,
+            payee_pubkey: dest_pubkey,
+            expires_at: None,
+        },
+    )?;
+    if let Some((contract_id, rgb_amount)) = rgb_payment {
+        write_rgb_payment_info_file(
+            &PathBuf::from(&state.static_state.ldk_data_dir),
+            &payment_hash,
+            contract_id,
+            rgb_amount,
+            false,
+            false,
+        );
+    }
+
+    let status = match unlocked_state.channel_manager.send_spontaneous_payment(
+        Some(payment_preimage),
+        RecipientOnionFields::spontaneous_empty(),
+        payment_id,
+        route_params,
+        Retry::Timeout(Duration::from_secs(10)),
+    ) {
+        Ok(_payment_hash) => {
+            tracing::info!(
+                "EVENT: initiated sending {} msats to {}",
+                amt_msat,
+                dest_pubkey
+            );
+            HtlcStatus::Pending
+        }
+        Err(e) => {
+            tracing::error!("ERROR: failed to send payment: {:?}", e);
+            unlocked_state.update_outbound_payment_status(payment_id, HtlcStatus::Failed.into());
+            HtlcStatus::Failed
+        }
+    };
+
+    Ok(KeysendData {
+        payment_hash: hex_str(&payment_hash.0),
+        payment_preimage: hex_str(&payment_preimage.0),
+        status,
+    })
+}
+
+pub(crate) async fn send_btc(
+    state: Arc<AppState>,
+    request: SendBtcRequestData,
+) -> Result<SendBtcData, APIError> {
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
+
+    let txid = unlocked_state.rgb_send_btc(
+        request.address,
+        request.amount,
+        request.fee_rate,
+        request.skip_sync,
+    )?;
+
+    Ok(SendBtcData { txid })
+}
+
+pub(crate) async fn post_asset_media(
+    state: Arc<AppState>,
+    file_bytes: Vec<u8>,
+) -> Result<PostAssetMediaData, APIError> {
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
+
+    if file_bytes.is_empty() {
+        return Err(APIError::MediaFileEmpty);
+    }
+    let file_hash: Sha256 = Hash::hash(&file_bytes[..]);
+    let digest = file_hash.to_string();
+
+    let file_path = unlocked_state.rgb_get_media_dir().join(&digest);
+    let mut write = true;
+    if file_path.exists() {
+        let mut buf_reader = BufReader::new(File::open(&file_path).await?);
+        let mut existing_file_bytes = Vec::new();
+        buf_reader.read_to_end(&mut existing_file_bytes).await?;
+        if file_bytes != existing_file_bytes {
+            tokio::fs::remove_file(&file_path).await?;
+        } else {
+            write = false;
+        }
+    }
+    if write {
+        let mut file = File::create(&file_path).await?;
+        file.write_all(&file_bytes).await?;
+    }
+
+    Ok(PostAssetMediaData { digest })
+}
+
+pub(crate) async fn rgb_invoice(
+    state: Arc<AppState>,
+    request: RgbInvoiceRequestData,
+) -> Result<RgbInvoiceData, APIError> {
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
+
+    if *unlocked_state.rgb_send_lock.lock().unwrap() {
+        return Err(APIError::OpenChannelInProgress);
+    }
+
+    let assignment = match request.assignment_kind {
+        Some(kind) => rgb_assignment_from_kind(kind, request.assignment_amount)?,
+        None => RgbLibAssignment::Any,
+    };
+
+    let receive_data = if request.witness {
+        unlocked_state.rgb_witness_receive(
+            request.asset_id,
+            assignment,
+            request.duration_seconds,
+            vec![unlocked_state.proxy_endpoint.clone()],
+            request.min_confirmations,
+        )?
+    } else {
+        unlocked_state.rgb_blind_receive(
+            request.asset_id,
+            assignment,
+            request.duration_seconds,
+            vec![unlocked_state.proxy_endpoint.clone()],
+            request.min_confirmations,
+        )?
+    };
+
+    Ok(RgbInvoiceData {
+        recipient_id: receive_data.recipient_id,
+        invoice: receive_data.invoice,
+        expiration_timestamp: receive_data.expiration_timestamp,
+        batch_transfer_idx: receive_data.batch_transfer_idx,
+    })
 }
 
 pub(crate) async fn open_channel(
@@ -1370,7 +1938,8 @@ pub(crate) async fn open_channel(
             )));
         }
         (Some(asset), Some(amt)) => {
-            let asset = ContractId::from_str(&asset).map_err(|_| APIError::InvalidAssetID(asset))?;
+            let asset =
+                ContractId::from_str(&asset).map_err(|_| APIError::InvalidAssetID(asset))?;
             Some((asset, amt))
         }
         (None, None) => None,
@@ -1402,7 +1971,8 @@ pub(crate) async fn open_channel(
         return Err(APIError::AnchorsRequired);
     }
 
-    let (peer_pubkey, mut peer_addr) = parse_peer_info(request.peer_pubkey_and_opt_addr.to_string())?;
+    let (peer_pubkey, mut peer_addr) =
+        parse_peer_info(request.peer_pubkey_and_opt_addr.to_string())?;
 
     let peer_data_path = state.static_state.ldk_data_dir.join(CHANNEL_PEER_DATA);
     if peer_addr.is_none() {
@@ -1424,7 +1994,8 @@ pub(crate) async fn open_channel(
         }
     }
     if let Some(peer_addr) = peer_addr {
-        connect_peer_if_necessary(peer_pubkey, peer_addr, unlocked_state.peer_manager.clone()).await?;
+        connect_peer_if_necessary(peer_pubkey, peer_addr, unlocked_state.peer_manager.clone())
+            .await?;
         disk::persist_channel_peer(&peer_data_path, &peer_pubkey, &peer_addr)?;
     } else {
         return Err(APIError::InvalidPeerInfo(s!(
@@ -1472,9 +2043,13 @@ pub(crate) async fn open_channel(
         let script_buf = ScriptBuf::from_bytes(fake_p2wsh.to_vec());
         let recipient_id = recipient_id_from_script_buf(script_buf, state.static_state.network);
         let asset_id = contract_id.to_string();
-        let schema = unlocked_state.rgb_get_asset_metadata(*contract_id)?.asset_schema;
+        let schema = unlocked_state
+            .rgb_get_asset_metadata(*contract_id)?
+            .asset_schema;
         let assignment = match schema {
-            RgbLibAssetSchema::Nia | RgbLibAssetSchema::Cfa => RgbLibAssignment::Fungible(*asset_amount),
+            RgbLibAssetSchema::Nia | RgbLibAssetSchema::Cfa => {
+                RgbLibAssignment::Fungible(*asset_amount)
+            }
             RgbLibAssetSchema::Uda => RgbLibAssignment::NonFungible,
             RgbLibAssetSchema::Ifa => todo!(),
         };
@@ -1528,7 +2103,8 @@ pub(crate) async fn open_channel(
                     if err.contains("fee for initial commitment transaction") =>
                 {
                     let mut commitment_tx_fee = 0;
-                    let re = Regex::new(r"fee for initial commitment transaction fee of (\d+).").unwrap();
+                    let re = Regex::new(r"fee for initial commitment transaction fee of (\d+).")
+                        .unwrap();
                     if let Some(captures) = re.captures(&err) {
                         if let Some(fee_str) = captures.get(1) {
                             commitment_tx_fee = fee_str.as_str().parse().unwrap();
@@ -1551,11 +2127,19 @@ pub(crate) async fn open_channel(
             remote_rgb_amount: 0,
         };
         write_rgb_channel_info(
-            &get_rgb_channel_info_path(&temporary_channel_id, &state.static_state.ldk_data_dir, true),
+            &get_rgb_channel_info_path(
+                &temporary_channel_id,
+                &state.static_state.ldk_data_dir,
+                true,
+            ),
             &rgb_info,
         );
         write_rgb_channel_info(
-            &get_rgb_channel_info_path(&temporary_channel_id, &state.static_state.ldk_data_dir, false),
+            &get_rgb_channel_info_path(
+                &temporary_channel_id,
+                &state.static_state.ldk_data_dir,
+                false,
+            ),
             &rgb_info,
         );
     }
@@ -1575,166 +2159,173 @@ pub(crate) async fn send_payment(
     let mut status = HtlcStatus::Pending;
     let created_at = get_current_timestamp();
 
-    let (payment_id, payment_hash, payment_secret) =
-        if let Ok(offer) = Offer::from_str(&request.invoice) {
-            let random_bytes = unlocked_state.keys_manager.get_secure_random_bytes();
-            let payment_id = PaymentId(random_bytes);
+    let (payment_id, payment_hash, payment_secret) = if let Ok(offer) =
+        Offer::from_str(&request.invoice)
+    {
+        let random_bytes = unlocked_state.keys_manager.get_secure_random_bytes();
+        let payment_id = PaymentId(random_bytes);
 
-            let amt_msat = match (offer.amount(), request.amt_msat) {
-                (Some(offer::Amount::Bitcoin { amount_msats }), _) => amount_msats,
-                (_, Some(amt)) => amt,
-                (amt, _) => {
-                    return Err(APIError::InvalidAmount(format!(
-                        "cannot process non-Bitcoin-denominated offer value {amt:?}"
-                    )));
-                }
-            };
-            if request.amt_msat.is_some() && request.amt_msat != Some(amt_msat) {
+        let amt_msat = match (offer.amount(), request.amt_msat) {
+            (Some(offer::Amount::Bitcoin { amount_msats }), _) => amount_msats,
+            (_, Some(amt)) => amt,
+            (amt, _) => {
                 return Err(APIError::InvalidAmount(format!(
-                    "amount didn't match offer of {amt_msat}msat"
+                    "cannot process non-Bitcoin-denominated offer value {amt:?}"
                 )));
             }
+        };
+        if request.amt_msat.is_some() && request.amt_msat != Some(amt_msat) {
+            return Err(APIError::InvalidAmount(format!(
+                "amount didn't match offer of {amt_msat}msat"
+            )));
+        }
 
-            let secret = None;
-            unlocked_state.add_outbound_payment(
-                payment_id,
-                PaymentInfo {
-                    preimage: None,
-                    secret,
-                    status: status.into(),
-                    amt_msat: Some(amt_msat),
-                    created_at,
-                    updated_at: created_at,
-                    payee_pubkey: offer
-                        .issuer_signing_pubkey()
-                        .ok_or(APIError::InvalidInvoice(s!("missing signing pubkey")))?,
-                    expires_at: None,
-                },
-            )?;
+        let secret = None;
+        unlocked_state.add_outbound_payment(
+            payment_id,
+            PaymentInfo {
+                preimage: None,
+                secret,
+                status: status.into(),
+                amt_msat: Some(amt_msat),
+                created_at,
+                updated_at: created_at,
+                payee_pubkey: offer
+                    .issuer_signing_pubkey()
+                    .ok_or(APIError::InvalidInvoice(s!("missing signing pubkey")))?,
+                expires_at: None,
+            },
+        )?;
 
-            let params = OptionalOfferPaymentParams {
-                retry_strategy: Retry::Timeout(Duration::from_secs(10)),
-                ..Default::default()
-            };
-            let pay = unlocked_state
-                .channel_manager
-                .pay_for_offer(&offer, Some(amt_msat), payment_id, params);
-            if pay.is_err() {
-                tracing::error!("ERROR: failed to pay: {:?}", pay);
-                unlocked_state
-                    .update_outbound_payment_status(payment_id, HtlcStatus::Failed.into());
+        let params = OptionalOfferPaymentParams {
+            retry_strategy: Retry::Timeout(Duration::from_secs(10)),
+            ..Default::default()
+        };
+        let pay = unlocked_state.channel_manager.pay_for_offer(
+            &offer,
+            Some(amt_msat),
+            payment_id,
+            params,
+        );
+        if pay.is_err() {
+            tracing::error!("ERROR: failed to pay: {:?}", pay);
+            unlocked_state.update_outbound_payment_status(payment_id, HtlcStatus::Failed.into());
+            status = HtlcStatus::Failed;
+            unlocked_state.update_outbound_payment_status(payment_id, status.into());
+        }
+        (payment_id, None, secret)
+    } else {
+        let invoice = Bolt11Invoice::from_str(&request.invoice)
+            .map_err(|e| APIError::InvalidInvoice(e.to_string()))?;
+
+        let payment_id = PaymentId((*invoice.payment_hash()).to_byte_array());
+        let payment_secret = Some(*invoice.payment_secret());
+        let zero_amt_invoice =
+            invoice.amount_milli_satoshis().is_none() || invoice.amount_milli_satoshis() == Some(0);
+
+        let amt_msat = if zero_amt_invoice {
+            if let Some(amt_msat) = request.amt_msat {
+                amt_msat
+            } else {
+                return Err(APIError::InvalidAmount(s!(
+                    "need an amount for the given 0-value invoice"
+                )));
+            }
+        } else {
+            if request.amt_msat.is_some() && invoice.amount_milli_satoshis() != request.amt_msat {
+                return Err(APIError::InvalidAmount(format!(
+                    "amount didn't match invoice value of {}msat",
+                    invoice.amount_milli_satoshis().unwrap_or(0)
+                )));
+            }
+            invoice.amount_milli_satoshis().unwrap_or(0)
+        };
+
+        let rgb_payment = match (invoice.rgb_contract_id(), invoice.rgb_amount()) {
+            (Some(rgb_contract_id), Some(rgb_amount)) => {
+                if amt_msat < SDK_INVOICE_MIN_MSAT {
+                    return Err(APIError::InvalidAmount(format!(
+                            "amt_msat in invoice sending an RGB asset cannot be less than {SDK_INVOICE_MIN_MSAT}"
+                        )));
+                }
+                Some((rgb_contract_id, rgb_amount))
+            }
+            (Some(rgb_contract_id), None) => {
+                if amt_msat < SDK_INVOICE_MIN_MSAT {
+                    return Err(APIError::InvalidAmount(format!(
+                            "amt_msat in invoice sending an RGB asset cannot be less than {SDK_INVOICE_MIN_MSAT}"
+                        )));
+                }
+                if let Some(asset_id) = request.asset_id.as_ref() {
+                    let payload_contract_id = ContractId::from_str(asset_id)
+                        .map_err(|_| APIError::InvalidAssetID(asset_id.clone()))?;
+                    if payload_contract_id != rgb_contract_id {
+                        return Err(APIError::InvalidInvoice(s!(
+                            "invoice RGB contract ID doesn't match the requested one"
+                        )));
+                    }
+                }
+                let rgb_amount = request.asset_amount.ok_or(APIError::IncompleteRGBInfo)?;
+                Some((rgb_contract_id, rgb_amount))
+            }
+            (None, None) => None,
+            (None, Some(_)) => {
+                return Err(APIError::InvalidInvoice(s!(
+                    "invoice has an RGB amount but not an RGB contract ID"
+                )));
+            }
+        };
+
+        let secret = payment_secret;
+        unlocked_state.add_outbound_payment(
+            payment_id,
+            PaymentInfo {
+                preimage: None,
+                secret,
+                status: status.into(),
+                amt_msat: Some(amt_msat),
+                created_at,
+                updated_at: created_at,
+                payee_pubkey: invoice.get_payee_pub_key(),
+                expires_at: None,
+            },
+        )?;
+        let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
+        if let Some((contract_id, rgb_amount)) = rgb_payment {
+            write_rgb_payment_info_file(
+                &PathBuf::from(&state.static_state.ldk_data_dir),
+                &payment_hash,
+                contract_id,
+                rgb_amount,
+                false,
+                false,
+            );
+        }
+
+        match unlocked_state.channel_manager.pay_for_bolt11_invoice(
+            &invoice,
+            payment_id,
+            Some(amt_msat),
+            RouteParametersConfig::default(),
+            Retry::Timeout(Duration::from_secs(10)),
+        ) {
+            Ok(_) => {
+                let payee_pubkey = invoice.recover_payee_pub_key();
+                tracing::info!(
+                    "EVENT: initiated sending {} msats to {}",
+                    amt_msat,
+                    payee_pubkey
+                );
+            }
+            Err(e) => {
+                tracing::error!("ERROR: failed to send payment: {:?}", e);
                 status = HtlcStatus::Failed;
                 unlocked_state.update_outbound_payment_status(payment_id, status.into());
             }
-            (payment_id, None, secret)
-        } else {
-            let invoice = Bolt11Invoice::from_str(&request.invoice)
-                .map_err(|e| APIError::InvalidInvoice(e.to_string()))?;
-
-            let payment_id = PaymentId((*invoice.payment_hash()).to_byte_array());
-            let payment_secret = Some(*invoice.payment_secret());
-            let zero_amt_invoice =
-                invoice.amount_milli_satoshis().is_none() || invoice.amount_milli_satoshis() == Some(0);
-
-            let amt_msat = if zero_amt_invoice {
-                if let Some(amt_msat) = request.amt_msat {
-                    amt_msat
-                } else {
-                    return Err(APIError::InvalidAmount(s!(
-                        "need an amount for the given 0-value invoice"
-                    )));
-                }
-            } else {
-                if request.amt_msat.is_some() && invoice.amount_milli_satoshis() != request.amt_msat {
-                    return Err(APIError::InvalidAmount(format!(
-                        "amount didn't match invoice value of {}msat",
-                        invoice.amount_milli_satoshis().unwrap_or(0)
-                    )));
-                }
-                invoice.amount_milli_satoshis().unwrap_or(0)
-            };
-
-            let rgb_payment = match (invoice.rgb_contract_id(), invoice.rgb_amount()) {
-                (Some(rgb_contract_id), Some(rgb_amount)) => {
-                    if amt_msat < SDK_INVOICE_MIN_MSAT {
-                        return Err(APIError::InvalidAmount(format!(
-                            "amt_msat in invoice sending an RGB asset cannot be less than {SDK_INVOICE_MIN_MSAT}"
-                        )));
-                    }
-                    Some((rgb_contract_id, rgb_amount))
-                }
-                (Some(rgb_contract_id), None) => {
-                    if amt_msat < SDK_INVOICE_MIN_MSAT {
-                        return Err(APIError::InvalidAmount(format!(
-                            "amt_msat in invoice sending an RGB asset cannot be less than {SDK_INVOICE_MIN_MSAT}"
-                        )));
-                    }
-                    if let Some(asset_id) = request.asset_id.as_ref() {
-                        let payload_contract_id = ContractId::from_str(asset_id)
-                            .map_err(|_| APIError::InvalidAssetID(asset_id.clone()))?;
-                        if payload_contract_id != rgb_contract_id {
-                            return Err(APIError::InvalidInvoice(s!(
-                                "invoice RGB contract ID doesn't match the requested one"
-                            )));
-                        }
-                    }
-                    let rgb_amount = request.asset_amount.ok_or(APIError::IncompleteRGBInfo)?;
-                    Some((rgb_contract_id, rgb_amount))
-                }
-                (None, None) => None,
-                (None, Some(_)) => {
-                    return Err(APIError::InvalidInvoice(s!(
-                        "invoice has an RGB amount but not an RGB contract ID"
-                    )));
-                }
-            };
-
-            let secret = payment_secret;
-            unlocked_state.add_outbound_payment(
-                payment_id,
-                PaymentInfo {
-                    preimage: None,
-                    secret,
-                    status: status.into(),
-                    amt_msat: Some(amt_msat),
-                    created_at,
-                    updated_at: created_at,
-                    payee_pubkey: invoice.get_payee_pub_key(),
-                    expires_at: None,
-                },
-            )?;
-            let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
-            if let Some((contract_id, rgb_amount)) = rgb_payment {
-                write_rgb_payment_info_file(
-                    &PathBuf::from(&state.static_state.ldk_data_dir),
-                    &payment_hash,
-                    contract_id,
-                    rgb_amount,
-                    false,
-                    false,
-                );
-            }
-
-            match unlocked_state.channel_manager.pay_for_bolt11_invoice(
-                &invoice,
-                payment_id,
-                Some(amt_msat),
-                RouteParametersConfig::default(),
-                Retry::Timeout(Duration::from_secs(10)),
-            ) {
-                Ok(_) => {
-                    let payee_pubkey = invoice.recover_payee_pub_key();
-                    tracing::info!("EVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
-                }
-                Err(e) => {
-                    tracing::error!("ERROR: failed to send payment: {:?}", e);
-                    status = HtlcStatus::Failed;
-                    unlocked_state.update_outbound_payment_status(payment_id, status.into());
-                }
-            };
-
-            (payment_id, Some(payment_hash), secret)
         };
+
+        (payment_id, Some(payment_hash), secret)
+    };
 
     Ok(SendPaymentData {
         payment_id: hex_str(&payment_id.0),
@@ -1744,13 +2335,368 @@ pub(crate) async fn send_payment(
     })
 }
 
+pub(crate) async fn fail_transfers(
+    state: Arc<AppState>,
+    request: FailTransfersRequestData,
+) -> Result<FailTransfersData, APIError> {
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
+    let unlocked_state_copy = unlocked_state.clone();
+
+    let transfers_changed = tokio::task::spawn_blocking(move || {
+        unlocked_state_copy.rgb_fail_transfers(
+            request.batch_transfer_idx,
+            request.no_asset_only,
+            request.skip_sync,
+        )
+    })
+    .await
+    .unwrap()?;
+
+    Ok(FailTransfersData { transfers_changed })
+}
+
+pub(crate) async fn refresh_transfers(
+    state: Arc<AppState>,
+    request: RefreshTransfersRequestData,
+) -> Result<(), APIError> {
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
+    let unlocked_state_copy = unlocked_state.clone();
+
+    tokio::task::spawn_blocking(move || unlocked_state_copy.rgb_refresh(request.skip_sync))
+        .await
+        .unwrap()?;
+    Ok(())
+}
+
+pub(crate) async fn maker_execute(
+    state: Arc<AppState>,
+    request: MakerExecuteRequestData,
+) -> Result<(), APIError> {
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
+
+    let swapstring = SwapString::from_str(&request.swapstring)
+        .map_err(|e| APIError::InvalidSwapString(request.swapstring.clone(), e.to_string()))?;
+    let payment_secret = hex_str_to_vec(&request.payment_secret)
+        .and_then(|data| data.try_into().ok())
+        .map(PaymentSecret)
+        .ok_or(APIError::InvalidPaymentSecret)?;
+    let taker_pk = PublicKey::from_str(&request.taker_pubkey).map_err(|_| APIError::InvalidPubkey)?;
+
+    if get_current_timestamp() > swapstring.swap_info.expiry {
+        unlocked_state.update_maker_swap_status(&swapstring.payment_hash, SwapStatus::Expired.into());
+        return Err(APIError::ExpiredSwapOffer);
+    }
+
+    let payment_preimage = unlocked_state
+        .channel_manager
+        .get_payment_preimage(swapstring.payment_hash, payment_secret)
+        .map_err(|_| APIError::MissingSwapPaymentPreimage)?;
+
+    let swap_info = swapstring.swap_info;
+    let receive_hints = unlocked_state
+        .channel_manager
+        .list_usable_channels()
+        .iter()
+        .filter(|details| match get_rgb_channel_info_optional(
+            &details.channel_id,
+            &state.static_state.ldk_data_dir,
+            false,
+        ) {
+            _ if swap_info.is_from_btc() => true,
+            Some((rgb_info, _)) if Some(rgb_info.contract_id) == swap_info.from_asset => true,
+            _ => false,
+        })
+        .map(|details| {
+            let config = details.counterparty.forwarding_info.as_ref().unwrap();
+            RouteHint(vec![RouteHintHop {
+                src_node_id: details.counterparty.node_id,
+                short_channel_id: details.short_channel_id.unwrap(),
+                cltv_expiry_delta: config.cltv_expiry_delta,
+                htlc_maximum_msat: None,
+                htlc_minimum_msat: None,
+                fees: RoutingFees {
+                    base_msat: config.fee_base_msat,
+                    proportional_millionths: config.fee_proportional_millionths,
+                },
+                htlc_maximum_rgb: None,
+            }])
+        })
+        .collect();
+
+    let rgb_payment = swap_info.to_asset.map(|to_asset| (to_asset, swap_info.qty_to));
+    let first_leg = get_route(
+        &unlocked_state.channel_manager,
+        &unlocked_state.router,
+        unlocked_state.channel_manager.get_our_node_id(),
+        taker_pk,
+        if swap_info.is_to_btc() {
+            Some(swap_info.qty_to + SDK_HTLC_MIN_MSAT)
+        } else {
+            Some(SDK_HTLC_MIN_MSAT)
+        },
+        rgb_payment,
+        vec![],
+    );
+
+    let rgb_payment = swap_info.from_asset.map(|from_asset| (from_asset, swap_info.qty_from));
+    let second_leg = get_route(
+        &unlocked_state.channel_manager,
+        &unlocked_state.router,
+        taker_pk,
+        unlocked_state.channel_manager.get_our_node_id(),
+        if swap_info.is_to_btc() || swap_info.is_asset_asset() {
+            Some(SDK_HTLC_MIN_MSAT)
+        } else {
+            Some(swap_info.qty_from + SDK_HTLC_MIN_MSAT)
+        },
+        rgb_payment,
+        receive_hints,
+    );
+
+    let (mut first_leg, mut second_leg) = match (first_leg, second_leg) {
+        (Some(f), Some(s)) => (f, s),
+        _ => return Err(APIError::NoRoute),
+    };
+
+    second_leg.paths[0].hops[0].short_channel_id |= IS_SWAP_SCID;
+
+    first_leg.paths[0]
+        .hops
+        .last_mut()
+        .expect("Path not to be empty")
+        .fee_msat = 0;
+
+    let fullpaths = first_leg.paths[0]
+        .hops
+        .clone()
+        .into_iter()
+        .map(|mut hop| {
+            if swap_info.is_to_asset() {
+                hop.rgb_payment = Some((swap_info.to_asset.unwrap(), swap_info.qty_to));
+            }
+            hop
+        })
+        .chain(second_leg.paths[0].hops.clone().into_iter().map(|mut hop| {
+            if swap_info.is_from_asset() {
+                hop.rgb_payment = Some((swap_info.from_asset.unwrap(), swap_info.qty_from));
+            }
+            hop
+        }))
+        .collect::<Vec<_>>();
+
+    let total_fee = fullpaths
+        .iter()
+        .rev()
+        .skip(1)
+        .map(|hop| hop.fee_msat)
+        .sum::<u64>();
+
+    if total_fee >= SDK_MAX_SWAP_FEE_MSAT {
+        return Err(APIError::FailedPayment(format!("Fee too high: {total_fee}")));
+    }
+
+    let route = Route {
+        paths: vec![LnPath {
+            hops: fullpaths,
+            blinded_tail: None,
+        }],
+        route_params: Some(RouteParameters {
+            payment_params: PaymentParameters::for_keysend(
+                unlocked_state.channel_manager.get_our_node_id(),
+                SDK_DEFAULT_FINAL_CLTV_EXPIRY_DELTA,
+                false,
+            ),
+            final_value_msat: 0,
+            max_total_routing_fee_msat: None,
+            rgb_payment: None,
+        }),
+    };
+
+    if swap_info.is_to_asset() {
+        write_rgb_payment_info_file(
+            &state.static_state.ldk_data_dir,
+            &swapstring.payment_hash,
+            swap_info.to_asset.unwrap(),
+            swap_info.qty_to,
+            true,
+            false,
+        );
+    }
+
+    unlocked_state.update_maker_swap_status(&swapstring.payment_hash, SwapStatus::Pending.into());
+
+    let payment_hash: PaymentHash = payment_preimage.into();
+    let err = match unlocked_state.channel_manager.send_spontaneous_payment_with_route(
+        route,
+        payment_hash,
+        payment_preimage,
+        RecipientOnionFields::spontaneous_empty(),
+        PaymentId(swapstring.payment_hash.0),
+    ) {
+        Ok(()) => None,
+        Err(e) => Some(e),
+    };
+
+    match err {
+        None => Ok(()),
+        Some(e) => {
+            unlocked_state.update_maker_swap_status(&swapstring.payment_hash, SwapStatus::Failed.into());
+            Err(APIError::FailedPayment(format!("{e:?}")))
+        }
+    }
+}
+
+pub(crate) async fn maker_init(
+    state: Arc<AppState>,
+    request: MakerInitRequestData,
+) -> Result<MakerInitData, APIError> {
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
+
+    let from_asset = match &request.from_asset {
+        None => None,
+        Some(asset) => {
+            Some(ContractId::from_str(asset).map_err(|_| APIError::InvalidAssetID(asset.clone()))?)
+        }
+    };
+
+    let to_asset = match &request.to_asset {
+        None => None,
+        Some(asset) => {
+            Some(ContractId::from_str(asset).map_err(|_| APIError::InvalidAssetID(asset.clone()))?)
+        }
+    };
+
+    if from_asset.is_none() && to_asset.is_none() {
+        return Err(APIError::InvalidSwap(s!("cannot swap BTC for BTC")));
+    }
+    if from_asset == to_asset {
+        return Err(APIError::InvalidSwap(s!("cannot swap the same asset")));
+    }
+
+    let expiry = get_current_timestamp() + request.timeout_sec as u64;
+    let swap_info = SwapInfo {
+        from_asset,
+        to_asset,
+        qty_from: request.qty_from,
+        qty_to: request.qty_to,
+        expiry,
+    };
+    let swap_data = SwapData::create_from_swap_info(&swap_info);
+
+    if let Some(to_asset) = to_asset {
+        let max_balance = get_max_local_rgb_amount(
+            to_asset,
+            &state.static_state.ldk_data_dir,
+            unlocked_state.channel_manager.list_channels().iter(),
+        );
+        if swap_info.qty_to > max_balance {
+            return Err(APIError::InsufficientAssets);
+        }
+    }
+
+    let (payment_hash, payment_secret) = unlocked_state
+        .channel_manager
+        .create_inbound_payment(Some(SDK_DUST_LIMIT_MSAT), request.timeout_sec, None)
+        .unwrap();
+    unlocked_state.add_maker_swap(payment_hash, swap_data);
+
+    let swapstring = SwapString::from_swap_info(&swap_info, payment_hash).to_string();
+    Ok(MakerInitData {
+        payment_hash: payment_hash.0.as_hex().to_string(),
+        payment_secret: payment_secret.0.as_hex().to_string(),
+        swapstring,
+    })
+}
+
+pub(crate) async fn taker(
+    state: Arc<AppState>,
+    request: TakerRequestData,
+) -> Result<(), APIError> {
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
+    let swapstring = SwapString::from_str(&request.swapstring)
+        .map_err(|e| APIError::InvalidSwapString(request.swapstring.clone(), e.to_string()))?;
+
+    if get_current_timestamp() > swapstring.swap_info.expiry {
+        return Err(APIError::ExpiredSwapOffer);
+    }
+
+    if let Some(from_asset) = swapstring.swap_info.from_asset {
+        let max_balance = get_max_local_rgb_amount(
+            from_asset,
+            &state.static_state.ldk_data_dir,
+            unlocked_state.channel_manager.list_channels().iter(),
+        );
+        if swapstring.swap_info.qty_from > max_balance {
+            return Err(APIError::InsufficientAssets);
+        }
+    }
+
+    let swap_data = SwapData::create_from_swap_info(&swapstring.swap_info);
+    unlocked_state.add_taker_swap(swapstring.payment_hash, swap_data);
+    Ok(())
+}
+
+pub(crate) async fn send_onion_message(
+    state: Arc<AppState>,
+    request: SendOnionMessageRequestData,
+) -> Result<(), APIError> {
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
+
+    if request.node_ids.is_empty() {
+        return Err(APIError::InvalidNodeIds(s!(
+            "sendonionmessage requires at least one node id for the path"
+        )));
+    }
+
+    let mut intermediate_nodes = Vec::new();
+    for pk_str in request.node_ids {
+        let node_pubkey_vec = hex_str_to_vec(&pk_str).ok_or_else(|| {
+            APIError::InvalidNodeIds(format!("Couldn't parse peer_pubkey '{pk_str}'"))
+        })?;
+        let node_pubkey = PublicKey::from_slice(&node_pubkey_vec).map_err(|_| {
+            APIError::InvalidNodeIds(format!("Couldn't parse peer_pubkey '{pk_str}'"))
+        })?;
+        intermediate_nodes.push(node_pubkey);
+    }
+
+    if request.tlv_type < 64 {
+        return Err(APIError::InvalidTlvType(s!(
+            "need an integral message type above 64"
+        )));
+    }
+
+    let data =
+        hex_str_to_vec(&request.data).ok_or(APIError::InvalidOnionData(s!("need a hex data string")))?;
+
+    let destination = Destination::Node(intermediate_nodes.pop().unwrap());
+    let message_send_instructions = MessageSendInstructions::WithoutReplyPath { destination };
+
+    unlocked_state
+        .onion_messenger
+        .send_onion_message(
+            UserOnionMessageContents {
+                tlv_type: request.tlv_type,
+                data,
+            },
+            message_send_instructions,
+        )
+        .map_err(|e| APIError::FailedSendingOnionMessage(format!("{e:?}")))?;
+
+    Ok(())
+}
+
 pub(crate) async fn sync(state: Arc<AppState>) -> Result<(), APIError> {
     let guard = state.check_unlocked().await?;
     let unlocked_state = guard.as_ref().unwrap();
     unlocked_state.rgb_sync()?;
     Ok(())
 }
-
 
 pub(crate) async fn decode_ln_invoice(
     state: Arc<AppState>,
@@ -1890,7 +2836,6 @@ pub(crate) async fn create_ln_invoice(
     })
 }
 
-
 pub(crate) async fn list_payments(state: Arc<AppState>) -> Result<Vec<PaymentData>, APIError> {
     let guard = state.check_unlocked().await?;
     let unlocked_state = guard.as_ref().unwrap();
@@ -2026,7 +2971,6 @@ pub(crate) async fn get_payment(
     Err(APIError::PaymentNotFound(payment_hash_hex))
 }
 
-
 fn map_swap(
     payment_hash: &PaymentHash,
     swap_data: &SwapData,
@@ -2111,7 +3055,6 @@ pub(crate) async fn list_swaps(state: Arc<AppState>) -> Result<SwapListData, API
             .collect(),
     })
 }
-
 
 pub(crate) async fn list_transactions(
     state: Arc<AppState>,

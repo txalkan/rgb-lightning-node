@@ -15,11 +15,11 @@ mod rgb;
 mod routes;
 mod sdk;
 mod swap;
+#[cfg(feature = "test-utils")]
+pub mod test_utils;
 #[cfg(feature = "uniffi")]
 mod uniffi_api;
 mod utils;
-#[cfg(feature = "test-utils")]
-pub mod test_utils;
 
 #[cfg(test)]
 mod test;

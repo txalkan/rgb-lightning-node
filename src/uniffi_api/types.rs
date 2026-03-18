@@ -386,6 +386,16 @@ pub struct SdkOpenChannelResponse {
     pub temporary_channel_id: ChannelId,
 }
 
+pub struct SdkDisconnectPeerRequest {
+    pub peer_pubkey: PublicKey,
+}
+
+pub struct SdkCloseChannelRequest {
+    pub channel_id: ChannelId,
+    pub peer_pubkey: PublicKey,
+    pub force: bool,
+}
+
 pub struct SdkSendPaymentRequest {
     pub invoice: String,
     pub amt_msat: Option<u64>,
@@ -398,6 +408,130 @@ pub struct SdkSendPaymentResponse {
     pub payment_hash: Option<PaymentHash>,
     pub payment_secret: Option<String>,
     pub status: HtlcStatus,
+}
+
+pub struct SdkRefreshTransfersRequest {
+    pub skip_sync: bool,
+}
+
+pub struct SdkFailTransfersRequest {
+    pub batch_transfer_idx: Option<i32>,
+    pub no_asset_only: bool,
+    pub skip_sync: bool,
+}
+
+pub struct SdkFailTransfersResponse {
+    pub transfers_changed: bool,
+}
+
+pub struct SdkCreateUtxosRequest {
+    pub up_to: bool,
+    pub num: Option<u8>,
+    pub size: Option<u32>,
+    pub fee_rate: u64,
+    pub skip_sync: bool,
+}
+
+pub struct SdkIssueAssetNiaRequest {
+    pub amounts: Vec<u64>,
+    pub ticker: String,
+    pub name: String,
+    pub precision: u8,
+}
+
+pub struct SdkIssueAssetCfaRequest {
+    pub amounts: Vec<u64>,
+    pub name: String,
+    pub details: Option<String>,
+    pub precision: u8,
+    pub file_digest: Option<String>,
+}
+
+pub struct SdkIssueAssetUdaRequest {
+    pub ticker: String,
+    pub name: String,
+    pub details: Option<String>,
+    pub precision: u8,
+    pub media_file_digest: Option<String>,
+    pub attachments_file_digests: Vec<String>,
+}
+
+pub struct SdkKeysendRequest {
+    pub dest_pubkey: PublicKey,
+    pub amt_msat: u64,
+    pub asset_id: Option<ContractId>,
+    pub asset_amount: Option<u64>,
+}
+
+pub struct SdkKeysendResponse {
+    pub payment_hash: PaymentHash,
+    pub payment_preimage: String,
+    pub status: HtlcStatus,
+}
+
+pub struct SdkSendBtcRequest {
+    pub amount: u64,
+    pub address: String,
+    pub fee_rate: u64,
+    pub skip_sync: bool,
+}
+
+pub struct SdkSendBtcResponse {
+    pub txid: Txid,
+}
+
+pub struct SdkMakerInitRequest {
+    pub qty_from: u64,
+    pub qty_to: u64,
+    pub from_asset: Option<ContractId>,
+    pub to_asset: Option<ContractId>,
+    pub timeout_sec: u32,
+}
+
+pub struct SdkMakerInitResponse {
+    pub payment_hash: PaymentHash,
+    pub payment_secret: String,
+    pub swapstring: String,
+}
+
+pub struct SdkMakerExecuteRequest {
+    pub swapstring: String,
+    pub payment_secret: String,
+    pub taker_pubkey: PublicKey,
+}
+
+pub struct SdkTakerRequest {
+    pub swapstring: String,
+}
+
+pub struct SdkSendOnionMessageRequest {
+    pub node_ids: Vec<PublicKey>,
+    pub tlv_type: u64,
+    pub data: String,
+}
+
+pub struct SdkPostAssetMediaRequest {
+    pub file_bytes: Vec<u8>,
+}
+
+pub struct SdkPostAssetMediaResponse {
+    pub digest: String,
+}
+
+pub struct SdkRgbInvoiceRequest {
+    pub asset_id: Option<ContractId>,
+    pub assignment_kind: Option<AssignmentKind>,
+    pub assignment_amount: Option<u64>,
+    pub duration_seconds: Option<u32>,
+    pub min_confirmations: u8,
+    pub witness: bool,
+}
+
+pub struct SdkRgbInvoiceResponse {
+    pub recipient_id: RecipientId,
+    pub invoice: String,
+    pub expiration_timestamp: Option<i64>,
+    pub batch_transfer_idx: i32,
 }
 
 pub struct LnInvoiceResponse {

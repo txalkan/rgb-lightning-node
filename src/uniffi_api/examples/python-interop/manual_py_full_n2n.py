@@ -24,7 +24,19 @@ NODE_B_PASSWORD = os.getenv("NODE_B_PASSWORD", "nodeBpass")
 
 OPEN_CHANNEL_CAPACITY_SAT = int(os.getenv("OPEN_CHANNEL_CAPACITY_SAT", "500000"))
 OPEN_CHANNEL_PUSH_MSAT = int(os.getenv("OPEN_CHANNEL_PUSH_MSAT", "0"))
-PAYMENT_MSAT = int(os.getenv("PAYMENT_MSAT", "1000000"))
+PAYMENT_MSAT = int(os.getenv("PAYMENT_MSAT", "3000000"))
+CREATE_UTXOS_NUM = int(os.getenv("CREATE_UTXOS_NUM", "10"))
+CREATE_UTXOS_SIZE_SAT = int(os.getenv("CREATE_UTXOS_SIZE_SAT", "100000"))
+CREATE_UTXOS_FEE_RATE = int(os.getenv("CREATE_UTXOS_FEE_RATE", "1"))
+ISSUE_ASSET_TICKER = os.getenv("ISSUE_ASSET_TICKER", "USDT")
+ISSUE_ASSET_NAME = os.getenv("ISSUE_ASSET_NAME", "Tether")
+ISSUE_ASSET_PRECISION = int(os.getenv("ISSUE_ASSET_PRECISION", "0"))
+ISSUE_ASSET_SUPPLY = int(os.getenv("ISSUE_ASSET_SUPPLY", "1000"))
+OPEN_CHANNEL_ASSET_AMOUNT = int(os.getenv("OPEN_CHANNEL_ASSET_AMOUNT", "200"))
+PAYMENT_ASSET_AMOUNT = int(os.getenv("PAYMENT_ASSET_AMOUNT", "50"))
+OPEN_CHANNEL_CONFIRM_BLOCKS = int(os.getenv("OPEN_CHANNEL_CONFIRM_BLOCKS", "12"))
+CHANNEL_READY_TIMEOUT_SEC = int(os.getenv("CHANNEL_READY_TIMEOUT_SEC", "300"))
+RGB_MIN_HTLC_MSAT = 3_000_000
 
 RESET_DATA = os.getenv("RESET_DATA", "0") == "1"
 
@@ -86,42 +98,83 @@ def unlock_if_needed(node: rln.SdkNode, password: str, name: str):
         print(f"{name}: already unlocked")
 
 
-def ensure_funded(node: rln.SdkNode, min_spendable_sat: int):
+def create_utxos(node: rln.SdkNode, name: str):
+    req = rln.SdkCreateUtxosRequest(
+        up_to=False,
+        num=CREATE_UTXOS_NUM,
+        size=CREATE_UTXOS_SIZE_SAT,
+        fee_rate=CREATE_UTXOS_FEE_RATE,
+        skip_sync=False,
+    )
+    node.createutxos(req)
+    print(f"{name}: createutxos done")
+
+
+def issue_asset_nia(node: rln.SdkNode, name: str):
+    req = rln.SdkIssueAssetNiaRequest(
+        amounts=[ISSUE_ASSET_SUPPLY],
+        ticker=ISSUE_ASSET_TICKER,
+        name=ISSUE_ASSET_NAME,
+        precision=ISSUE_ASSET_PRECISION,
+    )
+    asset = node.issueassetnia(req)
+    asset_id = asset.asset_id
+    print(f"{name}: issued NIA asset_id={asset_id}")
+    return asset_id
+
+
+def ensure_funded(node: rln.SdkNode, name: str, min_spendable_sat: int):
     bal = node.btc_balance(False)
     spendable = bal.vanilla.spendable
-    print(f"node A spendable sats: {spendable}")
+    print(f"{name} spendable sats: {spendable}")
     if spendable >= min_spendable_sat:
         return
 
     addr = node.address().address
-    print(f"Funding node A address {addr} with 0.02 BTC on regtest")
+    print(f"Funding {name} address {addr} with 0.02 BTC on regtest")
     run_regtest("sendtoaddress", addr, "0.02")
     run_regtest("mine", "6")
     node.sync()
 
     bal2 = node.btc_balance(False)
     spendable2 = bal2.vanilla.spendable
-    print(f"node A spendable sats after funding: {spendable2}")
+    print(f"{name} spendable sats after funding: {spendable2}")
     if spendable2 < min_spendable_sat:
         raise RuntimeError(
-            f"node A spendable balance still too low: {spendable2} < {min_spendable_sat}"
+            f"{name} spendable balance still too low: {spendable2} < {min_spendable_sat}"
         )
 
 
-def has_usable_channel(node: rln.SdkNode) -> bool:
-    return any(ch.is_usable for ch in node.list_channels())
+def has_usable_channel(node: rln.SdkNode, asset_id: str | None = None) -> bool:
+    channels = node.list_channels()
+    if asset_id is None:
+        return any(ch.is_usable for ch in channels)
+    return any(ch.is_usable and str(ch.asset_id) == asset_id for ch in channels)
 
 
-def wait_for_usable_channel(node_a: rln.SdkNode, node_b: rln.SdkNode, timeout_sec: int = 120):
+def wait_for_usable_channel(
+    node_a: rln.SdkNode,
+    node_b: rln.SdkNode,
+    timeout_sec: int = 120,
+    mine_every_polls: int = 5,
+):
     deadline = time.time() + timeout_sec
     last = []
+    polls = 0
     while time.time() < deadline:
+        polls += 1
         node_a.sync()
         node_b.sync()
         chans = node_a.list_channels()
-        last = [(str(c.channel_id), c.status.name, c.is_usable) for c in chans]
+        last = [
+            (str(c.channel_id), c.status.name, c.is_usable, str(c.funding_txid))
+            for c in chans
+        ]
         if any(c.is_usable for c in chans):
             return
+        if mine_every_polls > 0 and polls % mine_every_polls == 0:
+            print("channel not usable yet, mining 1 block...")
+            run_regtest("mine", "1")
         print("waiting for usable channel...")
         time.sleep(2)
     raise RuntimeError(f"No usable channel after {timeout_sec}s. last={last}")
@@ -141,7 +194,7 @@ def wait_payment_final(node_b: rln.SdkNode, invoice: str, timeout_sec: int = 60)
 
 
 def main():
-    print("Pure SDK N2N flow (no HTTP calls)")
+    print("UniFFI N2N flow with createutxos + issueassetnia before asset channel open")
     print(f"node A storage: {NODE_A_STORAGE}")
     print(f"node B storage: {NODE_B_STORAGE}")
 
@@ -158,7 +211,16 @@ def main():
         unlock_if_needed(node_a, NODE_A_PASSWORD, "node A")
         unlock_if_needed(node_b, NODE_B_PASSWORD, "node B")
 
-        ensure_funded(node_a, OPEN_CHANNEL_CAPACITY_SAT + 50_000)
+        ensure_funded(node_a, "node A", OPEN_CHANNEL_CAPACITY_SAT + 200_000)
+        ensure_funded(node_b, "node B", 200_000)
+
+        create_utxos(node_a, "node A")
+        create_utxos(node_b, "node B")
+        run_regtest("mine", "1")
+        node_a.sync()
+        node_b.sync()
+
+        asset_id = issue_asset_nia(node_a, "node A")
 
         info_a = node_a.node_info()
         info_b = node_b.node_info()
@@ -172,8 +234,8 @@ def main():
         except rln.RlnError.Conflict:
             print("connectpeer: already connected")
 
-        if has_usable_channel(node_a):
-            print("usable channel already exists, skipping openchannel")
+        if has_usable_channel(node_a, asset_id):
+            print(f"usable asset channel for {asset_id} already exists, skipping openchannel")
         else:
             open_req = rln.SdkOpenChannelRequest(
                 peer_pubkey_and_opt_addr=peer_uri,
@@ -184,26 +246,33 @@ def main():
                 fee_base_msat=None,
                 fee_proportional_millionths=None,
                 temporary_channel_id=None,
-                asset_id=None,
-                asset_amount=None,
+                asset_id=asset_id,
+                asset_amount=OPEN_CHANNEL_ASSET_AMOUNT,
             )
             open_resp = node_a.openchannel(open_req)
             print("openchannel temporary_channel_id:", open_resp.temporary_channel_id)
 
-            print("Mining 6 blocks for channel confirmations...")
-            run_regtest("mine", "6")
+            print(f"Mining {OPEN_CHANNEL_CONFIRM_BLOCKS} blocks for channel confirmations...")
+            run_regtest("mine", str(OPEN_CHANNEL_CONFIRM_BLOCKS))
 
-            wait_for_usable_channel(node_a, node_b)
+            wait_for_usable_channel(
+                node_a, node_b, timeout_sec=CHANNEL_READY_TIMEOUT_SEC, mine_every_polls=5
+            )
             print("Channel is usable")
 
         print("node A channels:", len(node_a.list_channels()))
         print("node B channels:", len(node_b.list_channels()))
 
+        if PAYMENT_MSAT < RGB_MIN_HTLC_MSAT:
+            raise RuntimeError(
+                f"PAYMENT_MSAT={PAYMENT_MSAT} is too low for RGB invoices, must be >= {RGB_MIN_HTLC_MSAT}"
+            )
+
         inv_req = rln.LnInvoiceRequest(
             amt_msat=PAYMENT_MSAT,
             expiry_sec=3600,
-            asset_id=None,
-            asset_amount=None,
+            asset_id=asset_id,
+            asset_amount=PAYMENT_ASSET_AMOUNT,
         )
         invoice = node_b.ln_invoice(inv_req).invoice
         print("invoice:", invoice)
@@ -211,8 +280,8 @@ def main():
         pay_req = rln.SdkSendPaymentRequest(
             invoice=invoice,
             amt_msat=PAYMENT_MSAT,
-            asset_id=None,
-            asset_amount=None,
+            asset_id=asset_id,
+            asset_amount=PAYMENT_ASSET_AMOUNT,
         )
         pay_resp = node_a.sendpayment(pay_req)
         print("sendpayment status:", pay_resp.status.name)

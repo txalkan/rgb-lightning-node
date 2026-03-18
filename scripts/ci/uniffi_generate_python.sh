@@ -4,6 +4,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+# If a project venv exists, prefer its executables (e.g. yapf for uniffi-bindgen formatting).
+if [[ -d "$ROOT_DIR/.venv/bin" ]]; then
+  export PATH="$ROOT_DIR/.venv/bin:$PATH"
+fi
+
 OUT_DIR="target/uniffi/python"
 mkdir -p "$OUT_DIR"
 

@@ -96,7 +96,9 @@ mod uniffi_smoke_tests {
         clear_uniffi_app_state();
         assert!(!uniffi_is_initialized());
 
-        let node = SdkNode { handle: crate::NodeHandle::from_app_state(mock_locked_state()) };
+        let node = SdkNode {
+            handle: crate::NodeHandle::from_app_state(mock_locked_state()),
+        };
         let node_info = node.node_info();
         assert!(matches!(node_info, Err(RlnError::NotInitialized)));
 
