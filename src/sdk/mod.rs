@@ -23,7 +23,6 @@ use bitcoin::hex::DisplayHex;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::ScriptBuf;
 use lightning::chain::channelmonitor::Balance;
-use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::channel_state::ChannelShutdownState;
 use lightning::ln::channelmanager::Bolt11InvoiceParameters;
 use lightning::ln::channelmanager::{
@@ -80,7 +79,6 @@ use rgb_lib::wallet::{
 };
 use rgb_lib::BitcoinNetwork as RgbBitcoinNetwork;
 use rgb_lib::{AssetSchema as RgbLibAssetSchema, Assignment as RgbLibAssignment};
-use serde::{Deserialize, Serialize};
 
 const SDK_HTLC_MIN_MSAT: u64 = 3_000_000;
 const SDK_OPENRGBCHANNEL_MIN_SAT: u64 = SDK_HTLC_MIN_MSAT / 1000 * 10 + 10;
@@ -549,49 +547,7 @@ pub(crate) enum ChannelStatus {
     Closing,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
-pub(crate) enum HtlcStatus {
-    Pending,
-    Succeeded,
-    Failed,
-}
-
-impl std::fmt::Display for HtlcStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let label = match self {
-            HtlcStatus::Pending => "Pending",
-            HtlcStatus::Succeeded => "Succeeded",
-            HtlcStatus::Failed => "Failed",
-        };
-        write!(f, "{label}")
-    }
-}
-
-impl_writeable_tlv_based_enum!(HtlcStatus,
-    (0, Pending) => {},
-    (1, Succeeded) => {},
-    (2, Failed) => {},
-);
-
-impl From<CoreHtlcStatus> for HtlcStatus {
-    fn from(value: CoreHtlcStatus) -> Self {
-        match value {
-            CoreHtlcStatus::Pending => Self::Pending,
-            CoreHtlcStatus::Succeeded => Self::Succeeded,
-            CoreHtlcStatus::Failed => Self::Failed,
-        }
-    }
-}
-
-impl From<HtlcStatus> for CoreHtlcStatus {
-    fn from(value: HtlcStatus) -> Self {
-        match value {
-            HtlcStatus::Pending => Self::Pending,
-            HtlcStatus::Succeeded => Self::Succeeded,
-            HtlcStatus::Failed => Self::Failed,
-        }
-    }
-}
+pub(crate) type HtlcStatus = CoreHtlcStatus;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum InvoiceStatus {
@@ -601,46 +557,7 @@ pub(crate) enum InvoiceStatus {
     Expired,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub(crate) enum SwapStatus {
-    Waiting,
-    Pending,
-    Succeeded,
-    Expired,
-    Failed,
-}
-
-impl_writeable_tlv_based_enum!(SwapStatus,
-    (0, Waiting) => {},
-    (1, Pending) => {},
-    (2, Succeeded) => {},
-    (3, Expired) => {},
-    (4, Failed) => {},
-);
-
-impl From<CoreSwapStatus> for SwapStatus {
-    fn from(value: CoreSwapStatus) -> Self {
-        match value {
-            CoreSwapStatus::Waiting => Self::Waiting,
-            CoreSwapStatus::Pending => Self::Pending,
-            CoreSwapStatus::Succeeded => Self::Succeeded,
-            CoreSwapStatus::Expired => Self::Expired,
-            CoreSwapStatus::Failed => Self::Failed,
-        }
-    }
-}
-
-impl From<SwapStatus> for CoreSwapStatus {
-    fn from(value: SwapStatus) -> Self {
-        match value {
-            SwapStatus::Waiting => Self::Waiting,
-            SwapStatus::Pending => Self::Pending,
-            SwapStatus::Succeeded => Self::Succeeded,
-            SwapStatus::Expired => Self::Expired,
-            SwapStatus::Failed => Self::Failed,
-        }
-    }
-}
+pub(crate) type SwapStatus = CoreSwapStatus;
 
 #[derive(Debug)]
 pub(crate) struct BlockTime {

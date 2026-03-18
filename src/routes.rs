@@ -1,7 +1,7 @@
 // NOTE: Keep HTTP endpoint business logic here aligned with `src/sdk/mod.rs`.
 // Any behavior change in route handlers should be mirrored in the SDK layer.
 
-use amplify::{map, s, Display};
+use amplify::{map, s};
 use axum::{
     extract::{Multipart, State},
     Json,
@@ -24,7 +24,7 @@ use lightning::routing::gossip::RoutingFees;
 use lightning::routing::router::{Path as LnPath, Route, RouteHint, RouteHintHop};
 use lightning::sign::EntropySource;
 use lightning::util::config::ChannelConfig;
-use lightning::{chain::channelmonitor::Balance, impl_writeable_tlv_based_enum};
+use lightning::chain::channelmonitor::Balance;
 use lightning::{
     ln::channel_state::ChannelShutdownState, onion_message::messenger::MessageSendInstructions,
 };
@@ -90,7 +90,7 @@ use crate::utils::{
 use crate::{
     backup::{do_backup, restore_backup},
     core_types::{
-        HtlcStatus as CoreHtlcStatus, SwapStatus as CoreSwapStatus,
+        HtlcStatus as HTLCStatus, SwapStatus,
         UnlockRequestData as CoreUnlockRequestData,
     },
     rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional},
@@ -576,6 +576,10 @@ pub(crate) struct GetSwapResponse {
     pub(crate) swap: Swap,
 }
 
+/*
+Legacy route-local `HTLCStatus` enum moved to `src/core_types.rs` as `HtlcStatus`.
+Routes now use the shared core type directly to avoid duplication.
+
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize, Display)]
 #[display(inner)]
 pub(crate) enum HTLCStatus {
@@ -589,46 +593,7 @@ impl_writeable_tlv_based_enum!(HTLCStatus,
     (1, Succeeded) => {},
     (2, Failed) => {},
 );
-
-impl From<crate::sdk::HtlcStatus> for HTLCStatus {
-    fn from(value: crate::sdk::HtlcStatus) -> Self {
-        match value {
-            crate::sdk::HtlcStatus::Pending => HTLCStatus::Pending,
-            crate::sdk::HtlcStatus::Succeeded => HTLCStatus::Succeeded,
-            crate::sdk::HtlcStatus::Failed => HTLCStatus::Failed,
-        }
-    }
-}
-
-impl From<HTLCStatus> for crate::sdk::HtlcStatus {
-    fn from(value: HTLCStatus) -> Self {
-        match value {
-            HTLCStatus::Pending => crate::sdk::HtlcStatus::Pending,
-            HTLCStatus::Succeeded => crate::sdk::HtlcStatus::Succeeded,
-            HTLCStatus::Failed => crate::sdk::HtlcStatus::Failed,
-        }
-    }
-}
-
-impl From<CoreHtlcStatus> for HTLCStatus {
-    fn from(value: CoreHtlcStatus) -> Self {
-        match value {
-            CoreHtlcStatus::Pending => HTLCStatus::Pending,
-            CoreHtlcStatus::Succeeded => HTLCStatus::Succeeded,
-            CoreHtlcStatus::Failed => HTLCStatus::Failed,
-        }
-    }
-}
-
-impl From<HTLCStatus> for CoreHtlcStatus {
-    fn from(value: HTLCStatus) -> Self {
-        match value {
-            HTLCStatus::Pending => CoreHtlcStatus::Pending,
-            HTLCStatus::Succeeded => CoreHtlcStatus::Succeeded,
-            HTLCStatus::Failed => CoreHtlcStatus::Failed,
-        }
-    }
-}
+*/
 
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) enum IndexerProtocol {
@@ -1084,6 +1049,10 @@ pub(crate) struct Swap {
     pub(crate) completed_at: Option<u64>,
 }
 
+/*
+Legacy route-local `SwapStatus` enum moved to `src/core_types.rs` as `SwapStatus`.
+Routes now use the shared core type directly to avoid duplication.
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) enum SwapStatus {
     Waiting,
@@ -1100,54 +1069,7 @@ impl_writeable_tlv_based_enum!(SwapStatus,
     (3, Expired) => {},
     (4, Failed) => {},
 );
-
-impl From<crate::sdk::SwapStatus> for SwapStatus {
-    fn from(value: crate::sdk::SwapStatus) -> Self {
-        match value {
-            crate::sdk::SwapStatus::Waiting => SwapStatus::Waiting,
-            crate::sdk::SwapStatus::Pending => SwapStatus::Pending,
-            crate::sdk::SwapStatus::Succeeded => SwapStatus::Succeeded,
-            crate::sdk::SwapStatus::Expired => SwapStatus::Expired,
-            crate::sdk::SwapStatus::Failed => SwapStatus::Failed,
-        }
-    }
-}
-
-impl From<SwapStatus> for crate::sdk::SwapStatus {
-    fn from(value: SwapStatus) -> Self {
-        match value {
-            SwapStatus::Waiting => crate::sdk::SwapStatus::Waiting,
-            SwapStatus::Pending => crate::sdk::SwapStatus::Pending,
-            SwapStatus::Succeeded => crate::sdk::SwapStatus::Succeeded,
-            SwapStatus::Expired => crate::sdk::SwapStatus::Expired,
-            SwapStatus::Failed => crate::sdk::SwapStatus::Failed,
-        }
-    }
-}
-
-impl From<CoreSwapStatus> for SwapStatus {
-    fn from(value: CoreSwapStatus) -> Self {
-        match value {
-            CoreSwapStatus::Waiting => SwapStatus::Waiting,
-            CoreSwapStatus::Pending => SwapStatus::Pending,
-            CoreSwapStatus::Succeeded => SwapStatus::Succeeded,
-            CoreSwapStatus::Expired => SwapStatus::Expired,
-            CoreSwapStatus::Failed => SwapStatus::Failed,
-        }
-    }
-}
-
-impl From<SwapStatus> for CoreSwapStatus {
-    fn from(value: SwapStatus) -> Self {
-        match value {
-            SwapStatus::Waiting => CoreSwapStatus::Waiting,
-            SwapStatus::Pending => CoreSwapStatus::Pending,
-            SwapStatus::Succeeded => CoreSwapStatus::Succeeded,
-            SwapStatus::Expired => CoreSwapStatus::Expired,
-            SwapStatus::Failed => CoreSwapStatus::Failed,
-        }
-    }
-}
+*/
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct TakerRequest {
