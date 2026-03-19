@@ -1,5 +1,5 @@
-// NOTE: Keep HTTP endpoint business logic here aligned with `src/sdk/mod.rs`.
-// Any behavior change in route handlers should be mirrored in the SDK layer.
+// NOTE: Keep HTTP endpoint business logic aligned with `src/sdk/mod.rs`.
+// If routes behavior changes, apply the same change in the SDK layer as well.
 
 use amplify::{map, s};
 use axum::{
@@ -78,9 +78,7 @@ use tokio::{
     sync::MutexGuard as TokioMutexGuard,
 };
 
-use crate::ldk::{
-    start_ldk, stop_ldk, LdkBackgroundServices, DUST_LIMIT_MSAT, MIN_CHANNEL_CONFIRMATIONS,
-};
+use crate::ldk::{start_ldk, stop_ldk, LdkBackgroundServices};
 use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{
     check_already_initialized, check_channel_id, check_password_strength, check_password_validity,
@@ -90,6 +88,7 @@ use crate::utils::{
 use crate::{
     backup::{do_backup, restore_backup},
     core_types::{
+        DUST_LIMIT_MSAT, FEE_RATE, MIN_CHANNEL_CONFIRMATIONS, UTXO_SIZE_SAT,
         HtlcStatus as HTLCStatus, SwapStatus, UnlockRequestData as CoreUnlockRequestData,
     },
     rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional},
@@ -97,7 +96,7 @@ use crate::{
 use crate::{
     disk::{self, CHANNEL_PEER_DATA},
     error::APIError,
-    ldk::{PaymentInfo, FEE_RATE, UTXO_SIZE_SAT},
+    ldk::PaymentInfo,
     utils::{
         connect_peer_if_necessary, get_current_timestamp, no_cancel, parse_peer_info, AppState,
     },

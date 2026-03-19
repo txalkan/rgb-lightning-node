@@ -1,6 +1,11 @@
 use lightning::impl_writeable_tlv_based_enum;
 use serde::{Deserialize, Serialize};
 
+pub(crate) const FEE_RATE: u64 = 7;
+pub(crate) const UTXO_SIZE_SAT: u32 = 32000;
+pub(crate) const MIN_CHANNEL_CONFIRMATIONS: u8 = 6;
+pub(crate) const DUST_LIMIT_MSAT: u64 = 546000;
+
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
 pub(crate) enum HtlcStatus {
     Pending,

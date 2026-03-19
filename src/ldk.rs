@@ -92,7 +92,10 @@ use tokio::sync::watch::Sender;
 use tokio::task::JoinHandle;
 
 use crate::bitcoind::BitcoindClient;
-use crate::core_types::{HtlcStatus as HTLCStatus, SwapStatus, UnlockRequestData};
+use crate::core_types::{
+    HtlcStatus as HTLCStatus, SwapStatus, UnlockRequestData as UnlockRequest, DUST_LIMIT_MSAT,
+    FEE_RATE, MIN_CHANNEL_CONFIRMATIONS,
+};
 use crate::disk::{
     self, FilesystemLogger, CHANNEL_IDS_FNAME, CHANNEL_PEER_DATA, INBOUND_PAYMENTS_FNAME,
     MAKER_SWAPS_FNAME, OUTBOUND_PAYMENTS_FNAME, OUTPUT_SPENDER_TXES, TAKER_SWAPS_FNAME,
@@ -106,11 +109,6 @@ use crate::utils::{
     ELECTRUM_URL_SIGNET, ELECTRUM_URL_TESTNET, ELECTRUM_URL_TESTNET4, PROXY_ENDPOINT_LOCAL,
     PROXY_ENDPOINT_PUBLIC,
 };
-
-pub(crate) const FEE_RATE: u64 = 7;
-pub(crate) const UTXO_SIZE_SAT: u32 = 32000;
-pub(crate) const MIN_CHANNEL_CONFIRMATIONS: u8 = 6;
-pub(crate) const DUST_LIMIT_MSAT: u64 = 546000;
 
 pub(crate) struct LdkBackgroundServices {
     stop_processing: Arc<AtomicBool>,
@@ -1531,7 +1529,7 @@ impl OutputSpender for RgbOutputSpender {
 pub(crate) async fn start_ldk(
     app_state: Arc<AppState>,
     mnemonic: Mnemonic,
-    unlock_request: UnlockRequestData,
+    unlock_request: UnlockRequest,
 ) -> Result<(LdkBackgroundServices, Arc<UnlockedAppState>), APIError> {
     let static_state = &app_state.static_state;
 

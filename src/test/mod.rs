@@ -19,7 +19,7 @@ use tokio::net::TcpListener;
 use tracing_test::traced_test;
 
 use crate::error::APIErrorResponse;
-use crate::ldk::FEE_RATE;
+use crate::core_types::FEE_RATE;
 use crate::routes::{
     AddressResponse, AssetBalanceRequest, AssetBalanceResponse, AssetCFA, AssetNIA, AssetUDA,
     Assignment, BackupRequest, BtcBalanceRequest, BtcBalanceResponse, ChangePasswordRequest,

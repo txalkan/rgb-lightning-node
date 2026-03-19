@@ -2,12 +2,13 @@
 // If route-level business logic changes, keep SDK equivalents in sync.
 
 use crate::core_types::{
+    FEE_RATE, MIN_CHANNEL_CONFIRMATIONS,
     HtlcStatus as CoreHtlcStatus, SwapStatus as CoreSwapStatus,
     UnlockRequestData as CoreUnlockRequestData,
 };
 use crate::disk::{self, CHANNEL_PEER_DATA};
 use crate::error::APIError;
-use crate::ldk::{start_ldk, PaymentInfo, FEE_RATE, MIN_CHANNEL_CONFIRMATIONS};
+use crate::ldk::{start_ldk, PaymentInfo};
 use crate::rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional};
 use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{
