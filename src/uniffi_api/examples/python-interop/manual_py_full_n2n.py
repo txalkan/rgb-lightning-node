@@ -155,6 +155,7 @@ def has_usable_channel(node: rln.SdkNode, asset_id: str | None = None) -> bool:
 def wait_for_usable_channel(
     node_a: rln.SdkNode,
     node_b: rln.SdkNode,
+    asset_id: str | None = None,
     timeout_sec: int = 120,
     mine_every_polls: int = 5,
 ):
@@ -167,10 +168,20 @@ def wait_for_usable_channel(
         node_b.sync()
         chans = node_a.list_channels()
         last = [
-            (str(c.channel_id), c.status.name, c.is_usable, str(c.funding_txid))
+            (
+                str(c.channel_id),
+                c.status.name,
+                c.is_usable,
+                str(c.funding_txid),
+                str(c.asset_id),
+            )
             for c in chans
         ]
-        if any(c.is_usable for c in chans):
+        if asset_id is None:
+            ready = any(c.is_usable for c in chans)
+        else:
+            ready = any(c.is_usable and str(c.asset_id) == asset_id for c in chans)
+        if ready:
             return
         if mine_every_polls > 0 and polls % mine_every_polls == 0:
             print("channel not usable yet, mining 1 block...")
@@ -178,6 +189,53 @@ def wait_for_usable_channel(
         print("waiting for usable channel...")
         time.sleep(2)
     raise RuntimeError(f"No usable channel after {timeout_sec}s. last={last}")
+
+
+def wait_for_channel_funding_tx(
+    node_a: rln.SdkNode,
+    node_b: rln.SdkNode,
+    asset_id: str | None = None,
+    timeout_sec: int = 120,
+):
+    deadline = time.time() + timeout_sec
+    last = []
+    while time.time() < deadline:
+        node_a.sync()
+        node_b.sync()
+        chans = node_a.list_channels()
+        last = [
+            (
+                str(c.channel_id),
+                c.status.name,
+                c.is_usable,
+                str(c.funding_txid),
+                str(c.asset_id),
+            )
+            for c in chans
+        ]
+
+        if asset_id is None:
+            opening = next(
+                (c for c in chans if c.funding_txid is not None),
+                None,
+            )
+        else:
+            opening = next(
+                (
+                    c
+                    for c in chans
+                    if str(c.asset_id) == asset_id and c.funding_txid is not None
+                ),
+                None,
+            )
+
+        if opening is not None:
+            return
+
+        print("waiting for channel funding tx broadcast...")
+        time.sleep(1)
+
+    raise RuntimeError(f"No funding tx after {timeout_sec}s. last={last}")
 
 
 def wait_payment_final(node_b: rln.SdkNode, invoice: str, timeout_sec: int = 60):
@@ -252,11 +310,22 @@ def main():
             open_resp = node_a.openchannel(open_req)
             print("openchannel temporary_channel_id:", open_resp.temporary_channel_id)
 
+            wait_for_channel_funding_tx(
+                node_a,
+                node_b,
+                asset_id=asset_id,
+                timeout_sec=120,
+            )
+
             print(f"Mining {OPEN_CHANNEL_CONFIRM_BLOCKS} blocks for channel confirmations...")
             run_regtest("mine", str(OPEN_CHANNEL_CONFIRM_BLOCKS))
 
             wait_for_usable_channel(
-                node_a, node_b, timeout_sec=CHANNEL_READY_TIMEOUT_SEC, mine_every_polls=5
+                node_a,
+                node_b,
+                asset_id=asset_id,
+                timeout_sec=CHANNEL_READY_TIMEOUT_SEC,
+                mine_every_polls=5,
             )
             print("Channel is usable")
 
