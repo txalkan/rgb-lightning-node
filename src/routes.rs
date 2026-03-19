@@ -13,6 +13,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Network, ScriptBuf};
 use hex::DisplayHex;
+use lightning::chain::channelmonitor::Balance;
 use lightning::ln::{channelmanager::OptionalOfferPaymentParams, types::ChannelId};
 use lightning::offers::offer::{self, Offer};
 use lightning::onion_message::messenger::Destination;
@@ -24,7 +25,6 @@ use lightning::routing::gossip::RoutingFees;
 use lightning::routing::router::{Path as LnPath, Route, RouteHint, RouteHintHop};
 use lightning::sign::EntropySource;
 use lightning::util::config::ChannelConfig;
-use lightning::chain::channelmonitor::Balance;
 use lightning::{
     ln::channel_state::ChannelShutdownState, onion_message::messenger::MessageSendInstructions,
 };
@@ -79,7 +79,7 @@ use tokio::{
 };
 
 use crate::ldk::{
-    start_ldk, stop_ldk, DUST_LIMIT_MSAT, LdkBackgroundServices, MIN_CHANNEL_CONFIRMATIONS,
+    start_ldk, stop_ldk, LdkBackgroundServices, DUST_LIMIT_MSAT, MIN_CHANNEL_CONFIRMATIONS,
 };
 use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{
@@ -90,8 +90,7 @@ use crate::utils::{
 use crate::{
     backup::{do_backup, restore_backup},
     core_types::{
-        HtlcStatus as HTLCStatus, SwapStatus,
-        UnlockRequestData as CoreUnlockRequestData,
+        HtlcStatus as HTLCStatus, SwapStatus, UnlockRequestData as CoreUnlockRequestData,
     },
     rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional},
 };
@@ -576,25 +575,6 @@ pub(crate) struct GetSwapResponse {
     pub(crate) swap: Swap,
 }
 
-/*
-Legacy route-local `HTLCStatus` enum moved to `src/core_types.rs` as `HtlcStatus`.
-Routes now use the shared core type directly to avoid duplication.
-
-#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize, Display)]
-#[display(inner)]
-pub(crate) enum HTLCStatus {
-    Pending,
-    Succeeded,
-    Failed,
-}
-
-impl_writeable_tlv_based_enum!(HTLCStatus,
-    (0, Pending) => {},
-    (1, Succeeded) => {},
-    (2, Failed) => {},
-);
-*/
-
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) enum IndexerProtocol {
     Electrum,
@@ -1048,28 +1028,6 @@ pub(crate) struct Swap {
     pub(crate) expires_at: u64,
     pub(crate) completed_at: Option<u64>,
 }
-
-/*
-Legacy route-local `SwapStatus` enum moved to `src/core_types.rs` as `SwapStatus`.
-Routes now use the shared core type directly to avoid duplication.
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-pub(crate) enum SwapStatus {
-    Waiting,
-    Pending,
-    Succeeded,
-    Expired,
-    Failed,
-}
-
-impl_writeable_tlv_based_enum!(SwapStatus,
-    (0, Waiting) => {},
-    (1, Pending) => {},
-    (2, Succeeded) => {},
-    (3, Expired) => {},
-    (4, Failed) => {},
-);
-*/
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct TakerRequest {
