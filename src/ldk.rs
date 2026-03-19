@@ -25,11 +25,11 @@ use lightning::onion_message::messenger::{
     DefaultMessageRouter, OnionMessenger as LdkOnionMessenger,
 };
 use lightning::rgb_utils::{
-    get_rgb_channel_info_path, get_rgb_channel_info_pending, get_virtual_channel_marker_path,
-    is_channel_rgb, parse_rgb_payment_info, read_rgb_transfer_info, update_rgb_channel_amount,
-    RgbInfo, BITCOIN_NETWORK_FNAME, INDEXER_URL_FNAME, STATIC_BLINDING,
-    WALLET_ACCOUNT_XPUB_COLORED_FNAME, WALLET_ACCOUNT_XPUB_VANILLA_FNAME, WALLET_FINGERPRINT_FNAME,
-    WALLET_MASTER_FINGERPRINT_FNAME,
+    get_rgb_channel_info_path, get_rgb_channel_info_pending, get_rgb_payment_info_pending_path,
+    get_virtual_channel_marker_path, is_channel_rgb, parse_rgb_payment_info,
+    read_rgb_transfer_info, update_rgb_channel_amount, RgbInfo, BITCOIN_NETWORK_FNAME,
+    INDEXER_URL_FNAME, STATIC_BLINDING, WALLET_ACCOUNT_XPUB_COLORED_FNAME,
+    WALLET_ACCOUNT_XPUB_VANILLA_FNAME, WALLET_FINGERPRINT_FNAME, WALLET_MASTER_FINGERPRINT_FNAME,
 };
 use lightning::routing::gossip;
 use lightning::routing::gossip::{NodeId, P2PGossipSync};
@@ -234,14 +234,12 @@ pub(crate) enum VirtualChannelSessionStatus {
     Active,
     AbandonPending,
     Abandoned,
-    Failed,
 }
 
 impl_writeable_tlv_based_enum!(VirtualChannelSessionStatus,
     (0, Active) => {},
     (2, AbandonPending) => {},
     (4, Abandoned) => {},
-    (6, Failed) => {},
 );
 
 #[derive(Clone, Debug)]
@@ -249,7 +247,6 @@ pub(crate) struct VirtualChannelSession {
     pub(crate) channel_id: ChannelId,
     pub(crate) created_at: u64,
     pub(crate) former_temporary_channel_id: ChannelId,
-    pub(crate) last_error: Option<String>,
     pub(crate) peer_id: PublicKey,
     pub(crate) status: VirtualChannelSessionStatus,
     pub(crate) synthetic_funding_txo: OutPoint,
@@ -260,11 +257,10 @@ impl_writeable_tlv_based!(VirtualChannelSession, {
     (0, channel_id, required),
     (2, created_at, required),
     (4, former_temporary_channel_id, required),
-    (6, last_error, option),
-    (8, peer_id, required),
-    (10, status, (default_value, VirtualChannelSessionStatus::Active)),
-    (12, synthetic_funding_txo, required),
-    (14, updated_at, (default_value, created_at)),
+    (6, peer_id, required),
+    (8, status, (default_value, VirtualChannelSessionStatus::Active)),
+    (10, synthetic_funding_txo, required),
+    (12, updated_at, (default_value, created_at)),
 });
 
 pub(crate) struct VirtualChannelSessionStore {
@@ -574,16 +570,33 @@ impl UnlockedAppState {
         chan_details: &ChannelDetails,
         ldk_data_dir: &Path,
     ) -> Result<(), String> {
-        if !chan_details.pending_inbound_htlcs.is_empty() {
-            return Err(
-                "virtual cleanup is blocked while inbound HTLCs are still in flight".to_string(),
-            );
+        if chan_details.has_inflight_htlcs {
+            return Err("virtual cleanup is blocked while HTLCs are still in flight".to_string());
         }
-        if !chan_details.pending_outbound_htlcs.is_empty() {
-            return Err(
-                "virtual cleanup is blocked while outbound HTLCs are still in flight".to_string(),
-            );
+        let channel_id_hex = chan_details.channel_id.0.as_hex().to_string();
+        let entries = fs::read_dir(ldk_data_dir)
+            .map_err(|_| "virtual cleanup could not inspect RGB temp artifacts".to_string())?;
+        for entry in entries {
+            let entry = entry
+                .map_err(|_| "virtual cleanup could not inspect RGB temp artifacts".to_string())?;
+            let path = entry.path();
+            let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
+                continue;
+            };
+            if !matches!(extension, "inbound_pending" | "outbound_pending") {
+                continue;
+            }
+            let Some(file_stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if file_stem.starts_with(&channel_id_hex) && file_stem.len() > channel_id_hex.len() {
+                return Err(
+                    "virtual cleanup is blocked while RGB payment temp artifacts remain"
+                        .to_string(),
+                );
+            }
         }
+
         match chan_details.counterparty_balance_sats_floor {
             Some(0) => {}
             Some(balance_floor) => {
@@ -655,42 +668,6 @@ impl UnlockedAppState {
             ));
         }
 
-        let has_related_rgb_pending_artifacts = {
-            let channel_id_hex = chan_details.channel_id.0.as_hex().to_string();
-            let entries = fs::read_dir(ldk_data_dir)
-                .map_err(|_| "virtual cleanup could not inspect RGB temp artifacts".to_string())?;
-
-            let mut has_related_rgb_pending_artifacts = false;
-
-            for entry in entries {
-                let entry = entry.map_err(|_| {
-                    "virtual cleanup could not inspect RGB temp artifacts".to_string()
-                })?;
-                let path = entry.path();
-                let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
-                    continue;
-                };
-                let Some(payment_hash) = path.file_stem().and_then(|stem| stem.to_str()) else {
-                    continue;
-                };
-                let Some(base_extension) = extension.strip_suffix("_pending") else {
-                    continue;
-                };
-                let proxy_path =
-                    ldk_data_dir.join(format!("{channel_id_hex}{payment_hash}.{base_extension}"));
-                if proxy_path.exists() {
-                    has_related_rgb_pending_artifacts = true;
-                    break;
-                }
-            }
-            has_related_rgb_pending_artifacts
-        };
-        if has_related_rgb_pending_artifacts {
-            return Err(
-                "virtual cleanup is blocked while RGB payment temp artifacts remain".to_string(),
-            );
-        }
-
         Ok(())
     }
 
@@ -720,11 +697,9 @@ impl UnlockedAppState {
         &self,
         session: &VirtualChannelSession,
         status: VirtualChannelSessionStatus,
-        last_error: Option<String>,
     ) {
         let mut updated_session = session.clone();
         updated_session.status = status;
-        updated_session.last_error = last_error;
         updated_session.updated_at = get_current_timestamp();
         self.virtual_channel_session_update(updated_session);
     }
@@ -839,6 +814,107 @@ pub(crate) type OutputSweeper = ldk_sweep::OutputSweeper<
     Arc<RgbOutputSpender>,
 >;
 
+pub(crate) fn _clear_rgb_payment_pending_markers(ldk_data_dir: &Path, payment_hash: &PaymentHash) {
+    _clear_rgb_payment_raw_pending_markers(ldk_data_dir, payment_hash);
+    for attachment in _collect_rgb_channel_payment_pending_attachments(ldk_data_dir, payment_hash) {
+        let _ = fs::remove_file(attachment.path);
+    }
+}
+
+pub(crate) fn _clear_rgb_payment_raw_pending_markers(
+    ldk_data_dir: &Path,
+    payment_hash: &PaymentHash,
+) {
+    for inbound in [false, true] {
+        let _ = fs::remove_file(get_rgb_payment_info_pending_path(
+            payment_hash,
+            ldk_data_dir,
+            inbound,
+        ));
+    }
+}
+
+#[derive(Clone)]
+struct RgbChannelPaymentPendingAttachment {
+    channel_id: String,
+    path: PathBuf,
+}
+
+fn _collect_rgb_channel_payment_pending_attachments(
+    ldk_data_dir: &Path,
+    payment_hash: &PaymentHash,
+) -> Vec<RgbChannelPaymentPendingAttachment> {
+    let payment_hash_str = hex_str(&payment_hash.0);
+    let mut attachments = Vec::new();
+
+    let Ok(entries) = fs::read_dir(ldk_data_dir) else {
+        return Vec::new();
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
+            continue;
+        };
+        if !matches!(extension, "inbound_pending" | "outbound_pending") {
+            continue;
+        }
+        let Some(file_stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if file_stem == payment_hash_str || !file_stem.ends_with(&payment_hash_str) {
+            continue;
+        }
+        let channel_id = &file_stem[..file_stem.len() - payment_hash_str.len()];
+        if channel_id.len() != 64 {
+            continue;
+        }
+        attachments.push(RgbChannelPaymentPendingAttachment {
+            channel_id: channel_id.to_string(),
+            path,
+        });
+    }
+
+    attachments
+}
+
+fn _finalize_rgb_channel_payment(ldk_data_dir: &Path, payment_hash: &PaymentHash, receiver: bool) {
+    let mut applied_any = false;
+    let mut applied_attachment_paths = Vec::new();
+
+    for attachment in _collect_rgb_channel_payment_pending_attachments(ldk_data_dir, payment_hash) {
+        let rgb_payment_info = parse_rgb_payment_info(&attachment.path);
+        if rgb_payment_info.swap_payment && receiver != rgb_payment_info.inbound {
+            continue;
+        }
+
+        let (offered, received) = if receiver {
+            (0, rgb_payment_info.amount)
+        } else {
+            (rgb_payment_info.amount, 0)
+        };
+        if _safe_update_rgb_channel_amount(
+            &attachment.channel_id,
+            offered,
+            received,
+            ldk_data_dir,
+            false,
+        ) {
+            applied_any = true;
+            applied_attachment_paths.push(attachment.path);
+        }
+    }
+
+    if applied_any {
+        for attachment_path in applied_attachment_paths {
+            let _ = fs::remove_file(attachment_path);
+        }
+        if _collect_rgb_channel_payment_pending_attachments(ldk_data_dir, payment_hash).is_empty() {
+            _clear_rgb_payment_raw_pending_markers(ldk_data_dir, payment_hash);
+        }
+    }
+}
+
 fn _finalize_virtual_rgb_channel_info(
     ldk_data_dir: &Path,
     temporary_channel_id: &ChannelId,
@@ -873,7 +949,7 @@ fn _safe_update_rgb_channel_amount(
     rgb_received_htlc: u64,
     ldk_data_dir: &Path,
     pending: bool,
-) {
+) -> bool {
     let info_file_path = get_rgb_channel_info_path(channel_id, ldk_data_dir, pending);
     if !info_file_path.exists() {
         tracing::warn!(
@@ -881,7 +957,7 @@ fn _safe_update_rgb_channel_amount(
             channel_id,
             pending
         );
-        return;
+        return false;
     }
     update_rgb_channel_amount(
         channel_id,
@@ -890,40 +966,7 @@ fn _safe_update_rgb_channel_amount(
         ldk_data_dir,
         pending,
     );
-}
-
-fn _update_rgb_channel_amount(ldk_data_dir: &Path, payment_hash: &PaymentHash, receiver: bool) {
-    let payment_hash_str = hex_str(&payment_hash.0);
-    for entry in fs::read_dir(ldk_data_dir).unwrap() {
-        let file = entry.unwrap();
-        let file_name = file.file_name();
-        let file_name_str = file_name.to_string_lossy();
-        let mut file_path_no_ext = file.path().clone();
-        file_path_no_ext.set_extension("");
-        let file_name_str_no_ext = file_path_no_ext.file_name().unwrap().to_string_lossy();
-        if file_name_str.contains(&payment_hash_str) && file_name_str_no_ext != payment_hash_str {
-            let rgb_payment_info = parse_rgb_payment_info(&file.path());
-            let channel_id_str = file_name_str_no_ext.replace(&payment_hash_str, "");
-
-            if rgb_payment_info.swap_payment && receiver != rgb_payment_info.inbound {
-                continue;
-            }
-
-            let (offered, received) = if receiver {
-                (0, rgb_payment_info.amount)
-            } else {
-                (rgb_payment_info.amount, 0)
-            };
-            _safe_update_rgb_channel_amount(
-                &channel_id_str,
-                offered,
-                received,
-                ldk_data_dir,
-                false,
-            );
-            break;
-        }
-    }
+    true
 }
 
 async fn handle_ldk_events(
@@ -1099,7 +1142,6 @@ async fn handle_ldk_events(
                             channel_id,
                             created_at: virtual_draft.created_at,
                             former_temporary_channel_id: temporary_channel_id,
-                            last_error: None,
                             peer_id: virtual_draft.peer_id,
                             status: VirtualChannelSessionStatus::Active,
                             synthetic_funding_txo,
@@ -1347,7 +1389,7 @@ async fn handle_ldk_events(
                 }
             }
 
-            _update_rgb_channel_amount(&static_state.ldk_data_dir, &payment_hash, true);
+            _finalize_rgb_channel_payment(&static_state.ldk_data_dir, &payment_hash, true);
             if is_maker_swap {
                 unlocked_state.update_maker_swap_status(&payment_hash, SwapStatus::Succeeded);
             } else {
@@ -1368,7 +1410,7 @@ async fn handle_ldk_events(
             payment_id,
             ..
         } => {
-            _update_rgb_channel_amount(&static_state.ldk_data_dir, &payment_hash, false);
+            _finalize_rgb_channel_payment(&static_state.ldk_data_dir, &payment_hash, false);
 
             if unlocked_state.is_maker_swap(&payment_hash) {
                 tracing::info!(
@@ -1508,6 +1550,7 @@ async fn handle_ldk_events(
             ..
         } => {
             if let Some(hash) = payment_hash {
+                _clear_rgb_payment_pending_markers(&static_state.ldk_data_dir, &hash);
                 tracing::error!(
                     "EVENT: Failed to send payment to payment ID {}, payment hash {}: {:?}",
                     payment_id,
@@ -1579,6 +1622,7 @@ async fn handle_ldk_events(
             if unlocked_state.is_taker_swap(&payment_hash) {
                 unlocked_state.update_taker_swap_status(&payment_hash, SwapStatus::Succeeded);
             }
+            _clear_rgb_payment_pending_markers(&static_state.ldk_data_dir, &payment_hash);
 
             let read_only_network_graph = unlocked_state.network_graph.read_only();
             let nodes = read_only_network_graph.nodes();
@@ -3027,4 +3071,308 @@ pub(crate) async fn stop_ldk(app_state: Arc<AppState>) {
     }
 
     tracing::info!("Stopped LDK");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lightning::rgb_utils::{
+        get_rgb_channel_payment_info_path, get_rgb_payment_info_path,
+        get_rgb_payment_info_pending_path, parse_rgb_channel_info, write_rgb_channel_info,
+        RgbPaymentInfo,
+    };
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_test_dir(test_name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("rln-{test_name}-{unique}"));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn test_contract_id() -> ContractId {
+        ContractId::from_str("rgb:EIkAVQvq-WbAb5JG-CYxbUER-oqDNwne-ZNxBDID-p0cpf9U").unwrap()
+    }
+
+    fn write_rgb_payment_info(path: &Path, rgb_payment_info: &RgbPaymentInfo) {
+        fs::write(path, serde_json::to_string(rgb_payment_info).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn clear_rgb_payment_pending_markers_removes_only_pending_files() {
+        let ldk_data_dir = temp_test_dir("clear-rgb-pending-markers");
+        let channel_id = ChannelId([1; 32]);
+        let payment_hash = PaymentHash([2; 32]);
+
+        let raw_final_path = get_rgb_payment_info_path(&payment_hash, &ldk_data_dir, false);
+        let raw_pending_path =
+            get_rgb_payment_info_pending_path(&payment_hash, &ldk_data_dir, false);
+        let channel_final_path = get_rgb_channel_payment_info_path(
+            &channel_id,
+            &payment_hash,
+            &ldk_data_dir,
+            false,
+            false,
+        );
+        let channel_pending_path = get_rgb_channel_payment_info_path(
+            &channel_id,
+            &payment_hash,
+            &ldk_data_dir,
+            false,
+            true,
+        );
+
+        fs::write(&raw_final_path, b"raw-final").unwrap();
+        fs::write(&raw_pending_path, b"raw-pending").unwrap();
+        fs::write(&channel_final_path, b"channel-final").unwrap();
+        fs::write(&channel_pending_path, b"channel-pending").unwrap();
+
+        _clear_rgb_payment_pending_markers(&ldk_data_dir, &payment_hash);
+
+        assert!(raw_final_path.exists());
+        assert!(!raw_pending_path.exists());
+        assert!(channel_final_path.exists());
+        assert!(!channel_pending_path.exists());
+
+        fs::remove_dir_all(ldk_data_dir).unwrap();
+    }
+
+    #[test]
+    fn clear_rgb_payment_raw_pending_markers_removes_only_raw_pending_files() {
+        let ldk_data_dir = temp_test_dir("clear-rgb-raw-pending-markers");
+        let channel_id = ChannelId([7; 32]);
+        let payment_hash = PaymentHash([8; 32]);
+
+        let raw_pending_path =
+            get_rgb_payment_info_pending_path(&payment_hash, &ldk_data_dir, false);
+        let channel_pending_path = get_rgb_channel_payment_info_path(
+            &channel_id,
+            &payment_hash,
+            &ldk_data_dir,
+            false,
+            true,
+        );
+
+        fs::write(&raw_pending_path, b"raw-pending").unwrap();
+        fs::write(&channel_pending_path, b"channel-pending").unwrap();
+
+        _clear_rgb_payment_raw_pending_markers(&ldk_data_dir, &payment_hash);
+
+        assert!(!raw_pending_path.exists());
+        assert!(channel_pending_path.exists());
+
+        fs::remove_dir_all(ldk_data_dir).unwrap();
+    }
+
+    #[test]
+    fn finalize_rgb_channel_payment_clears_pending_markers_after_apply() {
+        let ldk_data_dir = temp_test_dir("finalize-rgb-channel-payment-applies");
+        let channel_id = ChannelId([3; 32]);
+        let payment_hash = PaymentHash([4; 32]);
+
+        let rgb_info = RgbInfo {
+            contract_id: test_contract_id(),
+            schema: AssetSchema::Nia,
+            local_rgb_amount: 100,
+            remote_rgb_amount: 0,
+        };
+        write_rgb_channel_info(
+            &get_rgb_channel_info_path(&hex_str(&channel_id.0), &ldk_data_dir, false),
+            &rgb_info,
+        );
+
+        let rgb_payment_info = RgbPaymentInfo {
+            contract_id: rgb_info.contract_id,
+            amount: 25,
+            local_rgb_amount: 100,
+            remote_rgb_amount: 0,
+            swap_payment: false,
+            inbound: false,
+        };
+        let raw_pending_path =
+            get_rgb_payment_info_pending_path(&payment_hash, &ldk_data_dir, false);
+        let channel_pending_path = get_rgb_channel_payment_info_path(
+            &channel_id,
+            &payment_hash,
+            &ldk_data_dir,
+            false,
+            true,
+        );
+        write_rgb_payment_info(&raw_pending_path, &rgb_payment_info);
+        write_rgb_payment_info(&channel_pending_path, &rgb_payment_info);
+
+        _finalize_rgb_channel_payment(&ldk_data_dir, &payment_hash, false);
+
+        let updated_rgb_info = parse_rgb_channel_info(&get_rgb_channel_info_path(
+            &hex_str(&channel_id.0),
+            &ldk_data_dir,
+            false,
+        ));
+        assert_eq!(updated_rgb_info.local_rgb_amount, 75);
+        assert_eq!(updated_rgb_info.remote_rgb_amount, 25);
+        assert!(!raw_pending_path.exists());
+        assert!(!channel_pending_path.exists());
+
+        fs::remove_dir_all(ldk_data_dir).unwrap();
+    }
+
+    #[test]
+    fn finalize_rgb_channel_payment_leaves_pending_markers_when_nothing_applies() {
+        let ldk_data_dir = temp_test_dir("finalize-rgb-channel-payment-skips");
+        let channel_id = ChannelId([5; 32]);
+        let payment_hash = PaymentHash([6; 32]);
+
+        let rgb_info = RgbInfo {
+            contract_id: test_contract_id(),
+            schema: AssetSchema::Nia,
+            local_rgb_amount: 100,
+            remote_rgb_amount: 0,
+        };
+        write_rgb_channel_info(
+            &get_rgb_channel_info_path(&hex_str(&channel_id.0), &ldk_data_dir, false),
+            &rgb_info,
+        );
+
+        let rgb_payment_info = RgbPaymentInfo {
+            contract_id: rgb_info.contract_id,
+            amount: 25,
+            local_rgb_amount: 100,
+            remote_rgb_amount: 0,
+            swap_payment: true,
+            inbound: true,
+        };
+        let raw_pending_path =
+            get_rgb_payment_info_pending_path(&payment_hash, &ldk_data_dir, true);
+        let channel_pending_path = get_rgb_channel_payment_info_path(
+            &channel_id,
+            &payment_hash,
+            &ldk_data_dir,
+            true,
+            true,
+        );
+        write_rgb_payment_info(&raw_pending_path, &rgb_payment_info);
+        write_rgb_payment_info(&channel_pending_path, &rgb_payment_info);
+
+        _finalize_rgb_channel_payment(&ldk_data_dir, &payment_hash, false);
+
+        let unchanged_rgb_info = parse_rgb_channel_info(&get_rgb_channel_info_path(
+            &hex_str(&channel_id.0),
+            &ldk_data_dir,
+            false,
+        ));
+        assert_eq!(unchanged_rgb_info.local_rgb_amount, 100);
+        assert_eq!(unchanged_rgb_info.remote_rgb_amount, 0);
+        assert!(raw_pending_path.exists());
+        assert!(channel_pending_path.exists());
+
+        fs::remove_dir_all(ldk_data_dir).unwrap();
+    }
+
+    #[test]
+    fn finalize_rgb_channel_payment_preserves_other_direction_markers_until_they_apply() {
+        let ldk_data_dir = temp_test_dir("finalize-rgb-channel-payment-split-directions");
+        let inbound_channel_id = ChannelId([9; 32]);
+        let outbound_channel_id = ChannelId([10; 32]);
+        let payment_hash = PaymentHash([11; 32]);
+
+        let inbound_rgb_info = RgbInfo {
+            contract_id: test_contract_id(),
+            schema: AssetSchema::Nia,
+            local_rgb_amount: 0,
+            remote_rgb_amount: 100,
+        };
+        let outbound_rgb_info = RgbInfo {
+            contract_id: test_contract_id(),
+            schema: AssetSchema::Nia,
+            local_rgb_amount: 100,
+            remote_rgb_amount: 0,
+        };
+        write_rgb_channel_info(
+            &get_rgb_channel_info_path(&hex_str(&inbound_channel_id.0), &ldk_data_dir, false),
+            &inbound_rgb_info,
+        );
+        write_rgb_channel_info(
+            &get_rgb_channel_info_path(&hex_str(&outbound_channel_id.0), &ldk_data_dir, false),
+            &outbound_rgb_info,
+        );
+
+        let inbound_payment_info = RgbPaymentInfo {
+            contract_id: inbound_rgb_info.contract_id,
+            amount: 20,
+            local_rgb_amount: 0,
+            remote_rgb_amount: 100,
+            swap_payment: true,
+            inbound: true,
+        };
+        let outbound_payment_info = RgbPaymentInfo {
+            contract_id: outbound_rgb_info.contract_id,
+            amount: 10,
+            local_rgb_amount: 100,
+            remote_rgb_amount: 0,
+            swap_payment: true,
+            inbound: false,
+        };
+
+        let raw_inbound_pending_path =
+            get_rgb_payment_info_pending_path(&payment_hash, &ldk_data_dir, true);
+        let raw_outbound_pending_path =
+            get_rgb_payment_info_pending_path(&payment_hash, &ldk_data_dir, false);
+        let inbound_channel_pending_path = get_rgb_channel_payment_info_path(
+            &inbound_channel_id,
+            &payment_hash,
+            &ldk_data_dir,
+            true,
+            true,
+        );
+        let outbound_channel_pending_path = get_rgb_channel_payment_info_path(
+            &outbound_channel_id,
+            &payment_hash,
+            &ldk_data_dir,
+            false,
+            true,
+        );
+        write_rgb_payment_info(&raw_inbound_pending_path, &inbound_payment_info);
+        write_rgb_payment_info(&raw_outbound_pending_path, &outbound_payment_info);
+        write_rgb_payment_info(&inbound_channel_pending_path, &inbound_payment_info);
+        write_rgb_payment_info(&outbound_channel_pending_path, &outbound_payment_info);
+
+        _finalize_rgb_channel_payment(&ldk_data_dir, &payment_hash, true);
+
+        let updated_inbound_rgb_info = parse_rgb_channel_info(&get_rgb_channel_info_path(
+            &hex_str(&inbound_channel_id.0),
+            &ldk_data_dir,
+            false,
+        ));
+        let unchanged_outbound_rgb_info = parse_rgb_channel_info(&get_rgb_channel_info_path(
+            &hex_str(&outbound_channel_id.0),
+            &ldk_data_dir,
+            false,
+        ));
+        assert_eq!(updated_inbound_rgb_info.local_rgb_amount, 20);
+        assert_eq!(updated_inbound_rgb_info.remote_rgb_amount, 80);
+        assert_eq!(unchanged_outbound_rgb_info.local_rgb_amount, 100);
+        assert_eq!(unchanged_outbound_rgb_info.remote_rgb_amount, 0);
+        assert!(!inbound_channel_pending_path.exists());
+        assert!(outbound_channel_pending_path.exists());
+        assert!(raw_inbound_pending_path.exists());
+        assert!(raw_outbound_pending_path.exists());
+
+        _finalize_rgb_channel_payment(&ldk_data_dir, &payment_hash, false);
+
+        let updated_outbound_rgb_info = parse_rgb_channel_info(&get_rgb_channel_info_path(
+            &hex_str(&outbound_channel_id.0),
+            &ldk_data_dir,
+            false,
+        ));
+        assert_eq!(updated_outbound_rgb_info.local_rgb_amount, 90);
+        assert_eq!(updated_outbound_rgb_info.remote_rgb_amount, 10);
+        assert!(!outbound_channel_pending_path.exists());
+        assert!(!raw_inbound_pending_path.exists());
+        assert!(!raw_outbound_pending_path.exists());
+
+        fs::remove_dir_all(ldk_data_dir).unwrap();
+    }
 }

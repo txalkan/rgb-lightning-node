@@ -76,8 +76,8 @@ use tokio::{
 };
 
 use crate::ldk::{
-    start_ldk, stop_ldk, LdkBackgroundServices, VirtualChannelDraft, VirtualChannelSessionStatus,
-    MIN_CHANNEL_CONFIRMATIONS,
+    _clear_rgb_payment_raw_pending_markers, start_ldk, stop_ldk, LdkBackgroundServices,
+    VirtualChannelDraft, VirtualChannelSessionStatus, MIN_CHANNEL_CONFIRMATIONS,
 };
 use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{
@@ -2231,6 +2231,10 @@ pub(crate) async fn keysend(
             }
             Err(e) => {
                 tracing::error!("ERROR: failed to send payment: {:?}", e);
+                _clear_rgb_payment_raw_pending_markers(
+                    &state.static_state.ldk_data_dir,
+                    &payment_hash,
+                );
                 unlocked_state.update_outbound_payment_status(payment_id, HTLCStatus::Failed);
                 HTLCStatus::Failed
             }
@@ -2936,6 +2940,10 @@ pub(crate) async fn maker_execute(
             }
             Err(e) => {
                 tracing::warn!("ERROR: failed to send payment: {:?}", e);
+                _clear_rgb_payment_raw_pending_markers(
+                    &state.static_state.ldk_data_dir,
+                    &swapstring.payment_hash,
+                );
                 (HTLCStatus::Failed, Some(e))
             }
         };
@@ -3859,6 +3867,10 @@ pub(crate) async fn send_payment(
                 },
                 Err(e) => {
                     tracing::error!("ERROR: failed to send payment: {:?}", e);
+                    _clear_rgb_payment_raw_pending_markers(
+                        &state.static_state.ldk_data_dir,
+                        &payment_hash,
+                    );
                     status = HTLCStatus::Failed;
                     unlocked_state.update_outbound_payment_status(payment_id, status);
                 },
