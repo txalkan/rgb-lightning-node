@@ -103,6 +103,13 @@ pub(crate) struct NodeInfoData {
     pub(crate) num_peers: usize,
     pub(crate) account_xpub_vanilla: String,
     pub(crate) account_xpub_colored: String,
+    pub(crate) max_media_upload_size_mb: u16,
+    pub(crate) rgb_htlc_min_msat: u64,
+    pub(crate) rgb_channel_capacity_min_sat: u64,
+    pub(crate) channel_capacity_min_sat: u64,
+    pub(crate) channel_capacity_max_sat: u64,
+    pub(crate) channel_asset_min_amount: u64,
+    pub(crate) channel_asset_max_amount: u64,
     pub(crate) network_nodes: usize,
     pub(crate) network_channels: usize,
 }
@@ -277,6 +284,7 @@ pub(crate) struct OpenChannelRequestData {
     pub(crate) temporary_channel_id: Option<String>,
     pub(crate) asset_id: Option<String>,
     pub(crate) asset_amount: Option<u64>,
+    pub(crate) push_asset_amount: Option<u64>,
 }
 
 pub(crate) struct OpenChannelData {
@@ -901,6 +909,13 @@ pub(crate) async fn node_info(state: Arc<AppState>) -> Result<NodeInfoData, APIE
         num_peers: unlocked_state.peer_manager.list_peers().len(),
         account_xpub_vanilla: wallet_data.account_xpub_vanilla,
         account_xpub_colored: wallet_data.account_xpub_colored,
+        max_media_upload_size_mb: state.static_state.max_media_upload_size_mb,
+        rgb_htlc_min_msat: SDK_HTLC_MIN_MSAT,
+        rgb_channel_capacity_min_sat: SDK_OPENRGBCHANNEL_MIN_SAT,
+        channel_capacity_min_sat: SDK_OPENCHANNEL_MIN_SAT,
+        channel_capacity_max_sat: SDK_OPENCHANNEL_MAX_SAT,
+        channel_asset_min_amount: SDK_OPENCHANNEL_MIN_RGB_AMT,
+        channel_asset_max_amount: u64::MAX,
         network_nodes,
         network_channels,
     })
@@ -1884,6 +1899,20 @@ pub(crate) async fn open_channel(
             "Channel push amount cannot be higher than the capacity"
         )));
     }
+    if let Some(push_asset_amount) = request.push_asset_amount {
+        if colored_info.is_none() {
+            return Err(APIError::InvalidAmount(s!(
+                "push_asset_amount can only be used with RGB channels (asset_id must be specified)"
+            )));
+        }
+        if let Some((_, asset_amount)) = &colored_info {
+            if push_asset_amount > *asset_amount {
+                return Err(APIError::InvalidAmount(s!(
+                    "push_asset_amount cannot be higher than asset_amount"
+                )));
+            }
+        }
+    }
 
     if colored_info.is_some() && !request.with_anchors {
         return Err(APIError::AnchorsRequired);
@@ -2012,6 +2041,7 @@ pub(crate) async fn open_channel(
             temporary_channel_id,
             Some(config),
             consignment_endpoint,
+            request.push_asset_amount,
         )
         .map_err(|e| {
             *unlocked_state.rgb_send_lock.lock().unwrap() = false;
@@ -2038,11 +2068,12 @@ pub(crate) async fn open_channel(
     tracing::info!("EVENT: initiated channel with peer {}", peer_pubkey);
 
     if let Some((contract_id, asset_amount)) = &colored_info {
+        let push_amount = request.push_asset_amount.unwrap_or(0);
         let rgb_info = RgbInfo {
             contract_id: *contract_id,
             schema: schema.unwrap(),
-            local_rgb_amount: *asset_amount,
-            remote_rgb_amount: 0,
+            local_rgb_amount: *asset_amount - push_amount,
+            remote_rgb_amount: push_amount,
         };
         write_rgb_channel_info(
             &get_rgb_channel_info_path(

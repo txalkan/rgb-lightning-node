@@ -558,6 +558,7 @@ impl SdkNode {
                 temporary_channel_id: request
                     .temporary_channel_id
                     .map(|id| id.0.as_hex().to_string()),
+                push_asset_amount: request.push_asset_amount,
             },
         ))?;
         let hex = response.temporary_channel_id;
@@ -656,6 +657,13 @@ impl SdkNode {
             num_peers: data.num_peers as u64,
             account_xpub_vanilla: data.account_xpub_vanilla,
             account_xpub_colored: data.account_xpub_colored,
+            max_media_upload_size_mb: data.max_media_upload_size_mb,
+            rgb_htlc_min_msat: data.rgb_htlc_min_msat,
+            rgb_channel_capacity_min_sat: data.rgb_channel_capacity_min_sat,
+            channel_capacity_min_sat: data.channel_capacity_min_sat,
+            channel_capacity_max_sat: data.channel_capacity_max_sat,
+            channel_asset_min_amount: data.channel_asset_min_amount,
+            channel_asset_max_amount: data.channel_asset_max_amount,
             network_nodes: data.network_nodes as u64,
             network_channels: data.network_channels as u64,
         })

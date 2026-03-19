@@ -38,6 +38,13 @@ pub struct NodeInfo {
     pub num_peers: u64,
     pub account_xpub_vanilla: String,
     pub account_xpub_colored: String,
+    pub max_media_upload_size_mb: u16,
+    pub rgb_htlc_min_msat: u64,
+    pub rgb_channel_capacity_min_sat: u64,
+    pub channel_capacity_min_sat: u64,
+    pub channel_capacity_max_sat: u64,
+    pub channel_asset_min_amount: u64,
+    pub channel_asset_max_amount: u64,
     pub network_nodes: u64,
     pub network_channels: u64,
 }
@@ -380,6 +387,7 @@ pub struct SdkOpenChannelRequest {
     pub temporary_channel_id: Option<ChannelId>,
     pub asset_id: Option<ContractId>,
     pub asset_amount: Option<u64>,
+    pub push_asset_amount: Option<u64>,
 }
 
 pub struct SdkOpenChannelResponse {

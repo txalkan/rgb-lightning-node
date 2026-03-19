@@ -125,6 +125,13 @@ dictionary NodeInfo {
     u64 num_peers;
     string account_xpub_vanilla;
     string account_xpub_colored;
+    u16 max_media_upload_size_mb;
+    u64 rgb_htlc_min_msat;
+    u64 rgb_channel_capacity_min_sat;
+    u64 channel_capacity_min_sat;
+    u64 channel_capacity_max_sat;
+    u64 channel_asset_min_amount;
+    u64 channel_asset_max_amount;
     u64 network_nodes;
     u64 network_channels;
 };
@@ -479,6 +486,7 @@ dictionary SdkOpenChannelRequest {
     ChannelId? temporary_channel_id;
     ContractId? asset_id;
     u64? asset_amount;
+    u64? push_asset_amount;
 };
 
 dictionary SdkOpenChannelResponse {
