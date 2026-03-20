@@ -25,7 +25,7 @@ Important notes:
 
 - UniFFI does not call HTTP route handlers; it calls SDK methods directly.
 - SDK is expected to depend on LDK core logic (it is a wrapper, not a separate node implementation).
-- `ldk::start_ldk` now accepts `sdk::UnlockRequestData` so SDK unlock flow is not typed against route-layer DTOs.
+- `ldk::start_ldk` now accepts `core_types::UnlockRequest` and SDK unlock uses `sdk::UnlockRequest`, so unlock flow is not typed against route-layer DTOs.
 - A small `routes` diff remains for shared `AppState` transition helpers (`pub(crate)` visibility), used by SDK unlock lifecycle handling.
 
 ## Route parity status (`routes.rs` -> SDK/UniFFI)
