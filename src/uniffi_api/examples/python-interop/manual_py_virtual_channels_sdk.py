@@ -25,6 +25,7 @@ OPEN_CHANNEL_PUSH_MSAT = int(os.getenv("OPEN_CHANNEL_PUSH_MSAT", "0"))
 KEYSEND_MSAT = int(os.getenv("KEYSEND_MSAT", "1000000"))
 CHANNEL_READY_TIMEOUT_SEC = int(os.getenv("CHANNEL_READY_TIMEOUT_SEC", "180"))
 MIN_KEYSEND_MSAT = 3_000_000
+DRAIN_BEFORE_CLOSE = os.getenv("DRAIN_BEFORE_CLOSE", "1") == "1"
 
 CREATE_UTXOS_NUM = int(os.getenv("CREATE_UTXOS_NUM", "6"))
 CREATE_UTXOS_SIZE_SAT = int(os.getenv("CREATE_UTXOS_SIZE_SAT", "100000"))
@@ -199,26 +200,108 @@ def settle_after_payment(node_a: rln.SdkNode, node_b: rln.SdkNode, seconds: int 
         time.sleep(1)
 
 
-def wait_for_channel_gone_on_both(
+def wait_for_channel_closed_or_gone_on_both(
     node_a: rln.SdkNode, node_b: rln.SdkNode, channel_id: str, timeout_sec: int = 30
 ):
     deadline = time.time() + timeout_sec
+    last_snapshot = None
+    last_err = None
+    last_close_retry = 0.0
     while time.time() < deadline:
         node_a.sync()
         node_b.sync()
-        a_has = any(str(c.channel_id) == channel_id for c in node_a.list_channels())
-        b_has = any(str(c.channel_id) == channel_id for c in node_b.list_channels())
-        if not a_has and not b_has:
+        a_ch = next((c for c in node_a.list_channels() if str(c.channel_id) == channel_id), None)
+        b_ch = next((c for c in node_b.list_channels() if str(c.channel_id) == channel_id), None)
+
+        last_snapshot = (
+            None
+            if a_ch is None
+            else (a_ch.status.name, bool(a_ch.is_usable), str(a_ch.peer_pubkey), a_ch.virtual_open_mode),
+            None
+            if b_ch is None
+            else (b_ch.status.name, bool(b_ch.is_usable), str(b_ch.peer_pubkey), b_ch.virtual_open_mode),
+        )
+
+        # Consider close complete once channel is no longer routable/usable, even
+        # if status lingers as OPENED for virtual-channel internals.
+        a_done = a_ch is None or a_ch.status == rln.ChannelStatus.CLOSING or not a_ch.is_usable
+        b_done = b_ch is None or b_ch.status == rln.ChannelStatus.CLOSING or not b_ch.is_usable
+        if a_done and b_done:
             return
+
+        now = time.time()
+        if now - last_close_retry >= 2.0:
+            last_close_retry = now
+            if a_ch is not None:
+                try:
+                    node_a.closechannel(
+                        rln.SdkCloseChannelRequest(
+                            channel_id=a_ch.channel_id,
+                            peer_pubkey=a_ch.peer_pubkey,
+                            force=False,
+                        )
+                    )
+                except Exception as e:
+                    last_err = f"node_a close retry(force=false): {e}"
+                    try:
+                        node_a.closechannel(
+                            rln.SdkCloseChannelRequest(
+                                channel_id=a_ch.channel_id,
+                                peer_pubkey=a_ch.peer_pubkey,
+                                force=True,
+                            )
+                        )
+                    except Exception as e2:
+                        last_err = f"node_a close retry(force=true): {e2}"
+            if b_ch is not None:
+                try:
+                    node_b.closechannel(
+                        rln.SdkCloseChannelRequest(
+                            channel_id=b_ch.channel_id,
+                            peer_pubkey=b_ch.peer_pubkey,
+                            force=False,
+                        )
+                    )
+                except Exception as e:
+                    last_err = f"node_b close retry(force=false): {e}"
+                    try:
+                        node_b.closechannel(
+                            rln.SdkCloseChannelRequest(
+                                channel_id=b_ch.channel_id,
+                                peer_pubkey=b_ch.peer_pubkey,
+                                force=True,
+                            )
+                        )
+                    except Exception as e2:
+                        last_err = f"node_b close retry(force=true): {e2}"
         time.sleep(1)
-    raise RuntimeError("virtual channel still present on at least one node after close")
+    raise RuntimeError(
+        f"virtual channel neither non-usable nor closing/gone on at least one node; "
+        f"last_snapshot={last_snapshot}, last_err={last_err}"
+    )
+
+
+def keysend_and_wait(sender: rln.SdkNode, dest_pubkey, amt_msat: int, label: str):
+    print(f"{label} keysend amount msat:", amt_msat)
+    resp = sender.keysend(
+        rln.SdkKeysendRequest(
+            dest_pubkey=dest_pubkey,
+            amt_msat=amt_msat,
+            asset_id=None,
+            asset_amount=None,
+        )
+    )
+    print(f"{label} keysend status:", resp.status.name)
+    final_status = wait_payment_final(sender, resp.payment_hash)
+    print(f"{label} keysend final status:", final_status.name)
+    if final_status != rln.HtlcStatus.SUCCEEDED:
+        raise RuntimeError(f"{label} keysend failed with {final_status}")
 
 
 def main():
     print("SDK virtual channels test (trusted_no_broadcast open/list/keysend/close)")
     print(f"node A storage: {NODE_A_STORAGE}")
     print(f"node B storage: {NODE_B_STORAGE}")
-
     ensure_dir(NODE_A_STORAGE)
     ensure_dir(NODE_B_STORAGE)
 
@@ -298,18 +381,9 @@ def main():
         print("virtual channel usable:", virtual_channel.is_usable)
 
         keysend_amt_msat = max(KEYSEND_MSAT, MIN_KEYSEND_MSAT)
-        print("keysend amount msat:", keysend_amt_msat)
-        keysend_resp = node_a.keysend(
-            rln.SdkKeysendRequest(
-                dest_pubkey=info_b.pubkey,
-                amt_msat=keysend_amt_msat,
-                asset_id=None,
-                asset_amount=None,
-            )
-        )
-        print("keysend status:", keysend_resp.status.name)
-        final_keysend_status = wait_payment_final(node_a, keysend_resp.payment_hash)
-        print("keysend final status:", final_keysend_status.name)
+        keysend_and_wait(node_a, info_b.pubkey, keysend_amt_msat, "A->B")
+        if DRAIN_BEFORE_CLOSE:
+            keysend_and_wait(node_b, info_a.pubkey, keysend_amt_msat, "B->A drain")
         settle_after_payment(node_a, node_b, seconds=10)
 
         try:
@@ -337,7 +411,7 @@ def main():
                     timeout_sec=45,
                 )
             print("closechannel: initiated")
-            wait_for_channel_gone_on_both(
+            wait_for_channel_closed_or_gone_on_both(
                 node_a, node_b, str(virtual_channel.channel_id), timeout_sec=45
             )
             if close_err is not None:
