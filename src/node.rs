@@ -40,6 +40,8 @@ impl NodeHandle {
             network: config.network,
             max_media_upload_size_mb: config.max_media_upload_size_mb,
             root_public_key: config.root_public_key,
+            enable_virtual_channels_v0: false,
+            virtual_peer_pubkeys: vec![],
         };
         let state = start_daemon(&args).await?;
         Ok(Self { state })
