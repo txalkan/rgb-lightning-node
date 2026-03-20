@@ -45,6 +45,12 @@ Start regtest dependencies:
 python3 src/uniffi_api/examples/python-interop/manual_py_full_n2n.py
 ```
 
+Virtual channels SDK test:
+
+```sh
+python3 src/uniffi_api/examples/python-interop/manual_py_virtual_channels_sdk.py
+```
+
 Optional env overrides:
 
 ```sh
@@ -61,12 +67,35 @@ CHANNEL_READY_TIMEOUT_SEC=300 \
 python3 src/uniffi_api/examples/python-interop/manual_py_full_n2n.py
 ```
 
+Or for the virtual channels SDK test:
+
+```sh
+RESET_DATA=1 \
+python3 src/uniffi_api/examples/python-interop/manual_py_virtual_channels_sdk.py
+```
+
+Strict close check:
+
+```sh
+RESET_DATA=1 \
+REQUIRE_CLOSE_SUCCESS=1 \
+python3 src/uniffi_api/examples/python-interop/manual_py_virtual_channels_sdk.py
+```
+
+Note: on current backend state, virtual `closechannel` may still return
+`RlnError.Internal` even after successful payment settlement. The default
+(`REQUIRE_CLOSE_SUCCESS=0`) keeps close non-fatal so you can validate virtual
+open/list/keysend flow reliably.
+
 Notes:
 
 - `RESET_DATA=1` removes storage dirs before run.
 - Script uses `./regtest.sh sendtoaddress` and `./regtest.sh mine` for funding/confirmations.
 - Script uses SDK methods (`createutxos`, `issueassetnia`) before opening the channel.
 - Script shuts down both SDK nodes on exit.
+- `manual_py_virtual_channels_sdk.py` focuses on virtual channels:
+  creates a `trusted_no_broadcast` channel, verifies `virtual_open_mode`
+  in `list_channels`, sends a `keysend` over that channel, and closes it.
 
 ## Cleanup
 

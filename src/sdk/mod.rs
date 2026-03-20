@@ -8,7 +8,7 @@ use crate::core_types::{
 };
 use crate::disk::{self, CHANNEL_PEER_DATA};
 use crate::error::APIError;
-use crate::ldk::{start_ldk, PaymentInfo};
+use crate::ldk::{start_ldk, PaymentInfo, VirtualChannelDraft, VirtualChannelSessionStatus};
 use crate::rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional};
 use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{
@@ -92,6 +92,7 @@ const SDK_UTXO_SIZE_SAT: u32 = 32_000;
 const SDK_DUST_LIMIT_MSAT: u64 = 546_000;
 const SDK_MAX_SWAP_FEE_MSAT: u64 = SDK_HTLC_MIN_MSAT;
 const SDK_DEFAULT_FINAL_CLTV_EXPIRY_DELTA: u32 = 14;
+const SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST: &str = "trusted_no_broadcast";
 
 pub(crate) struct NodeInfoData {
     pub(crate) pubkey: String,
@@ -285,6 +286,7 @@ pub(crate) struct OpenChannelRequestData {
     pub(crate) asset_id: Option<String>,
     pub(crate) asset_amount: Option<u64>,
     pub(crate) push_asset_amount: Option<u64>,
+    pub(crate) virtual_open_mode: Option<String>,
 }
 
 pub(crate) struct OpenChannelData {
@@ -476,6 +478,7 @@ pub(crate) struct ChannelData {
     pub(crate) asset_id: Option<String>,
     pub(crate) asset_local_amount: Option<u64>,
     pub(crate) asset_remote_amount: Option<u64>,
+    pub(crate) virtual_open_mode: Option<String>,
 }
 
 pub(crate) struct TransactionData {
@@ -997,6 +1000,7 @@ pub(crate) async fn list_channels(state: Arc<AppState>) -> Result<Vec<ChannelDat
     let unlocked_state = guard.as_ref().unwrap();
 
     let mut channels = vec![];
+    let virtual_sessions = unlocked_state.virtual_channel_session_store();
     for chan_info in unlocked_state.channel_manager.list_channels() {
         let status = match chan_info.channel_shutdown_state.unwrap() {
             ChannelShutdownState::NotShuttingDown => {
@@ -1027,7 +1031,13 @@ pub(crate) async fn list_channels(state: Arc<AppState>) -> Result<Vec<ChannelDat
             asset_id: None,
             asset_local_amount: None,
             asset_remote_amount: None,
+            virtual_open_mode: None,
         };
+
+        if virtual_sessions.contains_key(&chan_info.channel_id) {
+            channel.virtual_open_mode =
+                Some(SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST.to_string());
+        }
 
         if let Some(funding_txo) = chan_info.funding_txo {
             channel.funding_txid = Some(funding_txo.txid.to_string());
@@ -1493,22 +1503,136 @@ pub(crate) async fn close_channel(
         Err(_) => return Err(APIError::InvalidPubkey),
     };
 
-    if let Some(chan_details) = unlocked_state
+    let virtual_session = unlocked_state.virtual_channel_session_get(&requested_cid);
+    if let Some(session) = virtual_session.as_ref() {
+        if session.peer_id != peer_pubkey {
+            return Err(APIError::CannotCloseChannel(
+                "peer pubkey does not match trusted virtual channel session".to_string(),
+            ));
+        }
+    }
+
+    let chan_details = if let Some(chan_details) = unlocked_state
         .channel_manager
         .list_channels()
-        .iter()
+        .into_iter()
         .find(|c| c.channel_id == requested_cid)
     {
-        match chan_details.channel_shutdown_state {
-            Some(ChannelShutdownState::NotShuttingDown) => {}
-            _ => {
-                return Err(APIError::CannotCloseChannel(s!(
-                    "Channel is already being closed"
-                )))
+        if chan_details.trusted_no_broadcast {
+            if let Some(session) = virtual_session.as_ref() {
+                match session.status {
+                    VirtualChannelSessionStatus::Abandoned => {
+                        tracing::warn!(
+                            "virtual session {} is persisted as abandoned but the live trusted channel is still present; retrying close without rewriting session state",
+                            requested_cid
+                        );
+                    }
+                    VirtualChannelSessionStatus::AbandonPending => {
+                        return Err(APIError::CannotCloseChannel(
+                            "virtual cleanup is already in progress".to_string(),
+                        ));
+                    }
+                    VirtualChannelSessionStatus::Active => {}
+                }
             }
         }
+        chan_details
     } else {
+        if let Some(session) = virtual_session.as_ref() {
+            if !matches!(session.status, VirtualChannelSessionStatus::Abandoned) {
+                unlocked_state.virtual_channel_session_update_status(
+                    session,
+                    VirtualChannelSessionStatus::Abandoned,
+                );
+            }
+            return Ok(());
+        }
         return Err(APIError::UnknownChannelId);
+    };
+
+    if virtual_session.is_some() && !chan_details.trusted_no_broadcast {
+        return Err(APIError::Unexpected(format!(
+            "virtual channel session exists for {requested_cid}, but live channel is not trusted_no_broadcast"
+        )));
+    }
+
+    match chan_details.channel_shutdown_state {
+        Some(ChannelShutdownState::NotShuttingDown) => {}
+        _ => {
+            return Err(APIError::CannotCloseChannel(s!(
+                "Channel is already being closed"
+            )))
+        }
+    }
+
+    if chan_details.trusted_no_broadcast {
+        if !state.static_state.enable_virtual_channels_v0 {
+            return Err(APIError::CannotCloseChannel(
+                "trusted virtual channels v0 are disabled".to_string(),
+            ));
+        }
+        let Some(session) = virtual_session else {
+            return Err(APIError::CannotCloseChannel(
+                "virtual cleanup is host-only and requires a host-side session".to_string(),
+            ));
+        };
+        if request.force {
+            return Err(APIError::CannotCloseChannel(
+                "force=true is not supported for trusted virtual channels".to_string(),
+            ));
+        }
+        unlocked_state
+            .virtual_channel_ensure_no_client_value(&chan_details, &state.static_state.ldk_data_dir)
+            .map_err(APIError::CannotCloseChannel)?;
+
+        unlocked_state.virtual_channel_session_update_status(
+            &session,
+            VirtualChannelSessionStatus::AbandonPending,
+        );
+        match unlocked_state
+            .channel_manager
+            .abandon_virtual_channel(&requested_cid, &peer_pubkey, true)
+        {
+            Ok(()) => {
+                unlocked_state.virtual_channel_session_update_status(
+                    &session,
+                    VirtualChannelSessionStatus::Abandoned,
+                );
+                tracing::info!(
+                    "EVENT: abandon_virtual_channel succeeded; session is now abandoned"
+                );
+            }
+            Err(e) => {
+                let error = match e {
+                    LDKAPIError::APIMisuseError { err } => err,
+                    _ => format!("{e:?}"),
+                };
+                let live_virtual_channel_still_exists = unlocked_state
+                    .channel_manager
+                    .list_channels()
+                    .into_iter()
+                    .any(|c| c.channel_id == requested_cid && c.trusted_no_broadcast);
+                if live_virtual_channel_still_exists {
+                    unlocked_state.virtual_channel_session_update_status(
+                        &session,
+                        VirtualChannelSessionStatus::Active,
+                    );
+                    return Err(APIError::CannotCloseChannel(error));
+                }
+                unlocked_state.virtual_channel_session_update_status(
+                    &session,
+                    VirtualChannelSessionStatus::Abandoned,
+                );
+                tracing::info!(
+                    "EVENT: abandon_virtual_channel returned error '{}' but channel {} is absent from live LDK state; reconciling session to abandoned",
+                    error,
+                    requested_cid,
+                );
+                return Ok(());
+            }
+        }
+
+        return Ok(());
     }
 
     if request.force {
@@ -1854,9 +1978,34 @@ pub(crate) async fn open_channel(
         return Err(APIError::OpenChannelInProgress);
     }
 
+    let is_virtual_open = match request.virtual_open_mode.as_deref() {
+        None => false,
+        Some(SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST) => true,
+        Some(other) => {
+            return Err(APIError::InvalidRequest(format!(
+                "unknown virtual_open_mode: {other}"
+            )));
+        }
+    };
+
+    if is_virtual_open && !state.static_state.enable_virtual_channels_v0 {
+        return Err(APIError::InvalidRequest(
+            "trusted virtual channels v0 are disabled".to_string(),
+        ));
+    }
+
+    if is_virtual_open && request.public {
+        return Err(APIError::InvalidRequest(
+            "trusted_no_broadcast requires public=false".to_string(),
+        ));
+    }
+
+    let existing_virtual_drafts = unlocked_state.virtual_channel_draft_store();
     let temporary_channel_id = if let Some(tmp_chan_id_str) = request.temporary_channel_id {
         let tmp_chan_id = check_channel_id(&tmp_chan_id_str)?;
-        if unlocked_state.channel_ids().contains_key(&tmp_chan_id) {
+        if unlocked_state.channel_ids().contains_key(&tmp_chan_id)
+            || existing_virtual_drafts.contains_key(&tmp_chan_id)
+        {
             return Err(APIError::TemporaryChannelIdAlreadyUsed);
         }
         Some(tmp_chan_id)
@@ -1921,6 +2070,21 @@ pub(crate) async fn open_channel(
     let (peer_pubkey, mut peer_addr) =
         parse_peer_info(request.peer_pubkey_and_opt_addr.to_string())?;
 
+    if is_virtual_open {
+        let duplicate_virtual_draft = existing_virtual_drafts
+            .values()
+            .any(|draft| draft.peer_id == peer_pubkey);
+        let duplicate_virtual_session = unlocked_state
+            .virtual_channel_session_store()
+            .values()
+            .any(|session| session.peer_id == peer_pubkey);
+        if duplicate_virtual_draft || duplicate_virtual_session {
+            return Err(APIError::InvalidRequest(
+                "trusted_no_broadcast already exists for this peer pair".to_string(),
+            ));
+        }
+    }
+
     let peer_data_path = state.static_state.ldk_data_dir.join(CHANNEL_PEER_DATA);
     if peer_addr.is_none() {
         if let Some(peer) = unlocked_state.peer_manager.peer_by_node_id(&peer_pubkey) {
@@ -1959,14 +2123,21 @@ pub(crate) async fn open_channel(
     }
     let config = UserConfig {
         channel_handshake_limits: ChannelHandshakeLimits {
+            trust_own_funding_0conf: true,
             their_to_self_delay: 2016,
             ..Default::default()
         },
         channel_handshake_config: ChannelHandshakeConfig {
-            announce_for_forwarding: request.public,
+            announce_for_forwarding: if is_virtual_open { false } else { request.public },
             our_htlc_minimum_msat: SDK_HTLC_MIN_MSAT,
-            minimum_depth: MIN_CHANNEL_CONFIRMATIONS as u32,
+            minimum_depth: if is_virtual_open {
+                0
+            } else {
+                MIN_CHANNEL_CONFIRMATIONS as u32
+            },
+            negotiate_scid_privacy: is_virtual_open,
             negotiate_anchors_zero_fee_htlc_tx: request.with_anchors,
+            their_channel_reserve_satoshis_override: if is_virtual_open { Some(0) } else { None },
             ..Default::default()
         },
         channel_config,
@@ -2031,6 +2202,30 @@ pub(crate) async fn open_channel(
     *unlocked_state.rgb_send_lock.lock().unwrap() = true;
     tracing::debug!("RGB send lock set to true");
 
+    let mut temporary_channel_id = temporary_channel_id;
+    if is_virtual_open && temporary_channel_id.is_none() {
+        loop {
+            let mut tmp_channel_id_bytes = [0u8; 32];
+            tmp_channel_id_bytes
+                .copy_from_slice(&unlocked_state.keys_manager.get_secure_random_bytes()[..32]);
+            let candidate = ChannelId::from_bytes(tmp_channel_id_bytes);
+            if !unlocked_state.channel_ids().contains_key(&candidate)
+                && !unlocked_state.virtual_channel_draft_store().contains_key(&candidate)
+            {
+                temporary_channel_id = Some(candidate);
+                break;
+            }
+        }
+    }
+
+    if is_virtual_open {
+        unlocked_state.virtual_channel_draft_add(VirtualChannelDraft {
+            temporary_channel_id: temporary_channel_id.expect("virtual open temp id"),
+            peer_id: peer_pubkey,
+            created_at: get_current_timestamp(),
+        });
+    }
+
     let temporary_channel_id = unlocked_state
         .channel_manager
         .create_channel(
@@ -2046,6 +2241,10 @@ pub(crate) async fn open_channel(
         .map_err(|e| {
             *unlocked_state.rgb_send_lock.lock().unwrap() = false;
             tracing::debug!("RGB send lock set to false (open channel failure: {e:?})");
+            if is_virtual_open {
+                unlocked_state
+                    .virtual_channel_draft_delete(&temporary_channel_id.expect("draft id"));
+            }
             match e {
                 LDKAPIError::APIMisuseError { err }
                     if err.contains("fee for initial commitment transaction") =>
