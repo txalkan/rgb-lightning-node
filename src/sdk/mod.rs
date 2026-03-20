@@ -92,6 +92,58 @@ const SDK_MAX_SWAP_FEE_MSAT: u64 = SDK_HTLC_MIN_MSAT;
 const SDK_DEFAULT_FINAL_CLTV_EXPIRY_DELTA: u32 = 14;
 const SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST: &str = "trusted_no_broadcast";
 
+fn check_changing_state(state: &AppState) -> Result<(), APIError> {
+    if *state.changing_state.lock().unwrap() {
+        return Err(APIError::ChangingState);
+    }
+    Ok(())
+}
+
+async fn check_locked(
+    state: &Arc<AppState>,
+) -> Result<tokio::sync::MutexGuard<'_, Option<Arc<crate::utils::UnlockedAppState>>>, APIError> {
+    check_changing_state(state)?;
+    let unlocked_app_state = state.unlocked_app_state.lock().await;
+    if unlocked_app_state.is_some() {
+        Err(APIError::UnlockedNode)
+    } else {
+        Ok(unlocked_app_state)
+    }
+}
+
+async fn check_unlocked(
+    state: &Arc<AppState>,
+) -> Result<tokio::sync::MutexGuard<'_, Option<Arc<crate::utils::UnlockedAppState>>>, APIError> {
+    check_changing_state(state)?;
+    let unlocked_app_state = state.unlocked_app_state.lock().await;
+    if unlocked_app_state.is_none() {
+        Err(APIError::LockedNode)
+    } else {
+        Ok(unlocked_app_state)
+    }
+}
+
+fn update_changing_state(state: &Arc<AppState>, updated: bool) {
+    let mut changing_state = state.changing_state.lock().unwrap();
+    *changing_state = updated;
+}
+
+fn update_ldk_background_services(
+    state: &Arc<AppState>,
+    updated: Option<crate::ldk::LdkBackgroundServices>,
+) {
+    let mut ldk_background_services = state.ldk_background_services.lock().unwrap();
+    *ldk_background_services = updated;
+}
+
+async fn update_unlocked_app_state(
+    state: &Arc<AppState>,
+    updated: Option<Arc<crate::utils::UnlockedAppState>>,
+) {
+    let mut unlocked_app_state = state.unlocked_app_state.lock().await;
+    *unlocked_app_state = updated;
+}
+
 pub(crate) struct NodeInfoData {
     pub(crate) pubkey: String,
     pub(crate) num_channels: usize,
@@ -857,7 +909,7 @@ pub(crate) async fn check_proxy_endpoint(proxy_endpoint: String) -> Result<(), A
 }
 
 pub(crate) async fn node_info(state: Arc<AppState>) -> Result<NodeInfoData, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     let chans = unlocked_state.channel_manager.list_channels();
@@ -923,7 +975,7 @@ pub(crate) async fn node_info(state: Arc<AppState>) -> Result<NodeInfoData, APIE
 }
 
 pub(crate) async fn network_info(state: Arc<AppState>) -> Result<NetworkInfoData, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
     let best_block = unlocked_state.channel_manager.current_best_block();
 
@@ -934,7 +986,7 @@ pub(crate) async fn network_info(state: Arc<AppState>) -> Result<NetworkInfoData
 }
 
 pub(crate) async fn address(state: Arc<AppState>) -> Result<AddressData, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     Ok(AddressData {
@@ -946,7 +998,7 @@ pub(crate) async fn btc_balance(
     state: Arc<AppState>,
     skip_sync: bool,
 ) -> Result<BtcBalanceData, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
     let btc_balance = unlocked_state.rgb_get_btc_balance(skip_sync)?;
 
@@ -968,7 +1020,7 @@ pub(crate) async fn sign_message(
     state: Arc<AppState>,
     message: String,
 ) -> Result<SignMessageData, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     let trimmed = message.trim();
@@ -984,7 +1036,7 @@ pub(crate) async fn get_channel_id(
     temporary_channel_id: String,
 ) -> Result<ChannelIdData, APIError> {
     let tmp_chan_id = check_channel_id(&temporary_channel_id)?;
-    let channel_ids = state.check_unlocked().await?.clone().unwrap().channel_ids();
+    let channel_ids = check_unlocked(&state).await?.clone().unwrap().channel_ids();
     let channel_id = channel_ids
         .get(&tmp_chan_id)
         .map(|channel_id| channel_id.0.as_hex().to_string())
@@ -994,7 +1046,7 @@ pub(crate) async fn get_channel_id(
 }
 
 pub(crate) async fn list_channels(state: Arc<AppState>) -> Result<Vec<ChannelData>, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     let mut channels = vec![];
@@ -1083,7 +1135,7 @@ pub(crate) async fn list_channels(state: Arc<AppState>) -> Result<Vec<ChannelDat
 }
 
 pub(crate) async fn list_peers(state: Arc<AppState>) -> Result<Vec<PeerData>, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     Ok(unlocked_state
@@ -1100,7 +1152,7 @@ pub(crate) async fn asset_balance(
     state: Arc<AppState>,
     asset_id: String,
 ) -> Result<AssetBalanceData, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     let contract_id =
@@ -1189,7 +1241,7 @@ pub(crate) async fn list_assets(
     state: Arc<AppState>,
     filter_asset_schemas: Vec<rgb_lib::AssetSchema>,
 ) -> Result<ListAssetsData, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     let rgb_assets = unlocked_state.rgb_list_assets(filter_asset_schemas)?;
@@ -1265,7 +1317,7 @@ pub(crate) async fn send_rgb(
     min_confirmations: u8,
     skip_sync: bool,
 ) -> Result<SendRgbData, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     if *unlocked_state.rgb_send_lock.lock().unwrap() {
@@ -1343,7 +1395,7 @@ pub(crate) async fn init(
     password: String,
     mnemonic: Option<String>,
 ) -> Result<InitData, APIError> {
-    let _unlocked_state = state.check_locked().await?;
+    let _unlocked_state = check_locked(&state).await?;
 
     check_password_strength(password.clone())?;
     let mnemonic_path = get_mnemonic_path(&state.static_state.storage_dir_path);
@@ -1365,9 +1417,9 @@ pub(crate) async fn unlock(
     request: UnlockRequest,
 ) -> Result<(), APIError> {
     tracing::info!("Unlock started");
-    match state.check_locked().await {
+    match check_locked(&state).await {
         Ok(unlocked_state) => {
-            state.update_changing_state(true);
+            update_changing_state(&state, true);
             drop(unlocked_state);
         }
         Err(e) => {
@@ -1382,7 +1434,7 @@ pub(crate) async fn unlock(
         match check_password_validity(&request.password, &state.static_state.storage_dir_path) {
             Ok(mnemonic) => mnemonic,
             Err(e) => {
-                state.update_changing_state(false);
+                update_changing_state(&state, false);
                 return Err(e);
             }
         };
@@ -1402,7 +1454,7 @@ pub(crate) async fn unlock(
         match start_ldk(state.clone(), mnemonic, unlock_request).await {
             Ok((nlbs, nuap)) => (nlbs, nuap),
             Err(e) => {
-                state.update_changing_state(false);
+                update_changing_state(&state, false);
                 return Err(e);
             }
         };
@@ -1411,8 +1463,8 @@ pub(crate) async fn unlock(
     state
         .update_unlocked_app_state(Some(new_unlocked_app_state))
         .await;
-    state.update_ldk_background_services(Some(new_ldk_background_services));
-    state.update_changing_state(false);
+    update_ldk_background_services(&state, Some(new_ldk_background_services));
+    update_changing_state(&state, false);
     tracing::info!("Unlock completed");
     Ok(())
 }
@@ -1421,7 +1473,7 @@ pub(crate) async fn connect_peer(
     state: Arc<AppState>,
     peer_pubkey_and_addr: String,
 ) -> Result<(), APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     let (peer_pubkey, peer_addr) = parse_peer_info(peer_pubkey_and_addr.to_string())?;
@@ -1447,7 +1499,7 @@ pub(crate) async fn disconnect_peer(
     state: Arc<AppState>,
     request: DisconnectPeerRequestData,
 ) -> Result<(), APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     let peer_pubkey = PublicKey::from_str(&request.peer_pubkey).map_err(|_| APIError::InvalidPubkey)?;
@@ -1483,7 +1535,7 @@ pub(crate) async fn close_channel(
     state: Arc<AppState>,
     request: CloseChannelRequestData,
 ) -> Result<(), APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     let channel_id_vec = hex_str_to_vec(&request.channel_id);
@@ -1671,7 +1723,7 @@ pub(crate) async fn create_utxos(
     state: Arc<AppState>,
     request: CreateUtxosRequestData,
 ) -> Result<(), APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     unlocked_state.rgb_create_utxos(
@@ -1690,7 +1742,7 @@ pub(crate) async fn issue_asset_nia(
     state: Arc<AppState>,
     request: IssueAssetNiaRequestData,
 ) -> Result<AssetNIA, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     if *unlocked_state.rgb_send_lock.lock().unwrap() {
@@ -1711,7 +1763,7 @@ pub(crate) async fn issue_asset_cfa(
     state: Arc<AppState>,
     request: IssueAssetCfaRequestData,
 ) -> Result<AssetCFA, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     if *unlocked_state.rgb_send_lock.lock().unwrap() {
@@ -1741,7 +1793,7 @@ pub(crate) async fn issue_asset_uda(
     state: Arc<AppState>,
     request: IssueAssetUdaRequestData,
 ) -> Result<AssetUDA, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     if *unlocked_state.rgb_send_lock.lock().unwrap() {
@@ -1778,7 +1830,7 @@ pub(crate) async fn keysend(
     state: Arc<AppState>,
     request: KeysendRequestData,
 ) -> Result<KeysendData, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     let dest_pubkey_vec = match hex_str_to_vec(&request.dest_pubkey) {
@@ -1877,7 +1929,7 @@ pub(crate) async fn send_btc(
     state: Arc<AppState>,
     request: SendBtcRequestData,
 ) -> Result<SendBtcData, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     let txid = unlocked_state.rgb_send_btc(
@@ -1894,7 +1946,7 @@ pub(crate) async fn post_asset_media(
     state: Arc<AppState>,
     file_bytes: Vec<u8>,
 ) -> Result<PostAssetMediaData, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     if file_bytes.is_empty() {
@@ -1927,7 +1979,7 @@ pub(crate) async fn rgb_invoice(
     state: Arc<AppState>,
     request: RgbInvoiceRequestData,
 ) -> Result<RgbInvoiceData, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     if *unlocked_state.rgb_send_lock.lock().unwrap() {
@@ -1969,7 +2021,7 @@ pub(crate) async fn open_channel(
     state: Arc<AppState>,
     request: OpenChannelRequestData,
 ) -> Result<OpenChannelData, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     if *unlocked_state.rgb_send_lock.lock().unwrap() {
@@ -2299,7 +2351,7 @@ pub(crate) async fn send_payment(
     state: Arc<AppState>,
     request: SendPaymentRequestData,
 ) -> Result<SendPaymentData, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     let mut status = HtlcStatus::Pending;
@@ -2485,7 +2537,7 @@ pub(crate) async fn fail_transfers(
     state: Arc<AppState>,
     request: FailTransfersRequestData,
 ) -> Result<FailTransfersData, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
     let unlocked_state_copy = unlocked_state.clone();
 
@@ -2506,7 +2558,7 @@ pub(crate) async fn refresh_transfers(
     state: Arc<AppState>,
     request: RefreshTransfersRequestData,
 ) -> Result<(), APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
     let unlocked_state_copy = unlocked_state.clone();
 
@@ -2520,7 +2572,7 @@ pub(crate) async fn maker_execute(
     state: Arc<AppState>,
     request: MakerExecuteRequestData,
 ) -> Result<(), APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     let swapstring = SwapString::from_str(&request.swapstring)
@@ -2699,7 +2751,7 @@ pub(crate) async fn maker_init(
     state: Arc<AppState>,
     request: MakerInitRequestData,
 ) -> Result<MakerInitData, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     let from_asset = match &request.from_asset {
@@ -2762,7 +2814,7 @@ pub(crate) async fn taker(
     state: Arc<AppState>,
     request: TakerRequestData,
 ) -> Result<(), APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
     let swapstring = SwapString::from_str(&request.swapstring)
         .map_err(|e| APIError::InvalidSwapString(request.swapstring.clone(), e.to_string()))?;
@@ -2791,7 +2843,7 @@ pub(crate) async fn send_onion_message(
     state: Arc<AppState>,
     request: SendOnionMessageRequestData,
 ) -> Result<(), APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     if request.node_ids.is_empty() {
@@ -2838,7 +2890,7 @@ pub(crate) async fn send_onion_message(
 }
 
 pub(crate) async fn sync(state: Arc<AppState>) -> Result<(), APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
     unlocked_state.rgb_sync()?;
     Ok(())
@@ -2896,7 +2948,7 @@ pub(crate) async fn invoice_status(
     state: Arc<AppState>,
     invoice: String,
 ) -> Result<InvoiceStatusData, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     let invoice =
@@ -2929,7 +2981,7 @@ pub(crate) async fn create_ln_invoice(
     asset_id: Option<String>,
     asset_amount: Option<u64>,
 ) -> Result<LnInvoiceData, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     let contract_id = if let Some(asset_id) = asset_id {
@@ -2983,7 +3035,7 @@ pub(crate) async fn create_ln_invoice(
 }
 
 pub(crate) async fn list_payments(state: Arc<AppState>) -> Result<Vec<PaymentData>, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     // Keep inbound invoice status consistent with expiry when payments are read.
@@ -3048,7 +3100,7 @@ pub(crate) async fn get_payment(
     state: Arc<AppState>,
     payment_hash_hex: String,
 ) -> Result<PaymentData, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     let payment_hash_vec = hex_str_to_vec(&payment_hash_hex);
@@ -3159,7 +3211,7 @@ pub(crate) async fn get_swap(
     payment_hash_hex: String,
     taker: bool,
 ) -> Result<SwapViewData, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     let payment_hash_vec = hex_str_to_vec(&payment_hash_hex);
@@ -3184,7 +3236,7 @@ pub(crate) async fn get_swap(
 }
 
 pub(crate) async fn list_swaps(state: Arc<AppState>) -> Result<SwapListData, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     let taker_swaps = unlocked_state.taker_swaps();
@@ -3206,7 +3258,7 @@ pub(crate) async fn list_transactions(
     state: Arc<AppState>,
     skip_sync: bool,
 ) -> Result<Vec<TransactionData>, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     let mut transactions = vec![];
@@ -3236,7 +3288,7 @@ pub(crate) async fn list_transfers(
     state: Arc<AppState>,
     asset_id: String,
 ) -> Result<Vec<TransferData>, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     let mut transfers = vec![];
@@ -3287,7 +3339,7 @@ pub(crate) async fn list_unspents(
     state: Arc<AppState>,
     skip_sync: bool,
 ) -> Result<Vec<UnspentData>, APIError> {
-    let guard = state.check_unlocked().await?;
+    let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     let mut unspents = vec![];

@@ -27,7 +27,7 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
     time::{Duration, SystemTime},
 };
-use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
+use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::ldk::{ChannelIdsMap, Router, VirtualChannelDraftStore, VirtualChannelSessionStore};
@@ -63,70 +63,6 @@ pub(crate) struct AppState {
     pub(crate) changing_state: Mutex<bool>,
     pub(crate) root_public_key: Option<biscuit_auth::PublicKey>,
     pub(crate) revoked_tokens: Arc<Mutex<HashSet<Vec<u8>>>>,
-}
-
-impl AppState {
-    pub(crate) fn get_changing_state(&self) -> MutexGuard<'_, bool> {
-        self.changing_state.lock().unwrap()
-    }
-
-    pub(crate) fn get_ldk_background_services(
-        &self,
-    ) -> MutexGuard<'_, Option<LdkBackgroundServices>> {
-        self.ldk_background_services.lock().unwrap()
-    }
-
-    pub(crate) async fn get_unlocked_app_state(
-        &self,
-    ) -> TokioMutexGuard<'_, Option<Arc<UnlockedAppState>>> {
-        self.unlocked_app_state.lock().await
-    }
-
-    pub(crate) fn check_changing_state(&self) -> Result<(), APIError> {
-        if *self.get_changing_state() {
-            return Err(APIError::ChangingState);
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn check_locked(
-        &self,
-    ) -> Result<TokioMutexGuard<'_, Option<Arc<UnlockedAppState>>>, APIError> {
-        self.check_changing_state()?;
-        let unlocked_app_state = self.get_unlocked_app_state().await;
-        if unlocked_app_state.is_some() {
-            Err(APIError::UnlockedNode)
-        } else {
-            Ok(unlocked_app_state)
-        }
-    }
-
-    pub(crate) async fn check_unlocked(
-        &self,
-    ) -> Result<TokioMutexGuard<'_, Option<Arc<UnlockedAppState>>>, APIError> {
-        self.check_changing_state()?;
-        let unlocked_app_state = self.get_unlocked_app_state().await;
-        if unlocked_app_state.is_none() {
-            Err(APIError::LockedNode)
-        } else {
-            Ok(unlocked_app_state)
-        }
-    }
-
-    pub(crate) fn update_changing_state(&self, updated: bool) {
-        let mut changing_state = self.get_changing_state();
-        *changing_state = updated;
-    }
-
-    pub(crate) fn update_ldk_background_services(&self, updated: Option<LdkBackgroundServices>) {
-        let mut ldk_background_services = self.get_ldk_background_services();
-        *ldk_background_services = updated;
-    }
-
-    pub(crate) async fn update_unlocked_app_state(&self, updated: Option<Arc<UnlockedAppState>>) {
-        let mut unlocked_app_state = self.get_unlocked_app_state().await;
-        *unlocked_app_state = updated;
-    }
 }
 
 pub(crate) struct StaticState {
