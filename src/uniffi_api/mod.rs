@@ -237,7 +237,7 @@ impl SdkNode {
         let state = self.handle.app_state();
         block_on_sdk(sdk::unlock(
             state,
-            sdk::UnlockRequestData {
+            sdk::UnlockRequest {
                 password: request.password,
                 bitcoind_rpc_username: request.bitcoind_rpc_username,
                 bitcoind_rpc_password: request.bitcoind_rpc_password,

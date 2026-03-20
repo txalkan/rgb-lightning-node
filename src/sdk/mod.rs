@@ -3,8 +3,6 @@
 
 use crate::core_types::{
     FEE_RATE, MIN_CHANNEL_CONFIRMATIONS,
-    HtlcStatus as CoreHtlcStatus, SwapStatus as CoreSwapStatus,
-    UnlockRequestData as CoreUnlockRequestData,
 };
 use crate::disk::{self, CHANNEL_PEER_DATA};
 use crate::error::APIError;
@@ -262,7 +260,7 @@ pub(crate) struct InitData {
     pub(crate) mnemonic: String,
 }
 
-pub(crate) struct UnlockRequestData {
+pub(crate) struct UnlockRequest {
     pub(crate) password: String,
     pub(crate) bitcoind_rpc_username: String,
     pub(crate) bitcoind_rpc_password: String,
@@ -559,7 +557,7 @@ pub(crate) enum ChannelStatus {
     Closing,
 }
 
-pub(crate) type HtlcStatus = CoreHtlcStatus;
+pub(crate) type HtlcStatus = crate::core_types::HTLCStatus;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum InvoiceStatus {
@@ -569,7 +567,7 @@ pub(crate) enum InvoiceStatus {
     Expired,
 }
 
-pub(crate) type SwapStatus = CoreSwapStatus;
+pub(crate) type SwapStatus = crate::core_types::SwapStatus;
 
 #[derive(Debug)]
 pub(crate) struct BlockTime {
@@ -1364,7 +1362,7 @@ pub(crate) async fn init(
 
 pub(crate) async fn unlock(
     state: Arc<AppState>,
-    request: UnlockRequestData,
+    request: UnlockRequest,
 ) -> Result<(), APIError> {
     tracing::info!("Unlock started");
     match state.check_locked().await {
@@ -1390,7 +1388,7 @@ pub(crate) async fn unlock(
         };
 
     tracing::debug!("Starting LDK...");
-    let unlock_request = CoreUnlockRequestData {
+    let unlock_request = crate::core_types::UnlockRequest {
         bitcoind_rpc_username: request.bitcoind_rpc_username,
         bitcoind_rpc_password: request.bitcoind_rpc_password,
         bitcoind_rpc_host: request.bitcoind_rpc_host,

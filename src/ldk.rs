@@ -97,8 +97,8 @@ use tokio::task::JoinHandle;
 
 use crate::bitcoind::BitcoindClient;
 use crate::core_types::{
-    HtlcStatus as HTLCStatus, SwapStatus, UnlockRequestData as UnlockRequest, DUST_LIMIT_MSAT,
-    FEE_RATE, MIN_CHANNEL_CONFIRMATIONS,
+    HTLCStatus, SwapStatus, UnlockRequest, DUST_LIMIT_MSAT, FEE_RATE,
+    MIN_CHANNEL_CONFIRMATIONS,
 };
 use crate::disk::{
     self, FilesystemLogger, CHANNEL_IDS_FNAME, CHANNEL_PEER_DATA, INBOUND_PAYMENTS_FNAME,

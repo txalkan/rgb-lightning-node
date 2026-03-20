@@ -7,24 +7,24 @@ pub(crate) const MIN_CHANNEL_CONFIRMATIONS: u8 = 6;
 pub(crate) const DUST_LIMIT_MSAT: u64 = 546000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
-pub(crate) enum HtlcStatus {
+pub(crate) enum HTLCStatus {
     Pending,
     Succeeded,
     Failed,
 }
 
-impl std::fmt::Display for HtlcStatus {
+impl std::fmt::Display for HTLCStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let label = match self {
-            HtlcStatus::Pending => "Pending",
-            HtlcStatus::Succeeded => "Succeeded",
-            HtlcStatus::Failed => "Failed",
+            HTLCStatus::Pending => "Pending",
+            HTLCStatus::Succeeded => "Succeeded",
+            HTLCStatus::Failed => "Failed",
         };
         write!(f, "{label}")
     }
 }
 
-impl_writeable_tlv_based_enum!(HtlcStatus,
+impl_writeable_tlv_based_enum!(HTLCStatus,
     (0, Pending) => {},
     (1, Succeeded) => {},
     (2, Failed) => {},
@@ -48,7 +48,7 @@ impl_writeable_tlv_based_enum!(SwapStatus,
 );
 
 #[derive(Clone, Debug)]
-pub(crate) struct UnlockRequestData {
+pub(crate) struct UnlockRequest {
     pub(crate) bitcoind_rpc_username: String,
     pub(crate) bitcoind_rpc_password: String,
     pub(crate) bitcoind_rpc_host: String,
