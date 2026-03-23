@@ -320,10 +320,11 @@ async fn virtual_trusted_no_broadcast_survives_funding_timeout_and_routes_btc_an
     fund_and_create_utxos(host_node_address, None).await;
     let issued_asset_id = issue_asset_nia(host_node_address).await.asset_id;
     let funded_rgb_amount = 200;
+    let client_a_push_msat = 10_000_000;
     let host_node_onchain_spendable_before_open =
         asset_balance_spendable(host_node_address, &issued_asset_id).await;
 
-    let (client_node_address, _client_node_password) = start_node_with_virtual_options(
+    let (client_a_node_address, _client_node_password) = start_node_with_virtual_options(
         &format!("{test_storage_root}client_node"),
         client_node_peer_port,
         false,
@@ -332,13 +333,13 @@ async fn virtual_trusted_no_broadcast_survives_funding_timeout_and_routes_btc_an
     )
     .await;
 
-    let client_node_info = node_info(client_node_address).await;
+    let client_node_info = node_info(client_a_node_address).await;
     let opened_virtual_channel = open_virtual_channel(
         host_node_address,
         &client_node_info.pubkey,
         Some(client_node_peer_port),
         Some(100_000),
-        Some(0),
+        Some(client_a_push_msat),
         Some(funded_rgb_amount),
         Some(&issued_asset_id),
     )
@@ -365,12 +366,12 @@ async fn virtual_trusted_no_broadcast_survives_funding_timeout_and_routes_btc_an
     for _ in 0..14 {
         mine_blocks_and_wait_for_sync(
             host_node_address,
-            client_node_address,
+            client_a_node_address,
             VIRTUAL_TIMEOUT_BOUNDARY_CHUNK_SIZE,
         )
         .await;
     }
-    mine_blocks_and_wait_for_sync(host_node_address, client_node_address, 1).await;
+    mine_blocks_and_wait_for_sync(host_node_address, client_a_node_address, 1).await;
 
     let host_node_channels = list_channels(host_node_address).await;
     let virtual_channel_after_timeout = host_node_channels
@@ -402,14 +403,14 @@ async fn virtual_trusted_no_broadcast_survives_funding_timeout_and_routes_btc_an
     ));
     assert!(expected_virtual_marker_path.exists());
 
-    let btc_ln_invoice = ln_invoice(client_node_address, Some(3_000_000), None, None, 3600)
+    let btc_ln_invoice = ln_invoice(client_a_node_address, Some(3_000_000), None, None, 3600)
         .await
         .invoice;
     send_payment_with_status(host_node_address, btc_ln_invoice, HTLCStatus::Succeeded).await;
 
     let host_to_client_a_rgb_payment_amount = 50;
-    let rgb_ln_invoice = ln_invoice(
-        client_node_address,
+    let rgb_ln_invoice_a = ln_invoice(
+        client_a_node_address,
         Some(3_000_000),
         Some(&issued_asset_id),
         Some(host_to_client_a_rgb_payment_amount),
@@ -417,7 +418,7 @@ async fn virtual_trusted_no_broadcast_survives_funding_timeout_and_routes_btc_an
     )
     .await
     .invoice;
-    send_payment_with_status(host_node_address, rgb_ln_invoice, HTLCStatus::Succeeded).await;
+    send_payment_with_status(host_node_address, rgb_ln_invoice_a, HTLCStatus::Succeeded).await;
 
     wait_for_ln_balance(
         host_node_address,
@@ -426,43 +427,40 @@ async fn virtual_trusted_no_broadcast_survives_funding_timeout_and_routes_btc_an
     )
     .await;
     wait_for_ln_balance(
-        client_node_address,
+        client_a_node_address,
         &issued_asset_id,
         host_to_client_a_rgb_payment_amount,
     )
     .await;
 
-    let client_to_host_rgb_payment_amount = 5;
-    let client_a_to_host_rgb_invoice = ln_invoice(
+    let client_a_to_host_rgb_payment_amount = 5;
+    let client_a_to_host_invoice = ln_invoice(
         host_node_address,
         Some(3_000_000),
         Some(&issued_asset_id),
-        Some(client_to_host_rgb_payment_amount),
+        Some(client_a_to_host_rgb_payment_amount),
         3600,
     )
     .await
     .invoice;
-    let client_a_to_host_rgb_payment =
-        send_payment_raw(client_node_address, client_a_to_host_rgb_invoice).await;
-    wait_for_ln_payment(
-        client_node_address,
-        &client_a_to_host_rgb_payment
-            .payment_hash
-            .expect("client A -> host RGB payment hash"),
+
+    send_payment_with_status(
+        client_a_node_address,
+        client_a_to_host_invoice,
         HTLCStatus::Succeeded,
     )
     .await;
-
     wait_for_ln_balance(
         host_node_address,
         &issued_asset_id,
-        funded_rgb_amount - host_to_client_a_rgb_payment_amount + client_to_host_rgb_payment_amount,
+        funded_rgb_amount - host_to_client_a_rgb_payment_amount
+            + client_a_to_host_rgb_payment_amount,
     )
     .await;
     wait_for_ln_balance(
-        client_node_address,
+        client_a_node_address,
         &issued_asset_id,
-        host_to_client_a_rgb_payment_amount - client_to_host_rgb_payment_amount,
+        host_to_client_a_rgb_payment_amount - client_a_to_host_rgb_payment_amount,
     )
     .await;
 
@@ -473,7 +471,6 @@ async fn virtual_trusted_no_broadcast_survives_funding_timeout_and_routes_btc_an
         host_node_onchain_spendable_after_open
     );
 
-    /* Deferred to Phase 1:
     let client_b_node_peer_port = next_peer_port();
     let (client_b_node_address, _client_b_node_password) = start_node_with_virtual_options(
         &format!("{test_storage_root}client_b_node"),
@@ -514,63 +511,73 @@ async fn virtual_trusted_no_broadcast_survives_funding_timeout_and_routes_btc_an
     ));
     assert!(expected_virtual_marker_path_b.exists());
 
-    let client_a_to_client_b_btc_payment_msat = 1_500_000;
+    let client_a_to_b_btc_payment_msat = 4_000_000;
     let btc_ln_invoice_b = ln_invoice(
         client_b_node_address,
-        Some(client_a_to_client_b_btc_payment_msat),
+        Some(client_a_to_b_btc_payment_msat),
         None,
         None,
         3600,
     )
     .await
     .invoice;
-    let client_a_to_client_b_btc_payment =
-        send_payment_raw(client_node_address, btc_ln_invoice_b).await;
-    wait_for_ln_payment(
-        client_node_address,
-        &client_a_to_client_b_btc_payment
-            .payment_hash
-            .expect("client A -> client B BTC payment hash"),
+    let decoded_btc_invoice_b = Bolt11Invoice::from_str(&btc_ln_invoice_b).unwrap();
+    assert_eq!(decoded_btc_invoice_b.route_hints().len(), 1);
+    assert_eq!(decoded_btc_invoice_b.route_hints()[0].0.len(), 1);
+    assert_eq!(
+        decoded_btc_invoice_b.route_hints()[0].0[0]
+            .src_node_id
+            .to_string(),
+        host_node_info.pubkey
+    );
+
+    send_payment_with_status(
+        client_a_node_address,
+        btc_ln_invoice_b,
         HTLCStatus::Succeeded,
     )
     .await;
 
-    let client_a_to_client_b_rgb_payment_amount = 10;
+    let client_a_to_b_rgb_payment_amount = 10;
     let rgb_ln_invoice_b = ln_invoice(
         client_b_node_address,
         Some(3_000_000),
         Some(&issued_asset_id),
-        Some(client_a_to_client_b_rgb_payment_amount),
+        Some(client_a_to_b_rgb_payment_amount),
         3600,
     )
     .await
     .invoice;
-    let client_a_to_client_b_rgb_payment =
-        send_payment_raw(client_node_address, rgb_ln_invoice_b).await;
-    wait_for_ln_payment(
-        client_node_address,
-        &client_a_to_client_b_rgb_payment
-            .payment_hash
-            .expect("client A -> client B RGB payment hash"),
+    let decoded_rgb_invoice_b = Bolt11Invoice::from_str(&rgb_ln_invoice_b).unwrap();
+    assert_eq!(decoded_rgb_invoice_b.route_hints().len(), 1);
+    assert_eq!(decoded_rgb_invoice_b.route_hints()[0].0.len(), 1);
+    assert_eq!(
+        decoded_rgb_invoice_b.route_hints()[0].0[0]
+            .src_node_id
+            .to_string(),
+        host_node_info.pubkey
+    );
+
+    send_payment_with_status(
+        client_a_node_address,
+        rgb_ln_invoice_b,
         HTLCStatus::Succeeded,
     )
     .await;
-
     wait_for_ln_balance(
-        client_node_address,
+        client_a_node_address,
         &issued_asset_id,
         host_to_client_a_rgb_payment_amount
-            - client_to_host_rgb_payment_amount
-            - client_a_to_client_b_rgb_payment_amount,
+            - client_a_to_host_rgb_payment_amount
+            - client_a_to_b_rgb_payment_amount,
     )
     .await;
     wait_for_ln_balance(
         client_b_node_address,
         &issued_asset_id,
-        client_a_to_client_b_rgb_payment_amount,
+        client_a_to_b_rgb_payment_amount,
     )
     .await;
-    */
 }
 
 #[tokio::test]
