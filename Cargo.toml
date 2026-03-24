@@ -86,7 +86,7 @@ level = "allow"
 inherits = "release"
 debug = 1
 
-[[est]]
+[[test]]
 name = "lib_core"
 path = "tests/lib_core/lib_core.rs"
 required-features = ["uniffi", "test-utils"]

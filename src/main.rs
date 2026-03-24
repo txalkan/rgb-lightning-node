@@ -5,6 +5,8 @@ mod bitcoind;
 mod core_types;
 mod disk;
 mod error;
+#[cfg(test)]
+mod fee_mock;
 mod ldk;
 mod rgb;
 mod routes;

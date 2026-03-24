@@ -11,6 +11,8 @@ mod disk;
 mod error;
 #[cfg(feature = "uniffi")]
 pub mod ffi;
+#[cfg(test)]
+mod fee_mock;
 mod ldk;
 mod node;
 mod rgb;
@@ -21,12 +23,6 @@ pub mod test_utils;
 #[cfg(feature = "uniffi")]
 mod uniffi_api;
 mod utils;
-
-#[cfg(test)]
-mod routes;
-
-#[cfg(test)]
-mod test;
 
 pub use node::{NodeConfig, NodeHandle};
 
