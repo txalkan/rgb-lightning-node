@@ -2,9 +2,9 @@ name: UniFFI Artifacts
 
 on:
   push:
-    branches: ["master"]
+    branches: ["main", "dev", "stage"]
   pull_request:
-    branches: ["master"]
+    branches: ["main", "dev", "stage"]
   workflow_dispatch:
 
 env:
@@ -27,12 +27,7 @@ jobs:
           toolchain: 1.85.1
 
       - name: Run library-only test suite
-        run: |
-          cargo test --features "uniffi,test-utils" \
-            --test lib_core_uniffi_state \
-            --test lib_core_type_converters \
-            --test lib_core_error_mapping \
-            --test lib_core_node_handle_invariants
+        run: cargo test --features "uniffi,test-utils" --test lib_core
 
   kotlin-jvm:
     name: Kotlin JVM (Linux host)

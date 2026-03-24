@@ -85,8 +85,9 @@ use crate::utils::{
 use crate::{
     backup::{do_backup, restore_backup},
     core_types::{
-        HTLCStatus, SwapStatus, UnlockRequest as CoreUnlockRequest, DUST_LIMIT_MSAT,
-        FEE_RATE, MIN_CHANNEL_CONFIRMATIONS, UTXO_SIZE_SAT,
+        HTLCStatus, SwapStatus, UnlockRequest as CoreUnlockRequest,
+        DEFAULT_FINAL_CLTV_EXPIRY_DELTA, DUST_LIMIT_MSAT, FEE_RATE, HTLC_MIN_MSAT,
+        MAX_SWAP_FEE_MSAT, MIN_CHANNEL_CONFIRMATIONS, UTXO_SIZE_SAT,
     },
     rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional},
 };
@@ -101,17 +102,12 @@ use crate::{
 
 const UTXO_NUM: u8 = 4;
 
-pub(crate) const HTLC_MIN_MSAT: u64 = 3000000;
-pub(crate) const MAX_SWAP_FEE_MSAT: u64 = HTLC_MIN_MSAT;
-
 const OPENRGBCHANNEL_MIN_SAT: u64 = HTLC_MIN_MSAT / 1000 * 10 + 10;
 const OPENCHANNEL_MIN_SAT: u64 = 5506;
 const OPENCHANNEL_MAX_SAT: u64 = 16777215;
 const OPENCHANNEL_MIN_RGB_AMT: u64 = 1;
 
 const INVOICE_MIN_MSAT: u64 = HTLC_MIN_MSAT;
-
-pub(crate) const DEFAULT_FINAL_CLTV_EXPIRY_DELTA: u32 = 14;
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct AddressResponse {
@@ -1168,6 +1164,21 @@ pub(crate) struct UnlockRequest {
     pub(crate) proxy_endpoint: Option<String>,
     pub(crate) announce_addresses: Vec<String>,
     pub(crate) announce_alias: Option<String>,
+}
+
+impl From<UnlockRequest> for CoreUnlockRequest {
+    fn from(value: UnlockRequest) -> Self {
+        Self {
+            bitcoind_rpc_username: value.bitcoind_rpc_username,
+            bitcoind_rpc_password: value.bitcoind_rpc_password,
+            bitcoind_rpc_host: value.bitcoind_rpc_host,
+            bitcoind_rpc_port: value.bitcoind_rpc_port,
+            indexer_url: value.indexer_url,
+            proxy_endpoint: value.proxy_endpoint,
+            announce_addresses: value.announce_addresses,
+            announce_alias: value.announce_alias,
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -3789,18 +3800,8 @@ pub(crate) async fn unlock(
         };
 
         tracing::debug!("Starting LDK...");
-        let unlock_request = CoreUnlockRequest {
-            bitcoind_rpc_username: payload.bitcoind_rpc_username,
-            bitcoind_rpc_password: payload.bitcoind_rpc_password,
-            bitcoind_rpc_host: payload.bitcoind_rpc_host,
-            bitcoind_rpc_port: payload.bitcoind_rpc_port,
-            indexer_url: payload.indexer_url,
-            proxy_endpoint: payload.proxy_endpoint,
-            announce_addresses: payload.announce_addresses,
-            announce_alias: payload.announce_alias,
-        };
         let (new_ldk_background_services, new_unlocked_app_state) =
-            match start_ldk(state.clone(), mnemonic, unlock_request).await {
+            match start_ldk(state.clone(), mnemonic, payload.into()).await {
                 Ok((nlbs, nuap)) => (nlbs, nuap),
                 Err(e) => {
                     state.update_changing_state(false);
