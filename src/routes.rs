@@ -10,7 +10,6 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Network, ScriptBuf};
 use hex::DisplayHex;
-use lightning::chain::channelmonitor::Balance;
 use lightning::ln::{channelmanager::OptionalOfferPaymentParams, types::ChannelId};
 use lightning::offers::offer::{self, Offer};
 use lightning::onion_message::messenger::Destination;
@@ -22,6 +21,7 @@ use lightning::routing::gossip::RoutingFees;
 use lightning::routing::router::{Path as LnPath, Route, RouteHint, RouteHintHop};
 use lightning::sign::EntropySource;
 use lightning::util::config::ChannelConfig;
+use lightning::chain::channelmonitor::Balance;
 use lightning::{
     ln::channel_state::ChannelShutdownState, onion_message::messenger::MessageSendInstructions,
 };
@@ -72,14 +72,15 @@ use std::{
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWriteExt, BufReader},
+    sync::MutexGuard as TokioMutexGuard,
 };
 
-use crate::ldk::{start_ldk, stop_ldk};
+use crate::ldk::{start_ldk, stop_ldk, LdkBackgroundServices};
 use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{
     check_already_initialized, check_channel_id, check_password_strength, check_password_validity,
     encrypt_and_save_mnemonic, get_max_local_rgb_amount, get_mnemonic_path, get_route, hex_str,
-    hex_str_to_compressed_pubkey, hex_str_to_vec, UserOnionMessageContents,
+    hex_str_to_compressed_pubkey, hex_str_to_vec, UnlockedAppState, UserOnionMessageContents,
 };
 use crate::{
     backup::{do_backup, restore_backup},
@@ -111,78 +112,6 @@ const OPENCHANNEL_MIN_RGB_AMT: u64 = 1;
 const INVOICE_MIN_MSAT: u64 = HTLC_MIN_MSAT;
 
 pub(crate) const DEFAULT_FINAL_CLTV_EXPIRY_DELTA: u32 = 14;
-
-impl AppState {
-    pub(crate) fn get_changing_state(&self) -> std::sync::MutexGuard<'_, bool> {
-        self.changing_state.lock().unwrap()
-    }
-
-    pub(crate) fn get_ldk_background_services(
-        &self,
-    ) -> std::sync::MutexGuard<'_, Option<crate::ldk::LdkBackgroundServices>> {
-        self.ldk_background_services.lock().unwrap()
-    }
-
-    pub(crate) async fn get_unlocked_app_state(
-        &self,
-    ) -> tokio::sync::MutexGuard<'_, Option<Arc<crate::utils::UnlockedAppState>>> {
-        self.unlocked_app_state.lock().await
-    }
-
-    pub(crate) fn check_changing_state(&self) -> Result<(), APIError> {
-        if *self.get_changing_state() {
-            return Err(APIError::ChangingState);
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn check_locked(
-        &self,
-    ) -> Result<tokio::sync::MutexGuard<'_, Option<Arc<crate::utils::UnlockedAppState>>>, APIError>
-    {
-        self.check_changing_state()?;
-        let unlocked_app_state = self.get_unlocked_app_state().await;
-        if unlocked_app_state.is_some() {
-            Err(APIError::UnlockedNode)
-        } else {
-            Ok(unlocked_app_state)
-        }
-    }
-
-    pub(crate) async fn check_unlocked(
-        &self,
-    ) -> Result<tokio::sync::MutexGuard<'_, Option<Arc<crate::utils::UnlockedAppState>>>, APIError>
-    {
-        self.check_changing_state()?;
-        let unlocked_app_state = self.get_unlocked_app_state().await;
-        if unlocked_app_state.is_none() {
-            Err(APIError::LockedNode)
-        } else {
-            Ok(unlocked_app_state)
-        }
-    }
-
-    pub(crate) fn update_changing_state(&self, updated: bool) {
-        let mut changing_state = self.get_changing_state();
-        *changing_state = updated;
-    }
-
-    pub(crate) fn update_ldk_background_services(
-        &self,
-        updated: Option<crate::ldk::LdkBackgroundServices>,
-    ) {
-        let mut ldk_background_services = self.get_ldk_background_services();
-        *ldk_background_services = updated;
-    }
-
-    pub(crate) async fn update_unlocked_app_state(
-        &self,
-        updated: Option<Arc<crate::utils::UnlockedAppState>>,
-    ) {
-        let mut unlocked_app_state = self.get_unlocked_app_state().await;
-        *unlocked_app_state = updated;
-    }
-}
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct AddressResponse {
@@ -1266,6 +1195,54 @@ impl From<WitnessData> for RgbLibWitnessData {
             amount_sat: value.amount_sat,
             blinding: value.blinding,
         }
+    }
+}
+
+impl AppState {
+    fn check_changing_state(&self) -> Result<(), APIError> {
+        if *self.get_changing_state() {
+            return Err(APIError::ChangingState);
+        }
+        Ok(())
+    }
+
+    async fn check_locked(
+        &self,
+    ) -> Result<TokioMutexGuard<'_, Option<Arc<UnlockedAppState>>>, APIError> {
+        self.check_changing_state()?;
+        let unlocked_app_state = self.get_unlocked_app_state().await;
+        if unlocked_app_state.is_some() {
+            Err(APIError::UnlockedNode)
+        } else {
+            Ok(unlocked_app_state)
+        }
+    }
+
+    async fn check_unlocked(
+        &self,
+    ) -> Result<TokioMutexGuard<'_, Option<Arc<UnlockedAppState>>>, APIError> {
+        self.check_changing_state()?;
+        let unlocked_app_state = self.get_unlocked_app_state().await;
+        if unlocked_app_state.is_none() {
+            Err(APIError::LockedNode)
+        } else {
+            Ok(unlocked_app_state)
+        }
+    }
+
+    fn update_changing_state(&self, updated: bool) {
+        let mut changing_state = self.get_changing_state();
+        *changing_state = updated;
+    }
+
+    fn update_ldk_background_services(&self, updated: Option<LdkBackgroundServices>) {
+        let mut ldk_background_services = self.get_ldk_background_services();
+        *ldk_background_services = updated;
+    }
+
+    async fn update_unlocked_app_state(&self, updated: Option<Arc<UnlockedAppState>>) {
+        let mut unlocked_app_state = self.get_unlocked_app_state().await;
+        *unlocked_app_state = updated;
     }
 }
 
@@ -2814,7 +2791,8 @@ pub(crate) async fn maker_execute(
         match err {
             None => Ok(Json(EmptyResponse {})),
             Some(e) => {
-                unlocked_state.update_maker_swap_status(&swapstring.payment_hash, SwapStatus::Failed);
+                unlocked_state
+                    .update_maker_swap_status(&swapstring.payment_hash, SwapStatus::Failed);
                 Err(APIError::FailedPayment(format!("{e:?}")))
             }
         }

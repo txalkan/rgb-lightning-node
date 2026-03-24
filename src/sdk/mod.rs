@@ -883,8 +883,7 @@ pub(crate) async fn estimate_fee(
     state: Arc<AppState>,
     blocks: u16,
 ) -> Result<EstimateFeeData, APIError> {
-    let fee_rate = state
-        .check_unlocked()
+    let fee_rate = check_unlocked(&state)
         .await?
         .clone()
         .unwrap()
@@ -1182,8 +1181,7 @@ pub(crate) async fn asset_metadata(
 ) -> Result<AssetMetadataData, APIError> {
     let contract_id =
         ContractId::from_str(&asset_id).map_err(|_| APIError::InvalidAssetID(asset_id))?;
-    let metadata = state
-        .check_unlocked()
+    let metadata = check_unlocked(&state)
         .await?
         .clone()
         .unwrap()
@@ -1207,8 +1205,7 @@ pub(crate) async fn get_asset_media(
     state: Arc<AppState>,
     digest: String,
 ) -> Result<AssetMediaData, APIError> {
-    let file_path = state
-        .check_unlocked()
+    let file_path = check_unlocked(&state)
         .await?
         .clone()
         .unwrap()
@@ -1450,9 +1447,7 @@ pub(crate) async fn unlock(
         };
     tracing::debug!("LDK started");
 
-    state
-        .update_unlocked_app_state(Some(new_unlocked_app_state))
-        .await;
+    update_unlocked_app_state(&state, Some(new_unlocked_app_state)).await;
     update_ldk_background_services(&state, Some(new_ldk_background_services));
     update_changing_state(&state, false);
     tracing::info!("Unlock completed");
