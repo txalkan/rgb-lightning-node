@@ -12,6 +12,7 @@ mod error;
 #[cfg(feature = "uniffi")]
 pub mod ffi;
 #[cfg(test)]
+#[path = "test/fee_mock.rs"]
 mod fee_mock;
 mod ldk;
 mod node;

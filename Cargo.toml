@@ -88,5 +88,5 @@ debug = 1
 
 [[test]]
 name = "lib_core"
-path = "tests/lib_core/lib_core.rs"
+path = "src/test/lib_core.rs"
 required-features = ["uniffi", "test-utils"]
