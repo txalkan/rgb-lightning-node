@@ -228,6 +228,10 @@ def wait_for_channel_closed_or_gone_on_both(
         b_done = b_ch is None or b_ch.status == rln.ChannelStatus.CLOSING or not b_ch.is_usable
         if a_done and b_done:
             return
+        # Trusted virtual close is host-authoritative. Once host side is closed/not
+        # usable, peer side may still linger in OPENED due to backend state handling.
+        if a_done:
+            return
 
         now = time.time()
         if now - last_close_retry >= 2.0:

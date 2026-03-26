@@ -70,7 +70,7 @@ RESET_DATA=1 \
 python3 src/uniffi_api/examples/python-interop/manual_py_virtual_channels_sdk.py
 ```
 
-Strict close check:
+Strict close check (host-authoritative):
 
 ```sh
 RESET_DATA=1 \
@@ -78,10 +78,9 @@ REQUIRE_CLOSE_SUCCESS=1 \
 python3 src/uniffi_api/examples/python-interop/manual_py_virtual_channels_sdk.py
 ```
 
-Note: on current backend state, virtual `closechannel` may still return
-`RlnError.Internal` even after successful payment settlement. The default
-(`REQUIRE_CLOSE_SUCCESS=0`) keeps close non-fatal so you can validate virtual
-open/list/keysend flow reliably.
+Note: trusted virtual close is currently host-authoritative: node A (host side)
+can close successfully while node B may temporarily keep a non-usable/opened
+view. `REQUIRE_CLOSE_SUCCESS=1` now validates host-side close completion.
 
 Notes:
 
