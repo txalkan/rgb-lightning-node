@@ -10,7 +10,6 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Network, ScriptBuf};
 use hex::DisplayHex;
-use lightning::chain::channelmonitor::Balance;
 use lightning::ln::{channelmanager::OptionalOfferPaymentParams, types::ChannelId};
 use lightning::offers::offer::{self, Offer};
 use lightning::onion_message::messenger::Destination;
@@ -22,6 +21,7 @@ use lightning::routing::gossip::RoutingFees;
 use lightning::routing::router::{Path as LnPath, Route, RouteHint, RouteHintHop};
 use lightning::sign::EntropySource;
 use lightning::util::config::ChannelConfig;
+use lightning::chain::channelmonitor::Balance;
 use lightning::{
     ln::channel_state::ChannelShutdownState, onion_message::messenger::MessageSendInstructions,
 };
@@ -72,23 +72,25 @@ use std::{
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWriteExt, BufReader},
+    sync::MutexGuard as TokioMutexGuard,
 };
 
 use crate::ldk::{
-    _clear_rgb_payment_raw_pending_markers, start_ldk, stop_ldk,
+    _clear_rgb_payment_raw_pending_markers, start_ldk, stop_ldk, LdkBackgroundServices,
     VirtualChannelDraft, VirtualChannelSessionStatus,
 };
 use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{
     check_already_initialized, check_channel_id, check_password_strength, check_password_validity,
     encrypt_and_save_mnemonic, get_max_local_rgb_amount, get_mnemonic_path, get_route, hex_str,
-    hex_str_to_compressed_pubkey, hex_str_to_vec, UserOnionMessageContents,
+    hex_str_to_compressed_pubkey, hex_str_to_vec, UnlockedAppState, UserOnionMessageContents,
 };
 use crate::{
     backup::{do_backup, restore_backup},
     core_types::{
-        HTLCStatus, SwapStatus, UnlockRequest as CoreUnlockRequest, DUST_LIMIT_MSAT,
-        FEE_RATE, MIN_CHANNEL_CONFIRMATIONS, UTXO_SIZE_SAT,
+        HTLCStatus, HTLC_MIN_MSAT, SwapStatus, UnlockRequest as CoreUnlockRequest,
+        DEFAULT_FINAL_CLTV_EXPIRY_DELTA, DUST_LIMIT_MSAT, FEE_RATE, MAX_SWAP_FEE_MSAT,
+        MIN_CHANNEL_CONFIRMATIONS, UTXO_SIZE_SAT,
     },
     rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional},
 };
@@ -103,9 +105,6 @@ use crate::{
 
 const UTXO_NUM: u8 = 4;
 
-pub(crate) const HTLC_MIN_MSAT: u64 = 3000000;
-pub(crate) const MAX_SWAP_FEE_MSAT: u64 = HTLC_MIN_MSAT;
-
 const OPENRGBCHANNEL_MIN_SAT: u64 = HTLC_MIN_MSAT / 1000 * 10 + 10;
 const OPENCHANNEL_MIN_SAT: u64 = 5506;
 const OPENCHANNEL_MAX_SAT: u64 = 16777215;
@@ -113,80 +112,6 @@ const OPENCHANNEL_MIN_RGB_AMT: u64 = 1;
 const VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST: &str = "trusted_no_broadcast";
 
 const INVOICE_MIN_MSAT: u64 = HTLC_MIN_MSAT;
-
-pub(crate) const DEFAULT_FINAL_CLTV_EXPIRY_DELTA: u32 = 14;
-
-impl AppState {
-    pub(crate) fn get_changing_state(&self) -> std::sync::MutexGuard<'_, bool> {
-        self.changing_state.lock().unwrap()
-    }
-
-    pub(crate) fn get_ldk_background_services(
-        &self,
-    ) -> std::sync::MutexGuard<'_, Option<crate::ldk::LdkBackgroundServices>> {
-        self.ldk_background_services.lock().unwrap()
-    }
-
-    pub(crate) async fn get_unlocked_app_state(
-        &self,
-    ) -> tokio::sync::MutexGuard<'_, Option<Arc<crate::utils::UnlockedAppState>>> {
-        self.unlocked_app_state.lock().await
-    }
-
-    pub(crate) fn check_changing_state(&self) -> Result<(), APIError> {
-        if *self.get_changing_state() {
-            return Err(APIError::ChangingState);
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn check_locked(
-        &self,
-    ) -> Result<tokio::sync::MutexGuard<'_, Option<Arc<crate::utils::UnlockedAppState>>>, APIError>
-    {
-        self.check_changing_state()?;
-        let unlocked_app_state = self.get_unlocked_app_state().await;
-        if unlocked_app_state.is_some() {
-            Err(APIError::UnlockedNode)
-        } else {
-            Ok(unlocked_app_state)
-        }
-    }
-
-    pub(crate) async fn check_unlocked(
-        &self,
-    ) -> Result<tokio::sync::MutexGuard<'_, Option<Arc<crate::utils::UnlockedAppState>>>, APIError>
-    {
-        self.check_changing_state()?;
-        let unlocked_app_state = self.get_unlocked_app_state().await;
-        if unlocked_app_state.is_none() {
-            Err(APIError::LockedNode)
-        } else {
-            Ok(unlocked_app_state)
-        }
-    }
-
-    pub(crate) fn update_changing_state(&self, updated: bool) {
-        let mut changing_state = self.get_changing_state();
-        *changing_state = updated;
-    }
-
-    pub(crate) fn update_ldk_background_services(
-        &self,
-        updated: Option<crate::ldk::LdkBackgroundServices>,
-    ) {
-        let mut ldk_background_services = self.get_ldk_background_services();
-        *ldk_background_services = updated;
-    }
-
-    pub(crate) async fn update_unlocked_app_state(
-        &self,
-        updated: Option<Arc<crate::utils::UnlockedAppState>>,
-    ) {
-        let mut unlocked_app_state = self.get_unlocked_app_state().await;
-        *unlocked_app_state = updated;
-    }
-}
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct AddressResponse {
@@ -928,6 +853,7 @@ pub(crate) struct Payment {
     pub(crate) created_at: u64,
     pub(crate) updated_at: u64,
     pub(crate) payee_pubkey: String,
+    pub(crate) preimage: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -1247,6 +1173,21 @@ pub(crate) struct UnlockRequest {
     pub(crate) announce_alias: Option<String>,
 }
 
+impl From<UnlockRequest> for CoreUnlockRequest {
+    fn from(value: UnlockRequest) -> Self {
+        Self {
+            bitcoind_rpc_username: value.bitcoind_rpc_username,
+            bitcoind_rpc_password: value.bitcoind_rpc_password,
+            bitcoind_rpc_host: value.bitcoind_rpc_host,
+            bitcoind_rpc_port: value.bitcoind_rpc_port,
+            indexer_url: value.indexer_url,
+            proxy_endpoint: value.proxy_endpoint,
+            announce_addresses: value.announce_addresses,
+            announce_alias: value.announce_alias,
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 pub(crate) struct Unspent {
     pub(crate) utxo: Utxo,
@@ -1272,6 +1213,54 @@ impl From<WitnessData> for RgbLibWitnessData {
             amount_sat: value.amount_sat,
             blinding: value.blinding,
         }
+    }
+}
+
+impl AppState {
+    fn check_changing_state(&self) -> Result<(), APIError> {
+        if *self.get_changing_state() {
+            return Err(APIError::ChangingState);
+        }
+        Ok(())
+    }
+
+    async fn check_locked(
+        &self,
+    ) -> Result<TokioMutexGuard<'_, Option<Arc<UnlockedAppState>>>, APIError> {
+        self.check_changing_state()?;
+        let unlocked_app_state = self.get_unlocked_app_state().await;
+        if unlocked_app_state.is_some() {
+            Err(APIError::UnlockedNode)
+        } else {
+            Ok(unlocked_app_state)
+        }
+    }
+
+    async fn check_unlocked(
+        &self,
+    ) -> Result<TokioMutexGuard<'_, Option<Arc<UnlockedAppState>>>, APIError> {
+        self.check_changing_state()?;
+        let unlocked_app_state = self.get_unlocked_app_state().await;
+        if unlocked_app_state.is_none() {
+            Err(APIError::LockedNode)
+        } else {
+            Ok(unlocked_app_state)
+        }
+    }
+
+    fn update_changing_state(&self, updated: bool) {
+        let mut changing_state = self.get_changing_state();
+        *changing_state = updated;
+    }
+
+    fn update_ldk_background_services(&self, updated: Option<LdkBackgroundServices>) {
+        let mut ldk_background_services = self.get_ldk_background_services();
+        *ldk_background_services = updated;
+    }
+
+    async fn update_unlocked_app_state(&self, updated: Option<Arc<UnlockedAppState>>) {
+        let mut unlocked_app_state = self.get_unlocked_app_state().await;
+        *unlocked_app_state = updated;
     }
 }
 
@@ -1886,6 +1875,7 @@ pub(crate) async fn get_payment(
                     created_at: payment_info.created_at,
                     updated_at: payment_info.updated_at,
                     payee_pubkey: payment_info.payee_pubkey.to_string(),
+                    preimage: payment_info.preimage.map(|p| hex_str(&p.0)),
                 },
             }));
         }
@@ -1915,6 +1905,7 @@ pub(crate) async fn get_payment(
                     created_at: payment_info.created_at,
                     updated_at: payment_info.updated_at,
                     payee_pubkey: payment_info.payee_pubkey.to_string(),
+                    preimage: payment_info.preimage.map(|p| hex_str(&p.0)),
                 },
             }));
         }
@@ -2437,6 +2428,7 @@ pub(crate) async fn list_payments(
             created_at: payment_info.created_at,
             updated_at: payment_info.updated_at,
             payee_pubkey: payment_info.payee_pubkey.to_string(),
+            preimage: payment_info.preimage.map(|p| hex_str(&p.0)),
         });
     }
 
@@ -2463,6 +2455,7 @@ pub(crate) async fn list_payments(
             created_at: payment_info.created_at,
             updated_at: payment_info.updated_at,
             payee_pubkey: payment_info.payee_pubkey.to_string(),
+            preimage: payment_info.preimage.map(|p| hex_str(&p.0)),
         });
     }
 
@@ -2945,7 +2938,8 @@ pub(crate) async fn maker_execute(
         match err {
             None => Ok(Json(EmptyResponse {})),
             Some(e) => {
-                unlocked_state.update_maker_swap_status(&swapstring.payment_hash, SwapStatus::Failed);
+                unlocked_state
+                    .update_maker_swap_status(&swapstring.payment_hash, SwapStatus::Failed);
                 Err(APIError::FailedPayment(format!("{e:?}")))
             }
         }
@@ -4030,18 +4024,8 @@ pub(crate) async fn unlock(
         };
 
         tracing::debug!("Starting LDK...");
-        let unlock_request = CoreUnlockRequest {
-            bitcoind_rpc_username: payload.bitcoind_rpc_username,
-            bitcoind_rpc_password: payload.bitcoind_rpc_password,
-            bitcoind_rpc_host: payload.bitcoind_rpc_host,
-            bitcoind_rpc_port: payload.bitcoind_rpc_port,
-            indexer_url: payload.indexer_url,
-            proxy_endpoint: payload.proxy_endpoint,
-            announce_addresses: payload.announce_addresses,
-            announce_alias: payload.announce_alias,
-        };
         let (new_ldk_background_services, new_unlocked_app_state) =
-            match start_ldk(state.clone(), mnemonic, unlock_request).await {
+            match start_ldk(state.clone(), mnemonic, payload.into()).await {
                 Ok((nlbs, nuap)) => (nlbs, nuap),
                 Err(e) => {
                     state.update_changing_state(false);

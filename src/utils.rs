@@ -27,12 +27,12 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
     time::{Duration, SystemTime},
 };
-use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
 use tokio_util::sync::CancellationToken;
 
 use crate::ldk::{ChannelIdsMap, Router, VirtualChannelDraftStore, VirtualChannelSessionStore};
+use crate::core_types::{DEFAULT_FINAL_CLTV_EXPIRY_DELTA, HTLC_MIN_MSAT};
 use crate::rgb::{get_rgb_channel_info_optional, RgbLibWalletWrapper};
-use crate::routes::{DEFAULT_FINAL_CLTV_EXPIRY_DELTA, HTLC_MIN_MSAT};
 use crate::{
     args::UserArgs,
     disk::FilesystemLogger,
@@ -63,6 +63,24 @@ pub(crate) struct AppState {
     pub(crate) changing_state: Mutex<bool>,
     pub(crate) root_public_key: Option<biscuit_auth::PublicKey>,
     pub(crate) revoked_tokens: Arc<Mutex<HashSet<Vec<u8>>>>,
+}
+
+impl AppState {
+    pub(crate) fn get_changing_state(&self) -> MutexGuard<'_, bool> {
+        self.changing_state.lock().unwrap()
+    }
+
+    pub(crate) fn get_ldk_background_services(
+        &self,
+    ) -> MutexGuard<'_, Option<LdkBackgroundServices>> {
+        self.ldk_background_services.lock().unwrap()
+    }
+
+    pub(crate) async fn get_unlocked_app_state(
+        &self,
+    ) -> TokioMutexGuard<'_, Option<Arc<UnlockedAppState>>> {
+        self.unlocked_app_state.lock().await
+    }
 }
 
 pub(crate) struct StaticState {

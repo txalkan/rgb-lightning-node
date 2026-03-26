@@ -15,10 +15,6 @@ This example runs a full local regtest flow from Python and demonstrates:
 
 From repo root:
 
-```sh
-cd /home/roman-boiko/projects/utexo/rgb-lightning-node
-```
-
 Build library and generate Python bindings:
 
 ```sh

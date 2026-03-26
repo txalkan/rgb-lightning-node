@@ -1,9 +1,10 @@
 use amplify::s;
 use biscuit_auth::{builder::date, macros::*, KeyPair};
 use bitcoin::secp256k1::PublicKey;
+use bitcoin::hashes::sha256::Hash as Sha256;
+use bitcoin::hashes::Hash;
 use chrono::{DateTime, Local, Utc};
 use electrum_client::ElectrumApi;
-use lazy_static::lazy_static;
 use lightning_invoice::Bolt11Invoice;
 use once_cell::sync::Lazy;
 use reqwest::Response;
@@ -13,36 +14,36 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::sync::{Mutex, Once, RwLock};
+use std::sync::{Once, RwLock};
 use time::OffsetDateTime;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tracing_test::traced_test;
 
 use crate::error::APIErrorResponse;
-use crate::core_types::FEE_RATE;
+use crate::core_types::{FEE_RATE, HTLCStatus, SwapStatus};
 use crate::routes::{
     AddressResponse, AssetBalanceRequest, AssetBalanceResponse, AssetCFA, AssetNIA, AssetUDA,
     Assignment, BackupRequest, BtcBalanceRequest, BtcBalanceResponse, ChangePasswordRequest,
-    Channel, ChannelStatus, CloseChannelRequest, ConnectPeerRequest, CreateUtxosRequest,
-    DecodeLNInvoiceRequest, DecodeLNInvoiceResponse, DecodeRGBInvoiceRequest,
-    DecodeRGBInvoiceResponse, DisconnectPeerRequest, EmptyResponse, FailTransfersRequest,
-    FailTransfersResponse, GetAssetMediaRequest, GetAssetMediaResponse, GetChannelIdRequest,
-    GetChannelIdResponse, GetPaymentRequest, GetPaymentResponse, GetSwapRequest, GetSwapResponse,
-    HTLCStatus, InitRequest, InitResponse, InvoiceStatus, InvoiceStatusRequest,
-    InvoiceStatusResponse, IssueAssetCFARequest, IssueAssetCFAResponse, IssueAssetNIARequest,
-    IssueAssetNIAResponse, IssueAssetUDARequest, IssueAssetUDAResponse, KeysendRequest,
-    KeysendResponse, LNInvoiceRequest, LNInvoiceResponse, ListAssetsRequest, ListAssetsResponse,
-    ListChannelsResponse, ListPaymentsResponse, ListPeersResponse, ListSwapsResponse,
-    ListTransactionsRequest, ListTransactionsResponse, ListTransfersRequest, ListTransfersResponse,
-    ListUnspentsRequest, ListUnspentsResponse, MakerExecuteRequest, MakerInitRequest,
-    MakerInitResponse, NetworkInfoResponse, NodeInfoResponse, OpenChannelRequest,
-    OpenChannelResponse, Payment, Peer, PostAssetMediaResponse, Recipient, RefreshRequest,
-    RestoreRequest, RevokeTokenRequest, RgbInvoiceRequest, RgbInvoiceResponse, SendBtcRequest,
-    SendBtcResponse, SendPaymentRequest, SendPaymentResponse, SendRgbRequest, SendRgbResponse,
-    Swap, SwapStatus, TakerRequest, Transaction, Transfer, UnlockRequest, Unspent, WitnessData,
+    Channel, CloseChannelRequest, ConnectPeerRequest, CreateUtxosRequest, DecodeLNInvoiceRequest,
+    DecodeLNInvoiceResponse, DecodeRGBInvoiceRequest, DecodeRGBInvoiceResponse,
+    DisconnectPeerRequest, EmptyResponse, FailTransfersRequest, FailTransfersResponse,
+    GetAssetMediaRequest, GetAssetMediaResponse, GetChannelIdRequest, GetChannelIdResponse,
+    GetPaymentRequest, GetPaymentResponse, GetSwapRequest, GetSwapResponse,
+    InitRequest, InitResponse, InvoiceStatus, InvoiceStatusRequest, InvoiceStatusResponse,
+    IssueAssetCFARequest, IssueAssetCFAResponse, IssueAssetNIARequest, IssueAssetNIAResponse,
+    IssueAssetUDARequest, IssueAssetUDAResponse, KeysendRequest, KeysendResponse, LNInvoiceRequest,
+    LNInvoiceResponse, ListAssetsRequest, ListAssetsResponse, ListChannelsResponse,
+    ListPaymentsResponse, ListPeersResponse, ListSwapsResponse, ListTransactionsRequest,
+    ListTransactionsResponse, ListTransfersRequest, ListTransfersResponse, ListUnspentsRequest,
+    ListUnspentsResponse, MakerExecuteRequest, MakerInitRequest, MakerInitResponse,
+    NetworkInfoResponse, NodeInfoResponse, OpenChannelRequest, OpenChannelResponse, Payment, Peer,
+    PostAssetMediaResponse, Recipient, RefreshRequest, RestoreRequest, RevokeTokenRequest,
+    RgbInvoiceRequest, RgbInvoiceResponse, SendBtcRequest, SendBtcResponse, SendPaymentRequest,
+    SendPaymentResponse, SendRgbRequest, SendRgbResponse, Swap, TakerRequest,
+    Transaction, Transfer, UnlockRequest, Unspent, WitnessData,
 };
-use crate::utils::{hex_str_to_vec, ELECTRUM_URL_REGTEST, PROXY_ENDPOINT_LOCAL};
+use crate::utils::{hex_str, hex_str_to_vec, ELECTRUM_URL_REGTEST, LOGS_DIR, PROXY_ENDPOINT_LOCAL};
 
 use super::*;
 
@@ -84,6 +85,13 @@ fn _bitcoin_cli() -> [String; 7] {
         s!("bitcoin-cli"),
         s!("-regtest"),
     ]
+}
+
+fn check_preimage_matches_hash(payment: &Payment, expected_payment_hash: &str) {
+    let payment_preimage = payment.preimage.as_ref().unwrap();
+    let payment_preimage_hash =
+        hex_str(&Sha256::hash(&hex_str_to_vec(payment_preimage).unwrap()).to_byte_array());
+    assert_eq!(payment_preimage_hash, expected_payment_hash);
 }
 
 async fn _check_response_is_ok(res: Response) -> Response {
@@ -1950,18 +1958,8 @@ pub(crate) fn initialize() {
     });
 }
 
-lazy_static! {
-    static ref MOCK_FEE: Mutex<Option<u32>> = Mutex::new(None);
-}
-
-pub fn mock_fee(fee: u32) -> u32 {
-    let mock = MOCK_FEE.lock().unwrap().take();
-    if let Some(fee) = mock {
-        println!("mocking fee");
-        fee
-    } else {
-        fee
-    }
+pub fn set_mock_fee(fee: u32) {
+    crate::fee_mock::set_mock_fee_for_tests(Some(fee));
 }
 
 mod authentication;

@@ -94,6 +94,37 @@ Special note:
 Manual mixed-language interop runbook:
 - `RUST_PYTHON_INTEROP_MANUAL.md` in this directory (Rust daemon node + Python UniFFI node).
 
+## Maintenance
+
+`rgb-lightning-node` is a fork and we keep feature parity with upstream.
+UniFFI support adds a required manual sync checklist when upstream changes:
+
+1. Sync upstream changes into this fork.
+2. Re-check SDK/REST parity for changed endpoints in `src/routes.rs` and `src/sdk/mod.rs`.
+3. Update `bindings/rgb_lightning_node.udl` for any public API shape changes.
+4. Add/update converters in `src/ffi/types.rs` for new structured identifiers.
+5. Regenerate bindings:
+   - `./scripts/ci/uniffi_generate_all.sh`
+6. Re-run required tests:
+   - `cargo test -- --test-threads=1`
+   - `cargo test --features uniffi --lib uniffi_smoke_tests:: -- --test-threads=1`
+   - `cargo test zero_amount_invoice -- --test-threads=1`
+   - `cargo test send_receive -- --test-threads=1`
+
+## Release checklist
+
+1. Run Rust checks:
+   - `cargo check`
+   - `cargo check --features uniffi`
+2. Run core tests:
+   - `cargo test -- --test-threads=1`
+   - `cargo test --features uniffi --lib uniffi_smoke_tests:: -- --test-threads=1`
+3. Regenerate bindings and verify changed output:
+   - `./scripts/ci/uniffi_generate_all.sh`
+4. Ensure CI workflows pass:
+   - `.github/workflows/test.yaml`
+   - `.github/workflows/uniffi-artifacts.yaml`
+
 ## Main code changes in `uniffi_api/mod.rs`
 
 `mod.rs` is now the main UniFFI API surface and was reworked around four goals:
