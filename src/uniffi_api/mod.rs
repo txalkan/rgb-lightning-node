@@ -478,7 +478,10 @@ impl SdkNode {
         Ok(SdkSendBtcResponse { txid })
     }
 
-    pub fn makerinit(&self, request: SdkMakerInitRequest) -> Result<SdkMakerInitResponse, RlnError> {
+    pub fn makerinit(
+        &self,
+        request: SdkMakerInitRequest,
+    ) -> Result<SdkMakerInitResponse, RlnError> {
         let state = self.handle.app_state();
         let response = block_on_sdk(sdk::maker_init(
             state,
@@ -529,7 +532,11 @@ impl SdkNode {
         block_on_sdk(sdk::send_onion_message(
             state,
             sdk::SendOnionMessageRequestData {
-                node_ids: request.node_ids.into_iter().map(|v| v.to_string()).collect(),
+                node_ids: request
+                    .node_ids
+                    .into_iter()
+                    .map(|v| v.to_string())
+                    .collect(),
                 tlv_type: request.tlv_type,
                 data: request.data,
             },

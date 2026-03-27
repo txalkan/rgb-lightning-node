@@ -1,8 +1,8 @@
 use amplify::s;
 use biscuit_auth::{builder::date, macros::*, KeyPair};
-use bitcoin::secp256k1::PublicKey;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
+use bitcoin::secp256k1::PublicKey;
 use chrono::{DateTime, Local, Utc};
 use electrum_client::ElectrumApi;
 use lightning_invoice::Bolt11Invoice;
@@ -20,8 +20,9 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tracing_test::traced_test;
 
+use crate::core_types::{HTLCStatus, SwapStatus, FEE_RATE};
 use crate::error::APIErrorResponse;
-use crate::core_types::{FEE_RATE, HTLCStatus, SwapStatus};
+use crate::routes::ChannelStatus;
 use crate::routes::{
     AddressResponse, AssetBalanceRequest, AssetBalanceResponse, AssetCFA, AssetNIA, AssetUDA,
     Assignment, BackupRequest, BtcBalanceRequest, BtcBalanceResponse, ChangePasswordRequest,
@@ -29,19 +30,19 @@ use crate::routes::{
     DecodeLNInvoiceResponse, DecodeRGBInvoiceRequest, DecodeRGBInvoiceResponse,
     DisconnectPeerRequest, EmptyResponse, FailTransfersRequest, FailTransfersResponse,
     GetAssetMediaRequest, GetAssetMediaResponse, GetChannelIdRequest, GetChannelIdResponse,
-    GetPaymentRequest, GetPaymentResponse, GetSwapRequest, GetSwapResponse,
-    InitRequest, InitResponse, InvoiceStatus, InvoiceStatusRequest, InvoiceStatusResponse,
-    IssueAssetCFARequest, IssueAssetCFAResponse, IssueAssetNIARequest, IssueAssetNIAResponse,
-    IssueAssetUDARequest, IssueAssetUDAResponse, KeysendRequest, KeysendResponse, LNInvoiceRequest,
-    LNInvoiceResponse, ListAssetsRequest, ListAssetsResponse, ListChannelsResponse,
-    ListPaymentsResponse, ListPeersResponse, ListSwapsResponse, ListTransactionsRequest,
-    ListTransactionsResponse, ListTransfersRequest, ListTransfersResponse, ListUnspentsRequest,
-    ListUnspentsResponse, MakerExecuteRequest, MakerInitRequest, MakerInitResponse,
-    NetworkInfoResponse, NodeInfoResponse, OpenChannelRequest, OpenChannelResponse, Payment, Peer,
+    GetPaymentRequest, GetPaymentResponse, GetSwapRequest, GetSwapResponse, InitRequest,
+    InitResponse, InvoiceStatus, InvoiceStatusRequest, InvoiceStatusResponse, IssueAssetCFARequest,
+    IssueAssetCFAResponse, IssueAssetNIARequest, IssueAssetNIAResponse, IssueAssetUDARequest,
+    IssueAssetUDAResponse, KeysendRequest, KeysendResponse, LNInvoiceRequest, LNInvoiceResponse,
+    ListAssetsRequest, ListAssetsResponse, ListChannelsResponse, ListPaymentsResponse,
+    ListPeersResponse, ListSwapsResponse, ListTransactionsRequest, ListTransactionsResponse,
+    ListTransfersRequest, ListTransfersResponse, ListUnspentsRequest, ListUnspentsResponse,
+    MakerExecuteRequest, MakerInitRequest, MakerInitResponse, NetworkInfoResponse,
+    NodeInfoResponse, OpenChannelRequest, OpenChannelResponse, Payment, Peer,
     PostAssetMediaResponse, Recipient, RefreshRequest, RestoreRequest, RevokeTokenRequest,
     RgbInvoiceRequest, RgbInvoiceResponse, SendBtcRequest, SendBtcResponse, SendPaymentRequest,
-    SendPaymentResponse, SendRgbRequest, SendRgbResponse, Swap, TakerRequest,
-    Transaction, Transfer, UnlockRequest, Unspent, WitnessData,
+    SendPaymentResponse, SendRgbRequest, SendRgbResponse, Swap, TakerRequest, Transaction,
+    Transfer, UnlockRequest, Unspent, WitnessData,
 };
 use crate::utils::{hex_str, hex_str_to_vec, ELECTRUM_URL_REGTEST, LOGS_DIR, PROXY_ENDPOINT_LOCAL};
 

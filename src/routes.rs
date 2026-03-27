@@ -10,6 +10,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Network, ScriptBuf};
 use hex::DisplayHex;
+use lightning::chain::channelmonitor::Balance;
 use lightning::ln::{channelmanager::OptionalOfferPaymentParams, types::ChannelId};
 use lightning::offers::offer::{self, Offer};
 use lightning::onion_message::messenger::Destination;
@@ -21,7 +22,6 @@ use lightning::routing::gossip::RoutingFees;
 use lightning::routing::router::{Path as LnPath, Route, RouteHint, RouteHintHop};
 use lightning::sign::EntropySource;
 use lightning::util::config::ChannelConfig;
-use lightning::chain::channelmonitor::Balance;
 use lightning::{
     ln::channel_state::ChannelShutdownState, onion_message::messenger::MessageSendInstructions,
 };
@@ -88,9 +88,9 @@ use crate::utils::{
 use crate::{
     backup::{do_backup, restore_backup},
     core_types::{
-        HTLCStatus, HTLC_MIN_MSAT, SwapStatus, UnlockRequest as CoreUnlockRequest,
-        DEFAULT_FINAL_CLTV_EXPIRY_DELTA, DUST_LIMIT_MSAT, FEE_RATE, MAX_SWAP_FEE_MSAT,
-        MIN_CHANNEL_CONFIRMATIONS, UTXO_SIZE_SAT,
+        HTLCStatus, SwapStatus, UnlockRequest as CoreUnlockRequest,
+        DEFAULT_FINAL_CLTV_EXPIRY_DELTA, DUST_LIMIT_MSAT, FEE_RATE, HTLC_MIN_MSAT,
+        MAX_SWAP_FEE_MSAT, MIN_CHANNEL_CONFIRMATIONS, UTXO_SIZE_SAT,
     },
     rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional},
 };
@@ -1928,7 +1928,7 @@ pub(crate) async fn get_swap(
     let requested_ph = PaymentHash(payment_hash_vec.unwrap().try_into().unwrap());
 
     let map_swap = |payment_hash: &PaymentHash, swap_data: &SwapData, taker: bool| {
-        let mut status = swap_data.status.clone();
+        let mut status = swap_data.status;
         if status == SwapStatus::Waiting && get_current_timestamp() > swap_data.swap_info.expiry {
             status = SwapStatus::Expired;
         } else if status == SwapStatus::Pending
@@ -1938,9 +1938,9 @@ pub(crate) async fn get_swap(
         }
         if status != swap_data.status {
             if taker {
-                unlocked_state.update_taker_swap_status(payment_hash, status.clone());
+                unlocked_state.update_taker_swap_status(payment_hash, status);
             } else {
-                unlocked_state.update_maker_swap_status(payment_hash, status.clone());
+                unlocked_state.update_maker_swap_status(payment_hash, status);
             }
         }
         Swap {
@@ -2485,7 +2485,7 @@ pub(crate) async fn list_swaps(
     let unlocked_state = guard.as_ref().unwrap();
 
     let map_swap = |payment_hash: &PaymentHash, swap_data: &SwapData, taker: bool| {
-        let mut status = swap_data.status.clone();
+        let mut status = swap_data.status;
         if status == SwapStatus::Waiting && get_current_timestamp() > swap_data.swap_info.expiry {
             status = SwapStatus::Expired;
         } else if status == SwapStatus::Pending
@@ -2495,9 +2495,9 @@ pub(crate) async fn list_swaps(
         }
         if status != swap_data.status {
             if taker {
-                unlocked_state.update_taker_swap_status(payment_hash, status.clone());
+                unlocked_state.update_taker_swap_status(payment_hash, status);
             } else {
-                unlocked_state.update_maker_swap_status(payment_hash, status.clone());
+                unlocked_state.update_maker_swap_status(payment_hash, status);
             }
         }
         Swap {
