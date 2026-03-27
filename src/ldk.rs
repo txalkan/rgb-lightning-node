@@ -117,7 +117,7 @@ use crate::utils::{
 
 const VIRTUAL_CHANNEL_DOMAIN_SEPARATOR: &[u8] = b"rln_virtual_channels_v0";
 
-pub(crate) fn virtual_channel_outpoint(
+pub(crate) fn virtual_channel_synthetic_outpoint(
     network: BitcoinNetwork,
     local_node_id: &PublicKey,
     peer_node_id: &PublicKey,
@@ -216,9 +216,9 @@ pub(crate) struct VirtualChannelDraft {
 }
 
 impl_writeable_tlv_based!(VirtualChannelDraft, {
-    (0, temporary_channel_id, required),
+    (0, created_at, required),
     (2, peer_id, required),
-    (4, created_at, required),
+    (4, temporary_channel_id, required),
 });
 
 pub(crate) struct VirtualChannelDraftStore {
@@ -249,7 +249,7 @@ pub(crate) struct VirtualChannelSession {
     pub(crate) former_temporary_channel_id: ChannelId,
     pub(crate) peer_id: PublicKey,
     pub(crate) status: VirtualChannelSessionStatus,
-    pub(crate) synthetic_funding_txo: OutPoint,
+    pub(crate) virtual_funding_txo: OutPoint,
     pub(crate) updated_at: u64,
 }
 
@@ -259,7 +259,7 @@ impl_writeable_tlv_based!(VirtualChannelSession, {
     (4, former_temporary_channel_id, required),
     (6, peer_id, required),
     (8, status, (default_value, VirtualChannelSessionStatus::Active)),
-    (10, synthetic_funding_txo, required),
+    (10, virtual_funding_txo, required),
     (12, updated_at, (default_value, created_at)),
 });
 
@@ -270,6 +270,14 @@ pub(crate) struct VirtualChannelSessionStore {
 impl_writeable_tlv_based!(VirtualChannelSessionStore, {
     (0, entries, required),
 });
+
+impl VirtualChannelSessionStore {
+    pub(crate) fn contains_virtual_funding_txo(&self, virtual_funding_txo: &OutPoint) -> bool {
+        self.entries
+            .values()
+            .any(|session| session.virtual_funding_txo == *virtual_funding_txo)
+    }
+}
 
 impl UnlockedAppState {
     pub(crate) fn add_maker_swap(&self, payment_hash: PaymentHash, swap: SwapData) {
@@ -533,10 +541,65 @@ impl UnlockedAppState {
             .unwrap();
     }
 
-    pub(crate) fn virtual_channel_draft_add(&self, draft: VirtualChannelDraft) {
+    pub(crate) fn virtual_channel_add_intent(
+        &self,
+        peer_id: PublicKey,
+        temporary_channel_id: Option<ChannelId>,
+    ) -> Result<ChannelId, APIError> {
         let mut drafts = self.get_virtual_channel_draft_store();
-        drafts.entries.insert(draft.temporary_channel_id, draft);
+        let duplicate_virtual_draft = drafts
+            .entries
+            .values()
+            .any(|draft| draft.peer_id == peer_id);
+        if duplicate_virtual_draft {
+            return Err(APIError::InvalidRequest(
+                "virtual channel draft already exists for this peer pair".to_string(),
+            ));
+        }
+
+        let duplicate_virtual_session = self
+            .get_virtual_channel_session_store()
+            .entries
+            .values()
+            .any(|session| session.peer_id == peer_id);
+        if duplicate_virtual_session {
+            return Err(APIError::InvalidRequest(
+                "virtual channel session already exists for this peer pair".to_string(),
+            ));
+        }
+
+        let channel_ids = self.channel_ids();
+        let temporary_channel_id = if let Some(temporary_channel_id) = temporary_channel_id {
+            if channel_ids.contains_key(&temporary_channel_id)
+                || drafts.entries.contains_key(&temporary_channel_id)
+            {
+                return Err(APIError::TemporaryChannelIdAlreadyUsed);
+            }
+            temporary_channel_id
+        } else {
+            loop {
+                let mut tmp_channel_id_bytes = [0u8; 32];
+                tmp_channel_id_bytes
+                    .copy_from_slice(&self.keys_manager.get_secure_random_bytes()[..32]);
+                let candidate = ChannelId::from_bytes(tmp_channel_id_bytes);
+                if !channel_ids.contains_key(&candidate) && !drafts.entries.contains_key(&candidate)
+                {
+                    break candidate;
+                }
+            }
+        };
+
+        drafts.entries.insert(
+            temporary_channel_id,
+            VirtualChannelDraft {
+                temporary_channel_id,
+                peer_id,
+                created_at: get_current_timestamp(),
+            },
+        );
         self.virtual_channel_draft_store_save(drafts);
+
+        Ok(temporary_channel_id)
     }
 
     pub(crate) fn virtual_channel_draft_delete(&self, temporary_channel_id: &ChannelId) {
@@ -985,12 +1048,39 @@ async fn handle_ldk_events(
             if let Some(virtual_draft) =
                 unlocked_state.virtual_channel_draft_get(&temporary_channel_id)
             {
-                let mut synthetic_funding_txo = virtual_channel_outpoint(
+                let reject_virtual_open = |reason: String| {
+                    tracing::error!(
+                        "rejecting virtual channel {} with {}: {}",
+                        temporary_channel_id,
+                        hex_str(&counterparty_node_id.serialize()),
+                        reason,
+                    );
+                    let temporary_marker_path = get_virtual_channel_marker_path(
+                        &temporary_channel_id.to_string(),
+                        &static_state.ldk_data_dir,
+                    );
+                    let _ = fs::remove_file(temporary_marker_path);
+                    unlocked_state.virtual_channel_draft_delete(&temporary_channel_id);
+                    *unlocked_state.rgb_send_lock.lock().unwrap() = false;
+                };
+
+                let mut virtual_funding_txo = virtual_channel_synthetic_outpoint(
                     static_state.network,
                     &unlocked_state.channel_manager.get_our_node_id(),
                     &counterparty_node_id,
                 );
-                let mut channel_id = ChannelId::v1_from_funding_outpoint(synthetic_funding_txo);
+                let duplicate_synthetic_funding_txo = {
+                    let session_store = unlocked_state.get_virtual_channel_session_store();
+                    session_store.contains_virtual_funding_txo(&virtual_funding_txo)
+                };
+                if duplicate_synthetic_funding_txo {
+                    reject_virtual_open(format!(
+                        "duplicate synthetic funding outpoint {} already exists in session store",
+                        virtual_funding_txo,
+                    ));
+                    return Ok(());
+                }
+                let mut channel_id = ChannelId::v1_from_funding_outpoint(virtual_funding_txo);
 
                 let ldk_data_dir = PathBuf::from(&static_state.ldk_data_dir);
                 if is_channel_rgb(&temporary_channel_id, &ldk_data_dir) {
@@ -1023,7 +1113,7 @@ async fn handle_ldk_events(
                         recipient_id_from_script_buf(script_buf, static_state.network);
                     let recipient_map = map! {
                         asset_id.clone() => vec![Recipient {
-                            recipient_id,
+                            recipient_id: recipient_id.clone(),
                             witness_data: Some(WitnessData {
                                 amount_sat: channel_value_satoshis,
                                 blinding: Some(STATIC_BLINDING),
@@ -1062,25 +1152,51 @@ async fn handle_ldk_events(
                             return Err(ReplayEvent());
                         }
                     };
-                    let funding_tx = match psbt.extract_tx() {
+                    let funding_psbt = match psbt.extract_tx() {
                         Ok(tx) => tx,
                         Err(e) => {
                             tracing::error!("cannot extract virtual funding transaction: {e}");
                             return Err(ReplayEvent());
                         }
                     };
-                    synthetic_funding_txo = OutPoint {
-                        txid: funding_tx.compute_txid(),
-                        index: 0,
+                    let Some(virtual_funding_vout) = funding_psbt
+                        .output
+                        .iter()
+                        .position(|txout| {
+                            txout.script_pubkey.as_bytes() == output_script.as_bytes()
+                        })
+                        .map(|vout| vout as u16)
+                    else {
+                        tracing::error!(
+                            "cannot find virtual funding output in extracted transaction"
+                        );
+                        return Err(ReplayEvent());
                     };
-                    channel_id = ChannelId::v1_from_funding_outpoint(synthetic_funding_txo);
-                    let synthetic_funding_txid = synthetic_funding_txo.txid.to_string();
+                    virtual_funding_txo = OutPoint {
+                        txid: funding_psbt.compute_txid(),
+                        index: virtual_funding_vout,
+                    };
+                    channel_id = ChannelId::v1_from_funding_outpoint(virtual_funding_txo);
 
+                    let duplicate_virtual_funding_txo = {
+                        let session_store = unlocked_state.get_virtual_channel_session_store();
+                        session_store.contains_virtual_funding_txo(&virtual_funding_txo)
+                    };
+                    if duplicate_virtual_funding_txo {
+                        reject_virtual_open(format!(
+                            "duplicate virtual funding outpoint {} already exists in session store",
+                            virtual_funding_txo,
+                        ));
+                        return Ok(());
+                    }
+
+                    let witness_id = virtual_funding_txo.txid.to_string();
+
+                    let witness_id_clone = witness_id.clone();
                     let unlocked_state_copy = unlocked_state.clone();
-                    let witness_id = synthetic_funding_txid.clone();
                     let res = tokio::task::spawn_blocking(move || {
                         unlocked_state_copy.rgb_upsert_witness(
-                            RgbTxid::from_str(&witness_id).unwrap(),
+                            RgbTxid::from_str(&witness_id_clone).unwrap(),
                             WitnessOrd::Tentative,
                         )
                     })
@@ -1092,18 +1208,16 @@ async fn handle_ldk_events(
                         return Err(ReplayEvent());
                     }
 
-                    let consignment_path = unlocked_state
-                        .rgb_get_send_consignment_path(&asset_id, &synthetic_funding_txid);
+                    let consignment_path =
+                        unlocked_state.rgb_get_send_consignment_path(&asset_id, &witness_id);
                     let proxy_url = TransportEndpoint::new(unlocked_state.proxy_endpoint.clone())
                         .unwrap()
                         .endpoint;
                     let unlocked_state_copy = unlocked_state.clone();
-                    let transfer_id = synthetic_funding_txid.clone();
-                    let witness_id = synthetic_funding_txid.clone();
                     let res = tokio::task::spawn_blocking(move || {
                         unlocked_state_copy.rgb_post_consignment(
                             &proxy_url,
-                            transfer_id,
+                            witness_id.clone(),
                             &consignment_path,
                             witness_id,
                             None,
@@ -1123,7 +1237,7 @@ async fn handle_ldk_events(
                     .unsafe_manual_funding_transaction_generated(
                         temporary_channel_id,
                         counterparty_node_id,
-                        synthetic_funding_txo,
+                        virtual_funding_txo,
                         ChannelFundingType::Virtual,
                     ) {
                     Ok(()) => {
@@ -1144,14 +1258,14 @@ async fn handle_ldk_events(
                             former_temporary_channel_id: temporary_channel_id,
                             peer_id: virtual_draft.peer_id,
                             status: VirtualChannelSessionStatus::Active,
-                            synthetic_funding_txo,
+                            virtual_funding_txo,
                             updated_at: get_current_timestamp(),
                         });
                         unlocked_state.virtual_channel_draft_delete(&temporary_channel_id);
                         *unlocked_state.rgb_send_lock.lock().unwrap() = false;
                         tracing::info!(
                             "EVENT: registered trusted no-broadcast funding {} for virtual channel {}",
-                            synthetic_funding_txo,
+                            virtual_funding_txo,
                             channel_id,
                         );
                     }
@@ -2442,6 +2556,7 @@ pub(crate) async fn start_ldk(
     user_config
         .channel_handshake_config
         .negotiate_anchors_zero_fee_htlc_tx = true;
+    user_config.accept_forwards_to_priv_channels = static_state.enable_virtual_channels_v0;
     user_config.manually_accept_inbound_channels = true;
     let mut restarting_node = true;
     let (channel_manager_blockhash, channel_manager) = {

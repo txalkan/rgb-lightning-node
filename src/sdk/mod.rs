@@ -6,7 +6,7 @@ use crate::core_types::{
 };
 use crate::disk::{self, CHANNEL_PEER_DATA};
 use crate::error::APIError;
-use crate::ldk::{start_ldk, PaymentInfo, VirtualChannelDraft, VirtualChannelSessionStatus};
+use crate::ldk::{start_ldk, PaymentInfo, VirtualChannelSessionStatus};
 use crate::rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional};
 use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{
@@ -91,6 +91,36 @@ const SDK_DUST_LIMIT_MSAT: u64 = 546_000;
 const SDK_MAX_SWAP_FEE_MSAT: u64 = SDK_HTLC_MIN_MSAT;
 const SDK_DEFAULT_FINAL_CLTV_EXPIRY_DELTA: u32 = 14;
 const SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST: &str = "trusted_no_broadcast";
+
+struct OpenChannelVirtualIntentGuard {
+    unlocked_state: Arc<crate::utils::UnlockedAppState>,
+    temporary_channel_id: Option<ChannelId>,
+}
+
+impl OpenChannelVirtualIntentGuard {
+    fn new(
+        unlocked_state: Arc<crate::utils::UnlockedAppState>,
+        temporary_channel_id: ChannelId,
+    ) -> Self {
+        Self {
+            unlocked_state,
+            temporary_channel_id: Some(temporary_channel_id),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.temporary_channel_id = None;
+    }
+}
+
+impl Drop for OpenChannelVirtualIntentGuard {
+    fn drop(&mut self) {
+        if let Some(temporary_channel_id) = self.temporary_channel_id.take() {
+            self.unlocked_state
+                .virtual_channel_draft_delete(&temporary_channel_id);
+        }
+    }
+}
 
 fn check_changing_state(state: &AppState) -> Result<(), APIError> {
     if *state.changing_state.lock().unwrap() {
@@ -2041,22 +2071,26 @@ pub(crate) async fn open_channel(
 
     if is_virtual_open && request.public {
         return Err(APIError::InvalidRequest(
-            "trusted_no_broadcast requires public=false".to_string(),
+            "virtual channels requires public=false".to_string(),
         ));
     }
 
-    let existing_virtual_drafts = unlocked_state.virtual_channel_draft_store();
-    let temporary_channel_id = if let Some(tmp_chan_id_str) = request.temporary_channel_id {
-        let tmp_chan_id = check_channel_id(&tmp_chan_id_str)?;
-        if unlocked_state.channel_ids().contains_key(&tmp_chan_id)
-            || existing_virtual_drafts.contains_key(&tmp_chan_id)
-        {
-            return Err(APIError::TemporaryChannelIdAlreadyUsed);
+    let mut temporary_channel_id = request
+        .temporary_channel_id
+        .as_deref()
+        .map(check_channel_id)
+        .transpose()?;
+    if !is_virtual_open {
+        if let Some(temporary_channel_id) = temporary_channel_id.as_ref() {
+            if unlocked_state.channel_ids().contains_key(temporary_channel_id)
+                || unlocked_state
+                    .virtual_channel_draft_store()
+                    .contains_key(temporary_channel_id)
+            {
+                return Err(APIError::TemporaryChannelIdAlreadyUsed);
+            }
         }
-        Some(tmp_chan_id)
-    } else {
-        None
-    };
+    }
 
     let colored_info = match (request.asset_id, request.asset_amount) {
         (Some(_), Some(amt)) if amt < SDK_OPENCHANNEL_MIN_RGB_AMT => {
@@ -2115,20 +2149,17 @@ pub(crate) async fn open_channel(
     let (peer_pubkey, mut peer_addr) =
         parse_peer_info(request.peer_pubkey_and_opt_addr.to_string())?;
 
-    if is_virtual_open {
-        let duplicate_virtual_draft = existing_virtual_drafts
-            .values()
-            .any(|draft| draft.peer_id == peer_pubkey);
-        let duplicate_virtual_session = unlocked_state
-            .virtual_channel_session_store()
-            .values()
-            .any(|session| session.peer_id == peer_pubkey);
-        if duplicate_virtual_draft || duplicate_virtual_session {
-            return Err(APIError::InvalidRequest(
-                "trusted_no_broadcast already exists for this peer pair".to_string(),
-            ));
-        }
-    }
+    let mut virtual_draft_reservation = if is_virtual_open {
+        let reserved_temporary_channel_id = unlocked_state
+            .virtual_channel_add_intent(peer_pubkey, temporary_channel_id)?;
+        temporary_channel_id = Some(reserved_temporary_channel_id);
+        Some(OpenChannelVirtualIntentGuard::new(
+            unlocked_state.clone(),
+            reserved_temporary_channel_id,
+        ))
+    } else {
+        None
+    };
 
     let peer_data_path = state.static_state.ldk_data_dir.join(CHANNEL_PEER_DATA);
     if peer_addr.is_none() {
@@ -2247,30 +2278,6 @@ pub(crate) async fn open_channel(
     *unlocked_state.rgb_send_lock.lock().unwrap() = true;
     tracing::debug!("RGB send lock set to true");
 
-    let mut temporary_channel_id = temporary_channel_id;
-    if is_virtual_open && temporary_channel_id.is_none() {
-        loop {
-            let mut tmp_channel_id_bytes = [0u8; 32];
-            tmp_channel_id_bytes
-                .copy_from_slice(&unlocked_state.keys_manager.get_secure_random_bytes()[..32]);
-            let candidate = ChannelId::from_bytes(tmp_channel_id_bytes);
-            if !unlocked_state.channel_ids().contains_key(&candidate)
-                && !unlocked_state.virtual_channel_draft_store().contains_key(&candidate)
-            {
-                temporary_channel_id = Some(candidate);
-                break;
-            }
-        }
-    }
-
-    if is_virtual_open {
-        unlocked_state.virtual_channel_draft_add(VirtualChannelDraft {
-            temporary_channel_id: temporary_channel_id.expect("virtual open temp id"),
-            peer_id: peer_pubkey,
-            created_at: get_current_timestamp(),
-        });
-    }
-
     let temporary_channel_id = unlocked_state
         .channel_manager
         .create_channel(
@@ -2286,10 +2293,6 @@ pub(crate) async fn open_channel(
         .map_err(|e| {
             *unlocked_state.rgb_send_lock.lock().unwrap() = false;
             tracing::debug!("RGB send lock set to false (open channel failure: {e:?})");
-            if is_virtual_open {
-                unlocked_state
-                    .virtual_channel_draft_delete(&temporary_channel_id.expect("draft id"));
-            }
             match e {
                 LDKAPIError::APIMisuseError { err }
                     if err.contains("fee for initial commitment transaction") =>
@@ -2307,6 +2310,9 @@ pub(crate) async fn open_channel(
                 _ => APIError::FailedOpenChannel(format!("{e:?}")),
             }
         })?;
+    if let Some(virtual_draft_reservation) = virtual_draft_reservation.as_mut() {
+        virtual_draft_reservation.disarm();
+    }
 
     let temporary_channel_id = temporary_channel_id.0.as_hex().to_string();
     tracing::info!("EVENT: initiated channel with peer {}", peer_pubkey);

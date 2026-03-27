@@ -71,7 +71,7 @@ async fn close_channel_response(
 #[tokio::test]
 #[traced_test]
 #[serial_test::serial]
-async fn virtual_open_rejects_duplicate_synthetic_funding_outpoint() {
+async fn virtual_open_rejects_duplicate_peer_pair_concurrently_and_sequentially() {
     initialize();
 
     let test_storage_root = format!("{TEST_DIR_BASE}duplicate/");
@@ -105,23 +105,98 @@ async fn virtual_open_rejects_duplicate_synthetic_funding_outpoint() {
         client_node_info.pubkey, client_node_peer_port
     );
 
-    let opened_virtual_channel = open_virtual_channel(
-        host_node_address,
-        &client_node_info.pubkey,
-        Some(client_node_peer_port),
-        Some(100_000),
-        Some(0),
-        Some(200),
-        Some(&issued_asset_id),
-    )
-    .await;
-    assert_eq!(
-        opened_virtual_channel.virtual_open_mode.as_deref(),
-        Some("trusted_no_broadcast")
+    let request_a = OpenChannelRequest {
+        peer_pubkey_and_opt_addr: client_node_pubkey_with_addr.clone(),
+        capacity_sat: 100_000,
+        push_msat: 0,
+        asset_amount: Some(200),
+        asset_id: Some(issued_asset_id.clone()),
+        push_asset_amount: None,
+        public: false,
+        with_anchors: true,
+        fee_base_msat: None,
+        fee_proportional_millionths: None,
+        temporary_channel_id: None,
+        virtual_open_mode: Some("trusted_no_broadcast".to_string()),
+    };
+    let request_b = OpenChannelRequest {
+        peer_pubkey_and_opt_addr: client_node_pubkey_with_addr,
+        capacity_sat: 100_000,
+        push_msat: 0,
+        asset_amount: Some(200),
+        asset_id: Some(issued_asset_id.clone()),
+        push_asset_amount: None,
+        public: false,
+        with_anchors: true,
+        fee_base_msat: None,
+        fee_proportional_millionths: None,
+        temporary_channel_id: None,
+        virtual_open_mode: Some("trusted_no_broadcast".to_string()),
+    };
+
+    let (response_a, response_b) = tokio::join!(
+        reqwest::Client::new()
+            .post(format!("http://{host_node_address}/openchannel"))
+            .json(&request_a)
+            .send(),
+        reqwest::Client::new()
+            .post(format!("http://{host_node_address}/openchannel"))
+            .json(&request_b)
+            .send()
+    );
+    let response_a = response_a.unwrap();
+    let response_b = response_b.unwrap();
+
+    assert_ne!(
+        response_a.status().is_success(),
+        response_b.status().is_success()
+    );
+    let failed_response = if response_a.status().is_success() {
+        response_b
+    } else {
+        response_a
+    };
+    let failed_status = failed_response.status();
+    assert!(matches!(
+        failed_status,
+        reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::FORBIDDEN
+    ));
+    let failed_error = failed_response.json::<APIErrorResponse>().await.unwrap();
+    assert!(
+        failed_error
+            .error
+            .contains("already exists for this peer pair")
+            || failed_error
+                .error
+                .contains("open channel operation is in progress")
     );
 
+    let t_0 = time::OffsetDateTime::now_utc();
+    loop {
+        let host_node_channels = list_channels(host_node_address).await;
+        let matching_virtual_channels: Vec<_> = host_node_channels
+            .iter()
+            .filter(|channel| {
+                channel.peer_pubkey == client_node_info.pubkey
+                    && channel.virtual_open_mode.as_deref() == Some("trusted_no_broadcast")
+                    && channel.ready
+                    && channel.is_usable
+            })
+            .collect();
+        if matching_virtual_channels.len() == 1 {
+            break;
+        }
+        if (time::OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 20.0 {
+            panic!("expected exactly one trusted_no_broadcast channel for the peer");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
     let duplicate_virtual_open_request = OpenChannelRequest {
-        peer_pubkey_and_opt_addr: client_node_pubkey_with_addr,
+        peer_pubkey_and_opt_addr: format!(
+            "{}@127.0.0.1:{}",
+            client_node_info.pubkey, client_node_peer_port
+        ),
         capacity_sat: 100_000,
         push_msat: 0,
         asset_amount: Some(200),
@@ -141,13 +216,10 @@ async fn virtual_open_rejects_duplicate_synthetic_funding_outpoint() {
         .send()
         .await
         .unwrap();
-    check_response_is_nok(
-        response,
-        reqwest::StatusCode::BAD_REQUEST,
-        "trusted_no_broadcast already exists for this peer pair",
-        "InvalidRequest",
-    )
-    .await;
+    let response_status = response.status();
+    assert_eq!(response_status, reqwest::StatusCode::BAD_REQUEST);
+    let error = response.json::<APIErrorResponse>().await.unwrap();
+    assert!(error.error.contains("already exists for this peer pair"));
 
     let host_node_channels = list_channels(host_node_address).await;
     let matching_virtual_channel_count = host_node_channels
@@ -291,7 +363,7 @@ async fn virtual_open_rejects_invalid_requests() {
     check_response_is_nok(
         response,
         reqwest::StatusCode::BAD_REQUEST,
-        "trusted_no_broadcast requires public=false",
+        "virtual channels requires public=false",
         "InvalidRequest",
     )
     .await;
@@ -320,10 +392,11 @@ async fn virtual_trusted_no_broadcast_survives_funding_timeout_and_routes_btc_an
     fund_and_create_utxos(host_node_address, None).await;
     let issued_asset_id = issue_asset_nia(host_node_address).await.asset_id;
     let funded_rgb_amount = 200;
+    let client_a_push_msat = 10_000_000;
     let host_node_onchain_spendable_before_open =
         asset_balance_spendable(host_node_address, &issued_asset_id).await;
 
-    let (client_node_address, _client_node_password) = start_node_with_virtual_options(
+    let (client_a_node_address, _client_node_password) = start_node_with_virtual_options(
         &format!("{test_storage_root}client_node"),
         client_node_peer_port,
         false,
@@ -332,13 +405,13 @@ async fn virtual_trusted_no_broadcast_survives_funding_timeout_and_routes_btc_an
     )
     .await;
 
-    let client_node_info = node_info(client_node_address).await;
+    let client_node_info = node_info(client_a_node_address).await;
     let opened_virtual_channel = open_virtual_channel(
         host_node_address,
         &client_node_info.pubkey,
         Some(client_node_peer_port),
         Some(100_000),
-        Some(0),
+        Some(client_a_push_msat),
         Some(funded_rgb_amount),
         Some(&issued_asset_id),
     )
@@ -365,12 +438,12 @@ async fn virtual_trusted_no_broadcast_survives_funding_timeout_and_routes_btc_an
     for _ in 0..14 {
         mine_blocks_and_wait_for_sync(
             host_node_address,
-            client_node_address,
+            client_a_node_address,
             VIRTUAL_TIMEOUT_BOUNDARY_CHUNK_SIZE,
         )
         .await;
     }
-    mine_blocks_and_wait_for_sync(host_node_address, client_node_address, 1).await;
+    mine_blocks_and_wait_for_sync(host_node_address, client_a_node_address, 1).await;
 
     let host_node_channels = list_channels(host_node_address).await;
     let virtual_channel_after_timeout = host_node_channels
@@ -402,14 +475,14 @@ async fn virtual_trusted_no_broadcast_survives_funding_timeout_and_routes_btc_an
     ));
     assert!(expected_virtual_marker_path.exists());
 
-    let btc_ln_invoice = ln_invoice(client_node_address, Some(3_000_000), None, None, 3600)
+    let btc_ln_invoice = ln_invoice(client_a_node_address, Some(3_000_000), None, None, 3600)
         .await
         .invoice;
     send_payment_with_status(host_node_address, btc_ln_invoice, HTLCStatus::Succeeded).await;
 
     let host_to_client_a_rgb_payment_amount = 50;
-    let rgb_ln_invoice = ln_invoice(
-        client_node_address,
+    let rgb_ln_invoice_a = ln_invoice(
+        client_a_node_address,
         Some(3_000_000),
         Some(&issued_asset_id),
         Some(host_to_client_a_rgb_payment_amount),
@@ -417,7 +490,7 @@ async fn virtual_trusted_no_broadcast_survives_funding_timeout_and_routes_btc_an
     )
     .await
     .invoice;
-    send_payment_with_status(host_node_address, rgb_ln_invoice, HTLCStatus::Succeeded).await;
+    send_payment_with_status(host_node_address, rgb_ln_invoice_a, HTLCStatus::Succeeded).await;
 
     wait_for_ln_balance(
         host_node_address,
@@ -426,43 +499,40 @@ async fn virtual_trusted_no_broadcast_survives_funding_timeout_and_routes_btc_an
     )
     .await;
     wait_for_ln_balance(
-        client_node_address,
+        client_a_node_address,
         &issued_asset_id,
         host_to_client_a_rgb_payment_amount,
     )
     .await;
 
-    let client_to_host_rgb_payment_amount = 5;
-    let client_a_to_host_rgb_invoice = ln_invoice(
+    let client_a_to_host_rgb_payment_amount = 5;
+    let client_a_to_host_invoice = ln_invoice(
         host_node_address,
         Some(3_000_000),
         Some(&issued_asset_id),
-        Some(client_to_host_rgb_payment_amount),
+        Some(client_a_to_host_rgb_payment_amount),
         3600,
     )
     .await
     .invoice;
-    let client_a_to_host_rgb_payment =
-        send_payment_raw(client_node_address, client_a_to_host_rgb_invoice).await;
-    wait_for_ln_payment(
-        client_node_address,
-        &client_a_to_host_rgb_payment
-            .payment_hash
-            .expect("client A -> host RGB payment hash"),
+
+    send_payment_with_status(
+        client_a_node_address,
+        client_a_to_host_invoice,
         HTLCStatus::Succeeded,
     )
     .await;
-
     wait_for_ln_balance(
         host_node_address,
         &issued_asset_id,
-        funded_rgb_amount - host_to_client_a_rgb_payment_amount + client_to_host_rgb_payment_amount,
+        funded_rgb_amount - host_to_client_a_rgb_payment_amount
+            + client_a_to_host_rgb_payment_amount,
     )
     .await;
     wait_for_ln_balance(
-        client_node_address,
+        client_a_node_address,
         &issued_asset_id,
-        host_to_client_a_rgb_payment_amount - client_to_host_rgb_payment_amount,
+        host_to_client_a_rgb_payment_amount - client_a_to_host_rgb_payment_amount,
     )
     .await;
 
@@ -473,7 +543,6 @@ async fn virtual_trusted_no_broadcast_survives_funding_timeout_and_routes_btc_an
         host_node_onchain_spendable_after_open
     );
 
-    /* Deferred to Phase 1:
     let client_b_node_peer_port = next_peer_port();
     let (client_b_node_address, _client_b_node_password) = start_node_with_virtual_options(
         &format!("{test_storage_root}client_b_node"),
@@ -514,63 +583,73 @@ async fn virtual_trusted_no_broadcast_survives_funding_timeout_and_routes_btc_an
     ));
     assert!(expected_virtual_marker_path_b.exists());
 
-    let client_a_to_client_b_btc_payment_msat = 1_500_000;
+    let client_a_to_b_btc_payment_msat = 4_000_000;
     let btc_ln_invoice_b = ln_invoice(
         client_b_node_address,
-        Some(client_a_to_client_b_btc_payment_msat),
+        Some(client_a_to_b_btc_payment_msat),
         None,
         None,
         3600,
     )
     .await
     .invoice;
-    let client_a_to_client_b_btc_payment =
-        send_payment_raw(client_node_address, btc_ln_invoice_b).await;
-    wait_for_ln_payment(
-        client_node_address,
-        &client_a_to_client_b_btc_payment
-            .payment_hash
-            .expect("client A -> client B BTC payment hash"),
+    let decoded_btc_invoice_b = Bolt11Invoice::from_str(&btc_ln_invoice_b).unwrap();
+    assert_eq!(decoded_btc_invoice_b.route_hints().len(), 1);
+    assert_eq!(decoded_btc_invoice_b.route_hints()[0].0.len(), 1);
+    assert_eq!(
+        decoded_btc_invoice_b.route_hints()[0].0[0]
+            .src_node_id
+            .to_string(),
+        host_node_info.pubkey
+    );
+
+    send_payment_with_status(
+        client_a_node_address,
+        btc_ln_invoice_b,
         HTLCStatus::Succeeded,
     )
     .await;
 
-    let client_a_to_client_b_rgb_payment_amount = 10;
+    let client_a_to_b_rgb_payment_amount = 10;
     let rgb_ln_invoice_b = ln_invoice(
         client_b_node_address,
         Some(3_000_000),
         Some(&issued_asset_id),
-        Some(client_a_to_client_b_rgb_payment_amount),
+        Some(client_a_to_b_rgb_payment_amount),
         3600,
     )
     .await
     .invoice;
-    let client_a_to_client_b_rgb_payment =
-        send_payment_raw(client_node_address, rgb_ln_invoice_b).await;
-    wait_for_ln_payment(
-        client_node_address,
-        &client_a_to_client_b_rgb_payment
-            .payment_hash
-            .expect("client A -> client B RGB payment hash"),
+    let decoded_rgb_invoice_b = Bolt11Invoice::from_str(&rgb_ln_invoice_b).unwrap();
+    assert_eq!(decoded_rgb_invoice_b.route_hints().len(), 1);
+    assert_eq!(decoded_rgb_invoice_b.route_hints()[0].0.len(), 1);
+    assert_eq!(
+        decoded_rgb_invoice_b.route_hints()[0].0[0]
+            .src_node_id
+            .to_string(),
+        host_node_info.pubkey
+    );
+
+    send_payment_with_status(
+        client_a_node_address,
+        rgb_ln_invoice_b,
         HTLCStatus::Succeeded,
     )
     .await;
-
     wait_for_ln_balance(
-        client_node_address,
+        client_a_node_address,
         &issued_asset_id,
         host_to_client_a_rgb_payment_amount
-            - client_to_host_rgb_payment_amount
-            - client_a_to_client_b_rgb_payment_amount,
+            - client_a_to_host_rgb_payment_amount
+            - client_a_to_b_rgb_payment_amount,
     )
     .await;
     wait_for_ln_balance(
         client_b_node_address,
         &issued_asset_id,
-        client_a_to_client_b_rgb_payment_amount,
+        client_a_to_b_rgb_payment_amount,
     )
     .await;
-    */
 }
 
 #[tokio::test]
