@@ -1045,6 +1045,23 @@ async fn handle_ldk_events(
             output_script,
             ..
         } => {
+            let ldk_data_dir = PathBuf::from(&static_state.ldk_data_dir);
+            let is_colored = is_channel_rgb(&temporary_channel_id, &ldk_data_dir);
+
+            let addr = WitnessProgram::from_scriptpubkey(
+                output_script.as_bytes(),
+                match static_state.network {
+                    BitcoinNetwork::Mainnet => bitcoin_bech32::constants::Network::Bitcoin,
+                    BitcoinNetwork::Testnet | BitcoinNetwork::Testnet4 => {
+                        bitcoin_bech32::constants::Network::Testnet
+                    }
+                    BitcoinNetwork::Regtest => bitcoin_bech32::constants::Network::Regtest,
+                    BitcoinNetwork::Signet => bitcoin_bech32::constants::Network::Signet,
+                },
+            )
+            .expect("Lightning funding tx should always be to a SegWit output");
+            let script_buf = ScriptBuf::from_bytes(addr.to_scriptpubkey());
+
             if let Some(virtual_draft) =
                 unlocked_state.virtual_channel_draft_get(&temporary_channel_id)
             {
@@ -1082,22 +1099,7 @@ async fn handle_ldk_events(
                 }
                 let mut channel_id = ChannelId::v1_from_funding_outpoint(virtual_funding_txo);
 
-                let ldk_data_dir = PathBuf::from(&static_state.ldk_data_dir);
-                if is_channel_rgb(&temporary_channel_id, &ldk_data_dir) {
-                    let addr = WitnessProgram::from_scriptpubkey(
-                        output_script.as_bytes(),
-                        match static_state.network {
-                            BitcoinNetwork::Mainnet => bitcoin_bech32::constants::Network::Bitcoin,
-                            BitcoinNetwork::Testnet | BitcoinNetwork::Testnet4 => {
-                                bitcoin_bech32::constants::Network::Testnet
-                            }
-                            BitcoinNetwork::Regtest => bitcoin_bech32::constants::Network::Regtest,
-                            BitcoinNetwork::Signet => bitcoin_bech32::constants::Network::Signet,
-                        },
-                    )
-                    .expect("Lightning funding tx should always be to a SegWit output");
-                    let script_buf = ScriptBuf::from_bytes(addr.to_scriptpubkey());
-
+                if is_colored {
                     let (rgb_info, _) =
                         get_rgb_channel_info_pending(&temporary_channel_id, &ldk_data_dir);
                     let channel_rgb_amount = rgb_info.local_rgb_amount;
@@ -1113,7 +1115,7 @@ async fn handle_ldk_events(
                         recipient_id_from_script_buf(script_buf, static_state.network);
                     let recipient_map = map! {
                         asset_id.clone() => vec![Recipient {
-                            recipient_id: recipient_id.clone(),
+                            recipient_id,
                             witness_data: Some(WitnessData {
                                 amount_sat: channel_value_satoshis,
                                 blinding: Some(STATIC_BLINDING),
@@ -1213,12 +1215,13 @@ async fn handle_ldk_events(
                     let proxy_url = TransportEndpoint::new(unlocked_state.proxy_endpoint.clone())
                         .unwrap()
                         .endpoint;
+                    let consignment_path_copy = consignment_path.clone();
                     let unlocked_state_copy = unlocked_state.clone();
                     let res = tokio::task::spawn_blocking(move || {
                         unlocked_state_copy.rgb_post_consignment(
                             &proxy_url,
                             witness_id.clone(),
-                            &consignment_path,
+                            &consignment_path_copy,
                             witness_id,
                             None,
                         )
@@ -1230,6 +1233,7 @@ async fn handle_ldk_events(
                         tracing::error!("cannot post virtual funding consignment: {e}");
                         return Err(ReplayEvent());
                     }
+                    let _ = fs::remove_file(&consignment_path);
                 }
 
                 match unlocked_state
@@ -1287,24 +1291,6 @@ async fn handle_ldk_events(
                 return Ok(());
             }
 
-            let addr = WitnessProgram::from_scriptpubkey(
-                output_script.as_bytes(),
-                match static_state.network {
-                    BitcoinNetwork::Mainnet => bitcoin_bech32::constants::Network::Bitcoin,
-                    BitcoinNetwork::Testnet | BitcoinNetwork::Testnet4 => {
-                        bitcoin_bech32::constants::Network::Testnet
-                    }
-                    BitcoinNetwork::Regtest => bitcoin_bech32::constants::Network::Regtest,
-                    BitcoinNetwork::Signet => bitcoin_bech32::constants::Network::Signet,
-                },
-            )
-            .expect("Lightning funding tx should always be to a SegWit output");
-            let script_buf = ScriptBuf::from_bytes(addr.to_scriptpubkey());
-
-            let is_colored = is_channel_rgb(
-                &temporary_channel_id,
-                &PathBuf::from(&static_state.ldk_data_dir),
-            );
             let (unsigned_psbt, asset_id) = if is_colored {
                 let (rgb_info, _) = get_rgb_channel_info_pending(
                     &temporary_channel_id,
@@ -1379,12 +1365,13 @@ async fn handle_ldk_events(
                 let proxy_url = TransportEndpoint::new(unlocked_state.proxy_endpoint.clone())
                     .unwrap()
                     .endpoint;
+                let consignment_path_copy = consignment_path.clone();
                 let unlocked_state_copy = unlocked_state.clone();
                 let res = tokio::task::spawn_blocking(move || {
                     unlocked_state_copy.rgb_post_consignment(
                         &proxy_url,
                         funding_txid.clone(),
-                        &consignment_path,
+                        &consignment_path_copy,
                         funding_txid,
                         None,
                     )
@@ -1396,6 +1383,7 @@ async fn handle_ldk_events(
                     tracing::error!("cannot post consignment: {e}");
                     return Err(ReplayEvent());
                 }
+                let _ = fs::remove_file(&consignment_path);
             }
 
             let channel_manager_copy = unlocked_state.channel_manager.clone();
