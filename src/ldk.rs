@@ -1382,7 +1382,11 @@ async fn handle_ldk_events(
                     tracing::error!("cannot post consignment: {e}");
                     return Err(ReplayEvent());
                 }
-                let _ = fs::remove_file(&consignment_path);
+                tracing::debug!(
+                    asset_id,
+                    consignment_path = %consignment_path.display(),
+                    "Preserving consignment_out for rgb_send_end"
+                );
             }
 
             let channel_manager_copy = unlocked_state.channel_manager.clone();
@@ -1846,7 +1850,7 @@ async fn handle_ldk_events(
                     is_channel_rgb(&channel_id, &PathBuf::from(&static_state.ldk_data_dir));
                 tracing::info!("Initiator of the channel (colored: {})", is_chan_colored);
 
-                let _txid = tokio::task::spawn_blocking(move || {
+                let finalize_result = match tokio::task::spawn_blocking(move || {
                     if is_chan_colored {
                         state_copy.rgb_send_end(psbt_str_copy).map(|r| r.txid)
                     } else {
@@ -1854,13 +1858,33 @@ async fn handle_ldk_events(
                     }
                 })
                 .await
-                .unwrap()
-                .map_err(|e| {
-                    tracing::error!("Error completing channel opening: {e:?}");
-                    ReplayEvent()
-                })?;
-
+                {
+                    Ok(res) => res,
+                    Err(e) => {
+                        *unlocked_state.rgb_send_lock.lock().unwrap() = false;
+                        tracing::error!(
+                            ?e,
+                            ?channel_id,
+                            funding_txid,
+                            is_chan_colored,
+                            proxy_endpoint = %unlocked_state.proxy_endpoint,
+                            "Channel opening finalization task failed"
+                        );
+                        return Err(ReplayEvent());
+                    }
+                };
                 *unlocked_state.rgb_send_lock.lock().unwrap() = false;
+                if let Err(e) = finalize_result {
+                    tracing::error!(
+                        ?e,
+                        ?channel_id,
+                        funding_txid,
+                        is_chan_colored,
+                        proxy_endpoint = %unlocked_state.proxy_endpoint,
+                        "Error completing channel opening"
+                    );
+                    return Err(ReplayEvent());
+                }
             } else {
                 // acceptor
                 let consignment_path = static_state
