@@ -143,6 +143,9 @@ pub enum APIError {
     #[error("Invalid fee rate: {0}")]
     InvalidFeeRate(String),
 
+    #[error("Invalid HTLC params: {0}")]
+    InvalidHtlcParams(String),
+
     #[error("Invalid indexer: {0}")]
     InvalidIndexer(String),
 
@@ -483,6 +486,7 @@ impl IntoResponse for APIError {
             | APIError::InvalidEstimationBlocks
             | APIError::InvalidExpiration
             | APIError::InvalidFeeRate(_)
+            | APIError::InvalidHtlcParams(_)
             | APIError::InvalidInvoice(_)
             | APIError::InvalidMediaDigest
             | APIError::InvalidMnemonic(_)

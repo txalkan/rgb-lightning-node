@@ -18,9 +18,10 @@ use rgb_lib::{
     wallet::{
         rust_only::{check_proxy_url, ColoringInfo},
         AssetCFA, AssetIFA, AssetNIA, AssetUDA, Assets, Balance, BtcBalance, Metadata, Online,
-        OperationResult, ReceiveData, Recipient, RefreshResult, RgbWalletOpsOffline,
-        RgbWalletOpsOnline, SendBeginResult, SinglesigKeys, Transaction as RgbLibTransaction,
-        Transfer, TransportEndpoint, Unspent, Wallet as RgbLibWallet,
+        OperationResult, Outpoint as RgbOutpoint, ReceiveData, Recipient, RefreshResult,
+        RgbWalletOpsOffline, RgbWalletOpsOnline, SendBeginResult, SinglesigKeys,
+        Transaction as RgbLibTransaction, Transfer, TransportEndpoint, Unspent,
+        Wallet as RgbLibWallet, WalletData,
     },
     AssetSchema, Assignment, BitcoinNetwork, ContractId, Error as RgbLibError, Fascia, RgbTransfer,
     RgbTransport, RgbTxid, UpdateRes, WitnessOrd,
@@ -363,6 +364,30 @@ pub(crate) struct RgbLibWalletWrapper {
 }
 
 impl RgbLibWalletWrapper {
+    #[cfg(any(feature = "electrum", feature = "esplora"))]
+    pub(crate) fn accept_transfer(
+        &self,
+        txid: String,
+        vout: u32,
+        consignment_endpoint: RgbTransport,
+        blinding: u64,
+    ) -> Result<(RgbTransfer, Vec<Assignment>), RgbLibError> {
+        self.get_rgb_wallet()
+            .accept_transfer(txid, vout, consignment_endpoint, blinding)
+    }
+
+    #[cfg(any(feature = "electrum", feature = "esplora"))]
+    pub(crate) fn accept_transfer_from_consignment(
+        &self,
+        consignment: RgbTransfer,
+        txid: String,
+        vout: u32,
+        blinding: u64,
+    ) -> Result<(RgbTransfer, Vec<Assignment>), RgbLibError> {
+        self.get_rgb_wallet()
+            .accept_transfer_from_consignment(consignment, txid, vout, blinding)
+    }
+
     pub(crate) fn new(wallet: Arc<Mutex<RgbLibWallet>>, online: Online) -> Self {
         RgbLibWalletWrapper { wallet, online }
     }
@@ -413,6 +438,28 @@ impl RgbLibWalletWrapper {
         self.get_rgb_wallet().create_consignments(psbt)
     }
 
+    pub(crate) fn color_psbt_for_outpoints_and_consume(
+        &self,
+        psbt_to_color: &mut BitcoinPsbt,
+        coloring_info: ColoringInfo,
+        input_outpoints: Vec<OutPoint>,
+    ) -> Result<Vec<RgbTransfer>, RgbLibError> {
+        self.get_rgb_wallet().color_psbt_for_outpoints_and_consume(
+            psbt_to_color,
+            coloring_info,
+            input_outpoints,
+        )
+    }
+
+    pub(crate) fn contract_assignments_for_outpoints(
+        &self,
+        contract_id: ContractId,
+        outpoints: Vec<RgbOutpoint>,
+    ) -> Result<HashMap<RgbOutpoint, Vec<Assignment>>, RgbLibError> {
+        self.get_rgb_wallet()
+            .contract_assignments_for_outpoints(contract_id, outpoints)
+    }
+
     pub(crate) fn create_utxos(
         &self,
         up_to: bool,
@@ -429,6 +476,16 @@ impl RgbLibWalletWrapper {
             fee_rate,
             skip_sync,
         )
+    }
+
+    #[cfg(any(feature = "electrum", feature = "esplora"))]
+    pub(crate) fn fetch_consignment_by_recipient_id(
+        &self,
+        recipient_id: String,
+        consignment_endpoint: RgbTransport,
+    ) -> Result<(RgbTransfer, String, u32), RgbLibError> {
+        self.get_rgb_wallet()
+            .fetch_consignment_by_recipient_id(recipient_id, consignment_endpoint)
     }
 
     pub(crate) fn fail_transfers(

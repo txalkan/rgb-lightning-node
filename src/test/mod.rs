@@ -1,8 +1,9 @@
+use crate::routes::BitcoinNetwork as ApiBitcoinNetwork;
 use amplify::s;
 use biscuit_auth::{builder::date, macros::*, KeyPair};
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
-use bitcoin::secp256k1::PublicKey;
+use bitcoin::secp256k1::{rand::rngs::OsRng, Keypair as SecpKeyPair, PublicKey, Secp256k1};
 use chrono::{DateTime, Local, Utc};
 use electrum_client::ElectrumApi;
 use lightning_invoice::Bolt11Invoice;
@@ -34,23 +35,25 @@ use crate::routes::{
     DecodeRGBInvoiceResponse, DisconnectPeerRequest, EmptyResponse, FailTransfersRequest,
     FailTransfersResponse, GetAssetMediaRequest, GetAssetMediaResponse, GetChannelIdRequest,
     GetChannelIdResponse, GetPaymentRequest, GetPaymentResponse, GetSwapRequest, GetSwapResponse,
-    InflateRequest, InflateResponse, InitRequest, InitResponse, InvoiceStatus,
-    InvoiceStatusRequest, InvoiceStatusResponse, IssueAssetCFARequest, IssueAssetCFAResponse,
-    IssueAssetIFARequest, IssueAssetIFAResponse, IssueAssetNIARequest, IssueAssetNIAResponse,
-    IssueAssetUDARequest, IssueAssetUDAResponse, KeysendRequest, KeysendResponse, LNInvoiceRequest,
-    LNInvoiceResponse, ListAssetsRequest, ListAssetsResponse, ListChannelsResponse,
-    ListPaymentsResponse, ListPeersResponse, ListSwapsResponse, ListTransactionsRequest,
-    ListTransactionsResponse, ListTransfersRequest, ListTransfersResponse, ListUnspentsRequest,
-    ListUnspentsResponse, MakerExecuteRequest, MakerInitRequest, MakerInitResponse,
-    NetworkInfoResponse, NodeInfoResponse, OpenChannelRequest, OpenChannelResponse, Payment,
-    PaymentType, Peer, PostAssetMediaResponse, Recipient, RefreshRequest, RestoreRequest,
-    RevokeTokenRequest, RgbInvoiceRequest, RgbInvoiceResponse, SendBtcRequest, SendBtcResponse,
-    SendPaymentRequest, SendPaymentResponse, SendRgbRequest, SendRgbResponse, Swap, TakerRequest,
-    Transaction, Transfer, UnlockRequest, Unspent, WitnessData,
+    HtlcClaimRequest, HtlcScanRequest, HtlcTrackerRequest, HtlcTrackerResponse, InflateRequest,
+    InflateResponse, InitRequest, InitResponse, InvoiceStatus, InvoiceStatusRequest,
+    InvoiceStatusResponse, IssueAssetCFARequest, IssueAssetCFAResponse, IssueAssetIFARequest,
+    IssueAssetIFAResponse, IssueAssetNIARequest, IssueAssetNIAResponse, IssueAssetUDARequest,
+    IssueAssetUDAResponse, KeysendRequest, KeysendResponse, LNInvoiceRequest, LNInvoiceResponse,
+    ListAssetsRequest, ListAssetsResponse, ListChannelsResponse, ListPaymentsResponse,
+    ListPeersResponse, ListSwapsResponse, ListTransactionsRequest, ListTransactionsResponse,
+    ListTransfersRequest, ListTransfersResponse, ListUnspentsRequest, ListUnspentsResponse,
+    MakerExecuteRequest, MakerInitRequest, MakerInitResponse, NetworkInfoResponse,
+    NodeInfoResponse, OpenChannelRequest, OpenChannelResponse, Payment, PaymentType, Peer,
+    PostAssetMediaResponse, Recipient, RecipientType, RefreshRequest, RestoreRequest,
+    RevokeTokenRequest, RgbInvoiceHtlcRequest, RgbInvoiceHtlcResponse, RgbInvoiceRequest,
+    RgbInvoiceResponse, SendBtcRequest, SendBtcResponse, SendPaymentRequest, SendPaymentResponse,
+    SendRgbRequest, SendRgbResponse, Swap, TakerRequest, Transaction, Transfer, UnlockRequest,
+    Unspent, WitnessData,
 };
 use crate::utils::{
-    hex_str, hex_str_to_vec, validate_and_parse_payment_hash, ELECTRUM_URL_REGTEST, LDK_DIR,
-    LOGS_DIR, PROXY_ENDPOINT_LOCAL,
+    hex_str, hex_str_to_vec, validate_and_parse_payment_hash, AppState, ELECTRUM_URL_REGTEST,
+    LDK_DIR, LOGS_DIR, PROXY_ENDPOINT_LOCAL,
 };
 
 use super::*;
@@ -289,6 +292,62 @@ async fn start_node_with_virtual_options(
 
     println!("node on peer port {node_peer_port} started with address {node_address:?}");
     (node_address, password)
+}
+
+async fn start_node_with_state(
+    node_test_dir: &str,
+    node_peer_port: u16,
+    keep_node_dir: bool,
+) -> (SocketAddr, String, Arc<AppState>) {
+    println!("starting node with peer port {node_peer_port}");
+    if !keep_node_dir && Path::new(&node_test_dir).is_dir() {
+        std::fs::remove_dir_all(node_test_dir).unwrap();
+    }
+    let (node_address, app_state) = {
+        let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
+        let node_address = listener.local_addr().unwrap();
+        std::fs::create_dir_all(node_test_dir).unwrap();
+        let args = UserArgs {
+            storage_dir_path: node_test_dir.into(),
+            ldk_peer_listening_port: node_peer_port,
+            root_public_key: None,
+            ..Default::default()
+        };
+        let (router, app_state) = app(args).await.unwrap();
+        let app_state_clone = app_state.clone();
+        tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(shutdown_signal(app_state_clone))
+                .await
+                .unwrap();
+        });
+        (node_address, app_state)
+    };
+
+    let password = format!("{node_test_dir}.{node_peer_port}");
+
+    if !keep_node_dir {
+        let payload = InitRequest {
+            password: password.clone(),
+            mnemonic: None,
+        };
+        let res = reqwest::Client::new()
+            .post(format!("http://{node_address}/init"))
+            .json(&payload)
+            .send()
+            .await
+            .unwrap();
+        _check_response_is_ok(res)
+            .await
+            .json::<InitResponse>()
+            .await
+            .unwrap();
+    }
+
+    unlock(node_address, &password).await;
+
+    println!("node on peer port {node_peer_port} started with address {node_address:?}");
+    (node_address, password, app_state)
 }
 
 async fn address(node_address: SocketAddr) -> String {
@@ -994,6 +1053,58 @@ async fn get_swap(node_address: SocketAddr, payment_hash: &str, taker: bool) -> 
         .swap
 }
 
+async fn htlc_claim(
+    node_address: SocketAddr,
+    payment_hash: String,
+    preimage: String,
+) -> EmptyResponse {
+    let payload = HtlcClaimRequest {
+        payment_hash,
+        preimage,
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/htlcclaim"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    _check_response_is_ok(res)
+        .await
+        .json::<EmptyResponse>()
+        .await
+        .unwrap()
+}
+
+async fn htlc_scan(node_address: SocketAddr, payment_hash: String) -> EmptyResponse {
+    let payload = HtlcScanRequest { payment_hash };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/htlcscan"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    _check_response_is_ok(res)
+        .await
+        .json::<EmptyResponse>()
+        .await
+        .unwrap()
+}
+
+async fn htlc_tracker(node_address: SocketAddr, payment_hash: String) -> HtlcTrackerResponse {
+    let payload = HtlcTrackerRequest { payment_hash };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/htlctracker"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    _check_response_is_ok(res)
+        .await
+        .json::<HtlcTrackerResponse>()
+        .await
+        .unwrap()
+}
+
 async fn list_transactions(node_address: SocketAddr) -> Vec<Transaction> {
     println!("listing transactions for node {node_address}");
     let payload = ListTransactionsRequest { skip_sync: false };
@@ -1618,6 +1729,44 @@ async fn rgb_invoice_with_assignment(
         .unwrap()
 }
 
+async fn rgb_invoice_htlc(
+    node_address: SocketAddr,
+    asset_id: Option<String>,
+    assignment: Option<Assignment>,
+    duration_seconds: Option<u32>,
+    payment_hash: String,
+    user_pubkey: String,
+    csv: u32,
+) -> RgbInvoiceHtlcResponse {
+    println!(
+        "generating RGB HTLC invoice{} for node {node_address}",
+        asset_id
+            .as_ref()
+            .map(|id| format!(" for asset {id}"))
+            .unwrap_or_default()
+    );
+    let payload = RgbInvoiceHtlcRequest {
+        asset_id,
+        assignment,
+        duration_seconds,
+        min_confirmations: 1,
+        payment_hash,
+        user_pubkey,
+        csv,
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/rgbinvoicehtlc"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    _check_response_is_ok(res)
+        .await
+        .json::<RgbInvoiceHtlcResponse>()
+        .await
+        .unwrap()
+}
+
 async fn send_asset(
     node_address: SocketAddr,
     asset_id: &str,
@@ -1779,6 +1928,18 @@ async fn claim_hodl_invoice(
         .json::<ClaimHodlInvoiceResponse>()
         .await
         .unwrap()
+}
+
+pub(crate) async fn setup_single_node_with_state(
+    test_dir_base: &str,
+    node_dir: &str,
+    node_peer_port: u16,
+) -> (SocketAddr, String, Arc<AppState>) {
+    let test_dir_node = format!("{test_dir_base}{node_dir}");
+    let (node_addr, _password, app_state) =
+        start_node_with_state(&test_dir_node, node_peer_port, false).await;
+    fund_and_create_utxos(node_addr, None).await;
+    (node_addr, test_dir_node, app_state)
 }
 
 async fn shutdown(node_sockets: &[SocketAddr]) {
@@ -2139,6 +2300,7 @@ mod payment;
 mod refuse_high_fees;
 mod restart;
 mod send_receive;
+mod submarine_swap;
 mod swap_assets_liquidity_both_ways;
 mod swap_reverse_same_channel;
 mod swap_roundtrip_assets;
