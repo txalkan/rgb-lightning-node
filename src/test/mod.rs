@@ -1104,6 +1104,7 @@ async fn ln_invoice_with_type(
         asset_id: asset_id.map(|a| a.to_string()),
         asset_amount,
         payment_hash,
+        description_hash: None,
     };
     let res = reqwest::Client::new()
         .post(format!("http://{node_address}/lninvoice"))
