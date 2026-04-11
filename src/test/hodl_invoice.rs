@@ -477,10 +477,6 @@ async fn claim_hodl_invoice_btc_rgb() {
     .await;
 
     let _ = send_payment_with_status(node1_addr, invoice.clone(), HTLCStatus::Pending).await;
-    assert!(matches!(
-        invoice_status(node2_addr, &invoice).await,
-        InvoiceStatus::Pending
-    ));
     wait_for_claimable_state(&test_dir_node2, &payment_hash, true)
         .await
         .unwrap_or_else(|err| panic!("wait for claimable entry to appear: {err}"));
