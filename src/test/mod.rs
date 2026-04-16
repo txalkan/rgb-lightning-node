@@ -425,6 +425,28 @@ async fn check_payment_status(
     None
 }
 
+async fn check_payment_status_by_type(
+    node_address: SocketAddr,
+    payment_hash: &str,
+    payment_type: PaymentType,
+    expected_status: HTLCStatus,
+) -> Option<Payment> {
+    println!(
+        "checking payment {payment_hash} of type {payment_type:?} is {expected_status:?} on node {node_address}"
+    );
+    let payments = list_payments(node_address).await;
+    if let Some(payment) = payments
+        .iter()
+        .find(|p| p.payment_hash == payment_hash && p.payment_type == payment_type)
+    {
+        if payment.status == expected_status {
+            return Some(payment.clone());
+        }
+        println!("payment found but with status: {:?}", payment.status);
+    }
+    None
+}
+
 async fn close_channel(node_address: SocketAddr, channel_id: &str, peer_pubkey: &str, force: bool) {
     println!(
         "{}closing channel {channel_id} from node {node_address}",
@@ -961,10 +983,15 @@ async fn list_payments(node_address: SocketAddr) -> Vec<Payment> {
         .payments
 }
 
-async fn get_payment(node_address: SocketAddr, payment_hash: &str) -> Payment {
-    println!("getting payment for node {node_address}");
+async fn get_payment(
+    node_address: SocketAddr,
+    payment_hash: &str,
+    payment_type: PaymentType,
+) -> Payment {
+    println!("getting {payment_type:?} payment for node {node_address}");
     let payload = GetPaymentRequest {
         payment_hash: payment_hash.to_string(),
+        payment_type,
     };
     let res = reqwest::Client::new()
         .post(format!("http://{node_address}/getpayment"))
@@ -1793,10 +1820,11 @@ async fn send_payment_with_status(
     expected_status: HTLCStatus,
 ) -> Payment {
     let send_payment = send_payment_raw(node_address, invoice).await;
-    wait_for_ln_payment(
+    wait_for_ln_payment_by_type(
         node_address,
         // TODO: remove unwrap once RGB offers are enabled
         &send_payment.payment_hash.unwrap(),
+        PaymentType::Outbound,
         expected_status,
     )
     .await
@@ -1981,6 +2009,30 @@ async fn wait_for_ln_payment(
         }
         if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 40.0 {
             panic!("cannot find payment in status {expected_status}")
+        }
+    }
+}
+
+async fn wait_for_ln_payment_by_type(
+    node_address: SocketAddr,
+    payment_hash: &str,
+    payment_type: PaymentType,
+    expected_status: HTLCStatus,
+) -> Payment {
+    println!(
+        "waiting for LN payment {payment_hash} of type {payment_type:?} to become {expected_status:?} on node {node_address}"
+    );
+    let t_0 = OffsetDateTime::now_utc();
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if let Some(payment) =
+            check_payment_status_by_type(node_address, payment_hash, payment_type, expected_status)
+                .await
+        {
+            return payment;
+        }
+        if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 40.0 {
+            panic!("cannot find payment in status {expected_status} for type {payment_type:?}")
         }
     }
 }
