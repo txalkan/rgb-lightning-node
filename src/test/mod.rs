@@ -760,6 +760,28 @@ async fn issue_asset_nia(node_address: SocketAddr) -> AssetNIA {
         .asset
 }
 
+async fn issue_asset_nia_with_amounts(node_address: SocketAddr, amounts: Vec<u64>) -> AssetNIA {
+    println!("issuing NIA asset on node {node_address}");
+    let payload = IssueAssetNIARequest {
+        amounts,
+        ticker: s!("USDT"),
+        name: s!("Tether"),
+        precision: 0,
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/issueassetnia"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    _check_response_is_ok(res)
+        .await
+        .json::<IssueAssetNIAResponse>()
+        .await
+        .unwrap()
+        .asset
+}
+
 async fn issue_asset_uda(node_address: SocketAddr, file_path: Option<&str>) -> AssetUDA {
     println!("issuing UDA asset on node {node_address}");
     let mut media_file_digest = None;
@@ -1390,10 +1412,20 @@ async fn open_channel_raw(
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             let channels = list_channels(node_address).await;
             if let Some(channel) = channels.iter().find(|c| {
+                let asset_amounts_match = if asset_id.is_some() {
+                    let local_amount = asset_amount
+                        .unwrap_or(0)
+                        .saturating_sub(push_asset_amount.unwrap_or(0));
+                    let remote_amount = push_asset_amount.unwrap_or(0);
+                    c.asset_local_amount == Some(local_amount)
+                        && c.asset_remote_amount == Some(remote_amount)
+                } else {
+                    c.asset_local_amount.is_none() && c.asset_remote_amount.is_none()
+                };
                 c.peer_pubkey == dest_peer_pubkey
                     && c.asset_id == expected_asset_id
-                    && c.asset_local_amount == asset_amount
                     && c.virtual_open_mode.as_deref() == virtual_open_mode
+                    && asset_amounts_match
             }) {
                 if channel.ready && channel.is_usable {
                     return Ok(channel.clone());
@@ -1493,6 +1525,7 @@ async fn open_channel_with_custom_data(
     .expect("channel opening should succeed")
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn open_virtual_channel(
     node_address: SocketAddr,
     dest_peer_pubkey: &str,
@@ -1501,6 +1534,7 @@ async fn open_virtual_channel(
     push_msat: Option<u64>,
     asset_amount: Option<u64>,
     asset_id: Option<&str>,
+    push_asset_amount: Option<u64>,
 ) -> Channel {
     open_channel_raw(
         node_address,
@@ -1510,7 +1544,7 @@ async fn open_virtual_channel(
         push_msat,
         asset_amount,
         asset_id,
-        None,
+        push_asset_amount,
         None,
         None,
         None,
