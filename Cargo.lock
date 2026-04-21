@@ -2477,7 +2477,6 @@ name = "lightning"
 version = "0.2.2"
 dependencies = [
  "bech32 0.11.1",
- "bincode",
  "bitcoin",
  "dnssec-prover",
  "futures",
@@ -2488,8 +2487,9 @@ dependencies = [
  "lightning-types",
  "musig2",
  "possiblyrandom",
- "rgb-lib",
+ "rgb-lib 0.3.0-beta.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
+ "serde_json",
  "tokio",
 ]
 
@@ -2536,7 +2536,7 @@ dependencies = [
  "bech32 0.11.1",
  "bitcoin",
  "lightning-types",
- "rgb-lib",
+ "rgb-lib 0.3.0-beta.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
 ]
 
@@ -3734,7 +3734,8 @@ dependencies = [
 [[package]]
 name = "rgb-lib"
 version = "0.3.0-beta.5"
-source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?branch=dev#5aabef63b8fc004fa51a143f47c687fc6dc9c0e5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a09de20d5b52c051897e4d990615fc8110f9efbf1bb43c033cec2dfeddd7691"
 dependencies = [
  "amplify",
  "base64 0.22.1",
@@ -3748,7 +3749,7 @@ dependencies = [
  "rand 0.10.1",
  "reqwest 0.13.2",
  "rgb-invoicing",
- "rgb-lib-migration",
+ "rgb-lib-migration 0.3.0-beta.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "rgb-ops",
  "rgb-psbt-utils",
  "rgb-schemas",
@@ -3771,6 +3772,58 @@ dependencies = [
  "url",
  "walkdir",
  "zip 8.5.1",
+]
+
+[[package]]
+name = "rgb-lib"
+version = "0.3.0-beta.5"
+source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?branch=dev#5aabef63b8fc004fa51a143f47c687fc6dc9c0e5"
+dependencies = [
+ "amplify",
+ "base64 0.22.1",
+ "bdk_electrum",
+ "bdk_esplora",
+ "bdk_wallet",
+ "chacha20poly1305",
+ "file-format",
+ "generic-array",
+ "hex",
+ "rand 0.10.1",
+ "reqwest 0.13.2",
+ "rgb-invoicing",
+ "rgb-lib-migration 0.3.0-beta.3 (git+https://github.com/UTEXO-Protocol/rgb-lib.git?branch=dev)",
+ "rgb-ops",
+ "rgb-psbt-utils",
+ "rgb-schemas",
+ "rgb-strict-encoding",
+ "rgb-strict-types",
+ "rustls 0.23.39",
+ "scrypt",
+ "sea-orm",
+ "sea-query",
+ "serde",
+ "serde_json",
+ "slog",
+ "slog-async",
+ "slog-term",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "typenum",
+ "url",
+ "walkdir",
+ "zip 8.5.1",
+]
+
+[[package]]
+name = "rgb-lib-migration"
+version = "0.3.0-beta.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4dd5262d25fe54dd65afa13c19859abba7f81d130fa26d10f018e30bfdd333a"
+dependencies = [
+ "sea-orm-migration",
+ "tokio",
 ]
 
 [[package]]
@@ -3819,7 +3872,7 @@ dependencies = [
  "rand 0.8.6",
  "regex",
  "reqwest 0.12.28",
- "rgb-lib",
+ "rgb-lib 0.3.0-beta.5 (git+https://github.com/UTEXO-Protocol/rgb-lib.git?branch=dev)",
  "rln-migration",
  "scrypt",
  "sea-orm",

@@ -298,6 +298,11 @@ pub(crate) fn hex_str(value: &[u8]) -> String {
     res
 }
 
+#[cfg(test)]
+pub(crate) fn new_jsonrpc_request_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 pub(crate) fn hex_str_to_compressed_pubkey(hex: &str) -> Option<PublicKey> {
     if hex.len() != 33 * 2 {
         return None;
