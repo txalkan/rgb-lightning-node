@@ -101,13 +101,13 @@ async fn success() {
     .await;
 
     let decoded = decode_ln_invoice(node1_addr, &invoice).await;
-    let payment = get_payment(node1_addr, &decoded.payment_hash, PaymentType::Outbound).await;
+    let payment = get_payment(node2_addr, &decoded.payment_hash, PaymentType::Outbound).await;
     assert_eq!(payment.asset_id, Some(asset_id.clone()));
     assert_eq!(payment.asset_amount, asset_amount);
     assert_eq!(payment.status, HTLCStatus::Succeeded);
     check_preimage_matches_hash(&payment, &decoded.payment_hash);
     let payment = get_payment(
-        node2_addr,
+        node1_addr,
         &decoded.payment_hash,
         PaymentType::InboundAutoClaim,
     )
@@ -143,13 +143,13 @@ async fn success() {
     let _ = send_payment(node2_addr, invoice.clone()).await;
 
     let decoded = decode_ln_invoice(node1_addr, &invoice).await;
-    let payment = get_payment(node1_addr, &decoded.payment_hash, PaymentType::Outbound).await;
+    let payment = get_payment(node2_addr, &decoded.payment_hash, PaymentType::Outbound).await;
     assert_eq!(payment.asset_id, Some(asset_id.clone()));
     assert_eq!(payment.asset_amount, asset_amount);
     assert_eq!(payment.status, HTLCStatus::Succeeded);
     check_preimage_matches_hash(&payment, &decoded.payment_hash);
     let payment = get_payment(
-        node2_addr,
+        node1_addr,
         &decoded.payment_hash,
         PaymentType::InboundAutoClaim,
     )
