@@ -382,14 +382,12 @@ private fun waitForPaymentStatus(node: SdkNode, paymentHash: PaymentHash, timeou
     val deadline = System.currentTimeMillis() + timeoutSec * 1000L
     var lastStatus: String = "not found"
     while (System.currentTimeMillis() < deadline) {
-        try {
-            val payment = node.getPayment(paymentHash)
+        val payment = node.listPayments().firstOrNull { it.paymentHash == paymentHash }
+        if (payment != null) {
             lastStatus = payment.status.name
             if (payment.status == HtlcStatus.SUCCEEDED) {
                 return payment
             }
-        } catch (_: RlnException.NotFound) {
-            lastStatus = "not found"
         }
         Thread.sleep(1000L)
     }

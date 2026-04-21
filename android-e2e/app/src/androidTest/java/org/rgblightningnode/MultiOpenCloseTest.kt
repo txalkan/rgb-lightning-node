@@ -250,14 +250,12 @@ class MultiOpenCloseTest {
         val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
         var last = "not found"
         while (System.currentTimeMillis() < deadline) {
-            try {
-                val payment = node.getPayment(paymentHash)
+            val payment = node.listPayments().firstOrNull { it.paymentHash == paymentHash }
+            if (payment != null) {
                 last = payment.status.name
                 if (payment.status == HtlcStatus.SUCCEEDED) {
                     return
                 }
-            } catch (_: RlnException.NotFound) {
-                last = "not found"
             }
             Thread.sleep(1_000L)
         }

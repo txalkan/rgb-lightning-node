@@ -407,13 +407,14 @@ def wait_for_payment_status(
     deadline = time.time() + timeout_sec
     last_status = "not found"
     while time.time() < deadline:
-        try:
-            payment = node.get_payment(payment_hash)
+        payment = next(
+            (p for p in node.list_payments() if p.payment_hash == payment_hash),
+            None,
+        )
+        if payment is not None:
             last_status = payment.status.name
             if payment.status == rln.HtlcStatus.SUCCEEDED:
                 return payment
-        except rln.RlnError.NotFound:
-            last_status = "not found"
         time.sleep(1)
     raise RuntimeError(
         f"timeout waiting for payment success: payment_hash={payment_hash} last_status={last_status} after {timeout_sec}s"
