@@ -1,5 +1,5 @@
 use crate::kv_store::SeaOrmKvStore;
-use crate::async_order::AsyncOrderMessageHandler;
+use crate::async_order::{AsyncOrderAccessControl, AsyncOrderMessageHandler};
 use amplify::{map, s};
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::hashes::{sha256, Hash as BitcoinHash};
@@ -973,6 +973,40 @@ pub(crate) type OutputSweeper = ldk_sweep::OutputSweeper<
     Arc<FilesystemLogger>,
     Arc<RgbOutputSpender>,
 >;
+
+struct VirtualChannelAccess {
+    trusted_no_broadcast: bool,
+    virtual_peer_pubkeys: Vec<PublicKey>,
+    channel_manager: Arc<ChannelManager>,
+}
+
+impl VirtualChannelAccess {
+    fn new(static_state: &StaticState, channel_manager: Arc<ChannelManager>) -> Self {
+        Self {
+            trusted_no_broadcast: static_state.enable_virtual_channels_v0,
+            virtual_peer_pubkeys: static_state.virtual_peer_pubkeys.clone(),
+            channel_manager,
+        }
+    }
+
+    fn is_virtual_peer(&self, peer: &PublicKey) -> bool {
+        self.virtual_peer_pubkeys.is_empty()
+            || self
+                .virtual_peer_pubkeys
+                .iter()
+                .any(|virtual_peer| virtual_peer == peer)
+    }
+}
+
+impl AsyncOrderAccessControl for VirtualChannelAccess {
+    fn allows_peer(&self, peer: &PublicKey) -> bool {
+        self.trusted_no_broadcast
+            && self.is_virtual_peer(peer)
+            && self.channel_manager.list_channels().iter().any(|channel| {
+                channel.counterparty.node_id == *peer && channel.trusted_no_broadcast
+            })
+    }
+}
 
 fn _safe_update_rgb_channel_amount(
     channel_id: &str,
@@ -3132,11 +3166,26 @@ pub(crate) async fn start_ldk(
         .unwrap()
         .as_secs();
     rand::thread_rng().fill_bytes(&mut ephemeral_bytes);
+
+    let virtual_channel_access = Arc::new(VirtualChannelAccess::new(
+        static_state,
+        channel_manager.clone(),
+    ));
+    let async_order_handler = match static_state.lsp_base_url.as_ref() {
+        Some(lsp_base_url) => Arc::new(AsyncOrderMessageHandler::new_with_lsp_client(
+            virtual_channel_access,
+            lsp_base_url.clone(),
+            static_state.lsp_bearer_token.clone(),
+            Handle::current(),
+        )),
+        None => Arc::new(AsyncOrderMessageHandler::new(virtual_channel_access)),
+    };
+
     let lightning_msg_handler = MessageHandler {
         chan_handler: channel_manager.clone(),
         route_handler: gossip_sync.clone(),
         onion_message_handler: onion_messenger.clone(),
-        custom_message_handler: Arc::new(AsyncOrderMessageHandler::new()),
+        custom_message_handler: async_order_handler,
         send_only_message_handler: Arc::clone(&chain_monitor),
     };
     let peer_manager: Arc<PeerManager> = Arc::new(PeerManager::new(

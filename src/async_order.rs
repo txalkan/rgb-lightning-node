@@ -8,7 +8,8 @@ use lightning::util::ser::{LengthLimitedRead, LengthReadable, WithoutLength, Wri
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use tokio::runtime::Handle;
 use tracing::warn;
 
 use crate::utils::{hex_str, validate_and_parse_payment_hash};
@@ -18,8 +19,10 @@ const ASYNC_ERROR_DUPLICATE_INDEX_CONFLICT: i64 = 1004;
 const ASYNC_ERROR_DUPLICATE_HASH_CONFLICT: i64 = 1005;
 const ASYNC_ERROR_INVALID_HASH_BATCH: i64 = 1003;
 const ASYNC_ERROR_UNSUPPORTED_PROTOCOL_VERSION: i64 = 1000;
-const DEFAULT_REFILL_BATCH_SIZE: &str = "200";
-const JSONRPC_INVALID_PARAMS: i64 = -32600;
+const ASYNC_ORDER_MAX_HASH_BATCH_SIZE: usize = 200;
+const JSONRPC_INVALID_REQUEST: i64 = -32600;
+const JSONRPC_INVALID_PARAMS: i64 = -32602;
+const JSONRPC_INTERNAL_ERROR: i64 = -32603;
 const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const JSONRPC_PARSE_ERROR: i64 = -32700;
 const JSONRPC_VERSION: &str = "2.0";
@@ -81,7 +84,7 @@ pub(crate) struct AsyncOrderNewParamsWire {
     pub(crate) hashes: Vec<AsyncOrderNewHashWire>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct AsyncOrderNewResultWire {
     protocol_version: String,
     order_id: String,
@@ -92,15 +95,30 @@ struct AsyncOrderNewResultWire {
     refill_batch_size: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct JsonRpcErrorWire {
     code: i64,
     message: String,
 }
 
+pub(crate) trait AsyncOrderAccessControl: Send + Sync {
+    fn allows_peer(&self, peer: &PublicKey) -> bool;
+}
+
 #[derive(Debug)]
+struct AllowFreeAccess;
+
+impl AsyncOrderAccessControl for AllowFreeAccess {
+    fn allows_peer(&self, _peer: &PublicKey) -> bool {
+        true
+    }
+}
+
 pub(crate) struct AsyncOrderMessageHandler {
-    state: Mutex<AsyncOrderState>,
+    access_control: Arc<dyn AsyncOrderAccessControl>,
+    lsp_client: Option<AsyncOrderLspClient>,
+    runtime_handle: Option<Handle>,
+    state: Arc<Mutex<AsyncOrderState>>,
 }
 
 #[derive(Debug)]
@@ -121,6 +139,20 @@ struct AsyncOrderRecord {
     hashes: BTreeMap<u64, String>,
 }
 
+#[derive(Clone)]
+struct AsyncOrderLspClient {
+    base_url: String,
+    lsp_bearer_token: Option<String>,
+    client: reqwest::Client,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AsyncOrderNewStoreRequest {
+    peer_pubkey: String,
+    protocol_version: String,
+    hashes: Vec<AsyncOrderNewHashWire>,
+}
+
 impl Default for AsyncOrderState {
     fn default() -> Self {
         Self {
@@ -131,21 +163,104 @@ impl Default for AsyncOrderState {
     }
 }
 
-impl AsyncOrderMessageHandler {
-    pub(crate) fn new() -> Self {
+impl AsyncOrderLspClient {
+    fn new(base_url: String, lsp_bearer_token: Option<String>) -> Self {
         Self {
-            state: Mutex::new(AsyncOrderState::default()),
+            base_url: base_url.trim_end_matches('/').to_owned(),
+            lsp_bearer_token,
+            client: reqwest::Client::new(),
         }
     }
 
-    fn queue_jsonrpc_value(&self, peer: PublicKey, value: Value) {
-        let mut state = self.state.lock().unwrap();
+    async fn async_order_new(
+        &self,
+        sender_node_id: PublicKey,
+        params: AsyncOrderNewParamsWire,
+    ) -> Result<AsyncOrderNewResultWire, JsonRpcErrorWire> {
+        let request = AsyncOrderNewStoreRequest {
+            peer_pubkey: hex_str(&sender_node_id.serialize()),
+            protocol_version: params.protocol_version,
+            hashes: params.hashes,
+        };
+        let mut builder = self
+            .client
+            .post(format!("{}/internal/async_order/new", self.base_url))
+            .json(&request);
+        if let Some(token) = self
+            .lsp_bearer_token
+            .as_deref()
+            .filter(|token| !token.is_empty())
+        {
+            builder = builder.bearer_auth(token);
+        }
+
+        let response = builder.send().await.map_err(|err| {
+            JsonRpcErrorWire::internal_error(format!("utexo_lsp_request_failed: {err}"))
+        })?;
+        let status = response.status();
+        if status.is_success() {
+            return response
+                .json::<AsyncOrderNewResultWire>()
+                .await
+                .map_err(|err| {
+                    JsonRpcErrorWire::internal_error(format!("utexo_lsp_invalid_response: {err}"))
+                });
+        }
+
+        match response.json::<JsonRpcErrorWire>().await {
+            Ok(err) => Err(err),
+            Err(err) => Err(JsonRpcErrorWire::internal_error(format!(
+                "utexo_lsp_error_status_{status}: {err}"
+            ))),
+        }
+    }
+}
+
+impl AsyncOrderMessageHandler {
+    pub(crate) fn new(access_control: Arc<dyn AsyncOrderAccessControl>) -> Self {
+        Self {
+            access_control,
+            lsp_client: None,
+            runtime_handle: None,
+            state: Arc::new(Mutex::new(AsyncOrderState::default())),
+        }
+    }
+
+    pub(crate) fn new_with_lsp_client(
+        access_control: Arc<dyn AsyncOrderAccessControl>,
+        lsp_base_url: String,
+        lsp_bearer_token: Option<String>,
+        runtime_handle: Handle,
+    ) -> Self {
+        Self {
+            access_control,
+            lsp_client: Some(AsyncOrderLspClient::new(lsp_base_url, lsp_bearer_token)),
+            runtime_handle: Some(runtime_handle),
+            state: Arc::new(Mutex::new(AsyncOrderState::default())),
+        }
+    }
+
+    #[cfg(test)]
+    fn new_allowing_all_peers() -> Self {
+        Self::new(Arc::new(AllowFreeAccess))
+    }
+
+    fn queue_jsonrpc_value_to_state(
+        state: &Arc<Mutex<AsyncOrderState>>,
+        peer: PublicKey,
+        value: Value,
+    ) {
+        let mut state = state.lock().unwrap();
         state.pending.push((
             peer,
             AsyncOrderMessage {
                 payload: value.to_string(),
             },
         ));
+    }
+
+    fn queue_jsonrpc_value(&self, peer: PublicKey, value: Value) {
+        Self::queue_jsonrpc_value_to_state(&self.state, peer, value);
     }
 
     fn queue_jsonrpc_result(&self, peer: PublicKey, id: Value, result: AsyncOrderNewResultWire) {
@@ -160,7 +275,18 @@ impl AsyncOrderMessageHandler {
     }
 
     fn queue_jsonrpc_error(&self, peer: PublicKey, id: Value, code: i64, message: &str) {
-        self.queue_jsonrpc_value(
+        Self::queue_jsonrpc_error_to_state(&self.state, peer, id, code, message);
+    }
+
+    fn queue_jsonrpc_error_to_state(
+        state: &Arc<Mutex<AsyncOrderState>>,
+        peer: PublicKey,
+        id: Value,
+        code: i64,
+        message: &str,
+    ) {
+        Self::queue_jsonrpc_value_to_state(
+            state,
             peer,
             json!({
                 "jsonrpc": JSONRPC_VERSION,
@@ -169,6 +295,23 @@ impl AsyncOrderMessageHandler {
                     code,
                     message: message.to_owned(),
                 },
+            }),
+        );
+    }
+
+    fn queue_jsonrpc_result_to_state(
+        state: &Arc<Mutex<AsyncOrderState>>,
+        peer: PublicKey,
+        id: Value,
+        result: AsyncOrderNewResultWire,
+    ) {
+        Self::queue_jsonrpc_value_to_state(
+            state,
+            peer,
+            json!({
+                "jsonrpc": JSONRPC_VERSION,
+                "id": id,
+                "result": result,
             }),
         );
     }
@@ -184,18 +327,23 @@ impl AsyncOrderMessageHandler {
         );
     }
 
-    fn apply_async_order_new(
+    fn queue_jsonrpc_invalid_request(&self, peer: PublicKey) {
+        self.queue_jsonrpc_value(
+            peer,
+            json!({
+                "jsonrpc": JSONRPC_VERSION,
+                "id": Value::Null,
+                "error": JsonRpcErrorWire::invalid_request(),
+            }),
+        );
+    }
+
+    fn record_async_order_new(
         &self,
         sender_node_id: PublicKey,
         params: AsyncOrderNewParamsWire,
     ) -> Result<AsyncOrderNewResultWire, JsonRpcErrorWire> {
-        if params.protocol_version != PROTOCOL_VERSION {
-            return Err(JsonRpcErrorWire::unsupported_protocol_version());
-        }
-        if params.hashes.is_empty() {
-            return Err(JsonRpcErrorWire::invalid_hash_batch());
-        }
-
+        Self::validate_async_order_new_params(&params)?;
         let parsed_hashes = parse_hash_batch(params.hashes)?;
 
         let mut state = self.state.lock().unwrap();
@@ -219,11 +367,64 @@ impl AsyncOrderMessageHandler {
 
         Ok(order.snapshot_result())
     }
+
+    fn send_new_async_order_to_lsp(
+        &self,
+        sender_node_id: PublicKey,
+        id: Value,
+        params: AsyncOrderNewParamsWire,
+    ) -> bool {
+        let (Some(lsp_client), Some(runtime_handle)) =
+            (self.lsp_client.clone(), self.runtime_handle.clone())
+        else {
+            return false;
+        };
+
+        let state = Arc::clone(&self.state);
+        runtime_handle.spawn(async move {
+            match lsp_client.async_order_new(sender_node_id, params).await {
+                Ok(result) => {
+                    AsyncOrderMessageHandler::queue_jsonrpc_result_to_state(
+                        &state,
+                        sender_node_id,
+                        id,
+                        result,
+                    );
+                }
+                Err(err) => {
+                    AsyncOrderMessageHandler::queue_jsonrpc_error_to_state(
+                        &state,
+                        sender_node_id,
+                        id,
+                        err.code,
+                        &err.message,
+                    );
+                }
+            }
+        });
+        true
+    }
+
+    fn validate_async_order_new_params(
+        params: &AsyncOrderNewParamsWire,
+    ) -> Result<(), JsonRpcErrorWire> {
+        if params.protocol_version != PROTOCOL_VERSION {
+            return Err(JsonRpcErrorWire::unsupported_protocol_version());
+        }
+        if params.hashes.is_empty() {
+            return Err(JsonRpcErrorWire::invalid_hash_batch());
+        }
+        if params.hashes.len() > ASYNC_ORDER_MAX_HASH_BATCH_SIZE {
+            return Err(JsonRpcErrorWire::invalid_hash_batch());
+        }
+        parse_hash_batch(params.hashes.clone())?;
+        Ok(())
+    }
 }
 
 impl Default for AsyncOrderMessageHandler {
     fn default() -> Self {
-        Self::new()
+        Self::new(Arc::new(AllowFreeAccess))
     }
 }
 
@@ -251,8 +452,17 @@ impl CustomMessageHandler for AsyncOrderMessageHandler {
         msg: Self::CustomMessage,
         sender_node_id: PublicKey,
     ) -> Result<(), LightningError> {
+        if !self.access_control.allows_peer(&sender_node_id) {
+            warn!(peer = %sender_node_id, "rejected async_order peer message from untrusted peer");
+            return Ok(());
+        }
+
         if msg.payload.as_bytes().contains(&0) {
-            warn!(payload = %msg.payload, "async_order peer message contained a NUL byte");
+            warn!(
+                peer = %sender_node_id,
+                payload_len = msg.payload.len(),
+                "async_order peer message contained a NUL byte"
+            );
             self.queue_jsonrpc_parse_error(sender_node_id);
             return Ok(());
         }
@@ -260,29 +470,39 @@ impl CustomMessageHandler for AsyncOrderMessageHandler {
         let envelope: AsyncOrderEnvelope = match serde_json::from_str(&msg.payload) {
             Ok(envelope) => envelope,
             Err(err) => {
-                warn!(error = %err, payload = %msg.payload, "failed to decode async_order peer message");
+                warn!(
+                    error = %err,
+                    peer = %sender_node_id,
+                    payload_len = msg.payload.len(),
+                    "failed to decode async_order peer message"
+                );
                 self.queue_jsonrpc_parse_error(sender_node_id);
                 return Ok(());
             }
         };
 
         if envelope.jsonrpc != JSONRPC_VERSION {
-            self.queue_jsonrpc_parse_error(sender_node_id);
+            self.queue_jsonrpc_invalid_request(sender_node_id);
             return Ok(());
         }
 
         if envelope.result.is_some() || envelope.error.is_some() {
-            self.queue_jsonrpc_parse_error(sender_node_id);
+            if envelope.method.is_some() {
+                warn!(
+                    peer = %sender_node_id,
+                    "ignoring malformed async_order response envelope with method field"
+                );
+            }
             return Ok(());
         }
 
         let Some(method) = envelope.method else {
-            self.queue_jsonrpc_parse_error(sender_node_id);
+            self.queue_jsonrpc_invalid_request(sender_node_id);
             return Ok(());
         };
 
         let Some(id) = envelope.id else {
-            self.queue_jsonrpc_parse_error(sender_node_id);
+            self.queue_jsonrpc_invalid_request(sender_node_id);
             return Ok(());
         };
 
@@ -314,7 +534,26 @@ impl CustomMessageHandler for AsyncOrderMessageHandler {
                 }
             };
 
-            match self.apply_async_order_new(sender_node_id, params) {
+            if self.lsp_client.is_some() {
+                match Self::validate_async_order_new_params(&params) {
+                    Ok(()) => {
+                        if !self.send_new_async_order_to_lsp(sender_node_id, id.clone(), params) {
+                            self.queue_jsonrpc_error(
+                                sender_node_id,
+                                id,
+                                JSONRPC_INTERNAL_ERROR,
+                                "async_order_lsp_client_not_available",
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        self.queue_jsonrpc_error(sender_node_id, id, err.code, &err.message)
+                    }
+                }
+                return Ok(());
+            }
+
+            match self.record_async_order_new(sender_node_id, params) {
                 Ok(result) => self.queue_jsonrpc_result(sender_node_id, id, result),
                 Err(err) => self.queue_jsonrpc_error(sender_node_id, id, err.code, &err.message),
             }
@@ -409,6 +648,14 @@ impl AsyncOrderRecord {
             }
         }
 
+        let missing_count = hashes
+            .iter()
+            .filter(|(index, _)| !self.hashes.contains_key(index))
+            .count();
+        if self.hashes.len().saturating_add(missing_count) > ASYNC_ORDER_MAX_HASH_BATCH_SIZE {
+            return Err(JsonRpcErrorWire::invalid_hash_batch());
+        }
+
         if saw_existing && saw_missing {
             return Err(JsonRpcErrorWire::invalid_hash_batch());
         }
@@ -436,7 +683,7 @@ impl AsyncOrderRecord {
             accepted_through_index: self.highest_hash_index().to_string(),
             next_index_expected: self.next_hash_index().to_string(),
             unused_hashes: self.available_hashes().to_string(),
-            refill_batch_size: DEFAULT_REFILL_BATCH_SIZE.to_owned(),
+            refill_batch_size: ASYNC_ORDER_MAX_HASH_BATCH_SIZE.to_string(),
         }
     }
 }
@@ -463,10 +710,24 @@ impl JsonRpcErrorWire {
         }
     }
 
+    fn internal_error(message: String) -> Self {
+        Self {
+            code: JSONRPC_INTERNAL_ERROR,
+            message,
+        }
+    }
+
     fn invalid_hash_batch() -> Self {
         Self {
             code: ASYNC_ERROR_INVALID_HASH_BATCH,
             message: "invalid_hash_batch".to_owned(),
+        }
+    }
+
+    fn invalid_request() -> Self {
+        Self {
+            code: JSONRPC_INVALID_REQUEST,
+            message: "invalid request".to_owned(),
         }
     }
 
@@ -510,6 +771,15 @@ mod tests {
     use super::*;
     use crate::utils::new_jsonrpc_request_id;
     use bitcoin::secp256k1::{Secp256k1, SecretKey};
+    use std::sync::Arc;
+
+    struct DenyAllAccess;
+
+    impl AsyncOrderAccessControl for DenyAllAccess {
+        fn allows_peer(&self, _peer: &PublicKey) -> bool {
+            false
+        }
+    }
 
     fn test_peer_pubkey(tag: u8) -> PublicKey {
         let secp = Secp256k1::new();
@@ -519,7 +789,7 @@ mod tests {
         PublicKey::from_secret_key(&secp, &secret_key)
     }
 
-    fn new_request_payload(id: &str, hashes: &[(u64, &str)]) -> String {
+    fn new_order_request_payload(id: &str, hashes: &[(u64, &str)]) -> String {
         let hashes = hashes
             .iter()
             .map(|(hash_index, payment_hash)| {
@@ -548,12 +818,16 @@ mod tests {
         serde_json::from_str(&pending[0].1.payload).unwrap()
     }
 
+    fn payment_hash_for_index(index: u64) -> String {
+        format!("{index:064x}")
+    }
+
     #[test]
     fn async_order_new_creates_order_and_returns_state() {
-        let handler = AsyncOrderMessageHandler::new();
+        let handler = AsyncOrderMessageHandler::new_allowing_all_peers();
         let test_peer = test_peer_pubkey(1);
         let request_id = new_jsonrpc_request_id();
-        let request_payload = new_request_payload(
+        let request_payload = new_order_request_payload(
             &request_id,
             &[
                 (
@@ -588,18 +862,20 @@ mod tests {
         assert_eq!(response_value["result"]["accepted_through_index"], "2");
         assert_eq!(response_value["result"]["next_index_expected"], "3");
         assert_eq!(response_value["result"]["unused_hashes"], "2");
-        assert_eq!(
-            response_value["result"]["refill_batch_size"],
-            DEFAULT_REFILL_BATCH_SIZE
-        );
+        let refill_batch_size = response_value["result"]["refill_batch_size"]
+            .as_str()
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        assert_eq!(refill_batch_size, ASYNC_ORDER_MAX_HASH_BATCH_SIZE);
     }
 
     #[test]
     fn async_order_new_is_idempotent_for_identical_batch() {
-        let handler = AsyncOrderMessageHandler::new();
+        let handler = AsyncOrderMessageHandler::new_allowing_all_peers();
         let test_peer = test_peer_pubkey(2);
         let request_id = new_jsonrpc_request_id();
-        let request_payload = new_request_payload(
+        let request_payload = new_order_request_payload(
             &request_id,
             &[
                 (
@@ -639,10 +915,10 @@ mod tests {
 
     #[test]
     fn async_order_new_rejects_conflicting_index() {
-        let handler = AsyncOrderMessageHandler::new();
+        let handler = AsyncOrderMessageHandler::new_allowing_all_peers();
         let test_peer = test_peer_pubkey(3);
         let initial_request_id = new_jsonrpc_request_id();
-        let initial_request_payload = new_request_payload(
+        let initial_request_payload = new_order_request_payload(
             &initial_request_id,
             &[
                 (
@@ -666,7 +942,7 @@ mod tests {
         read_single_response(&handler);
 
         let conflicting_request_id = new_jsonrpc_request_id();
-        let conflicting_request_payload = new_request_payload(
+        let conflicting_request_payload = new_order_request_payload(
             &conflicting_request_id,
             &[(
                 1,
@@ -696,11 +972,11 @@ mod tests {
 
     #[test]
     fn async_order_new_rejects_repeated_payment_hash() {
-        let handler = AsyncOrderMessageHandler::new();
+        let handler = AsyncOrderMessageHandler::new_allowing_all_peers();
         let test_peer = test_peer_pubkey(6);
         let initial_request_id = new_jsonrpc_request_id();
 
-        let initial_request_payload = new_request_payload(
+        let initial_request_payload = new_order_request_payload(
             &initial_request_id,
             &[
                 (
@@ -724,7 +1000,7 @@ mod tests {
         read_single_response(&handler);
 
         let repeated_hash_request_id = new_jsonrpc_request_id();
-        let repeated_hash_payload = new_request_payload(
+        let repeated_hash_payload = new_order_request_payload(
             &repeated_hash_request_id,
             &[
                 (
@@ -760,7 +1036,7 @@ mod tests {
 
     #[test]
     fn async_order_new_rejects_malformed_json_with_parse_error() {
-        let handler = AsyncOrderMessageHandler::new();
+        let handler = AsyncOrderMessageHandler::new_allowing_all_peers();
         let test_peer = test_peer_pubkey(4);
 
         handler
@@ -780,8 +1056,8 @@ mod tests {
     }
 
     #[test]
-    fn async_order_new_rejects_notification_like_payload_with_parse_error() {
-        let handler = AsyncOrderMessageHandler::new();
+    fn async_order_new_rejects_notification_like_payload_with_invalid_request() {
+        let handler = AsyncOrderMessageHandler::new_allowing_all_peers();
         let test_peer = test_peer_pubkey(5);
 
         handler
@@ -809,7 +1085,87 @@ mod tests {
         let response_value = read_single_response(&handler);
         assert_eq!(response_value["jsonrpc"], JSONRPC_VERSION);
         assert_eq!(response_value["id"], Value::Null);
-        assert_eq!(response_value["error"]["code"], JSONRPC_PARSE_ERROR);
-        assert_eq!(response_value["error"]["message"], "parse error");
+        assert_eq!(response_value["error"]["code"], JSONRPC_INVALID_REQUEST);
+        assert_eq!(response_value["error"]["message"], "invalid request");
+    }
+
+    #[test]
+    fn async_order_ignores_response_payloads() {
+        let handler = AsyncOrderMessageHandler::new_allowing_all_peers();
+        let test_peer = test_peer_pubkey(7);
+
+        handler
+            .handle_custom_message(
+                AsyncOrderMessage {
+                    payload: json!({
+                        "jsonrpc": JSONRPC_VERSION,
+                        "id": new_jsonrpc_request_id(),
+                        "result": {
+                            "status": "active",
+                        },
+                    })
+                    .to_string(),
+                },
+                test_peer,
+            )
+            .unwrap();
+
+        assert!(handler.get_and_clear_pending_msg().is_empty());
+    }
+
+    #[test]
+    fn async_order_new_rejects_hash_batches_over_200() {
+        let handler = AsyncOrderMessageHandler::new_allowing_all_peers();
+        let test_peer = test_peer_pubkey(8);
+        let request_id = new_jsonrpc_request_id();
+        let hashes = (1..=201)
+            .map(|index| (index, payment_hash_for_index(index)))
+            .collect::<Vec<_>>();
+        let borrowed_hashes = hashes
+            .iter()
+            .map(|(index, hash)| (*index, hash.as_str()))
+            .collect::<Vec<_>>();
+
+        handler
+            .handle_custom_message(
+                AsyncOrderMessage {
+                    payload: new_order_request_payload(&request_id, &borrowed_hashes),
+                },
+                test_peer,
+            )
+            .unwrap();
+
+        let response_value = read_single_response(&handler);
+        assert_eq!(response_value["id"], request_id);
+        assert_eq!(
+            response_value["error"]["code"],
+            ASYNC_ERROR_INVALID_HASH_BATCH
+        );
+        assert_eq!(response_value["error"]["message"], "invalid_hash_batch");
+    }
+
+    #[test]
+    fn async_order_rejects_untrusted_peers_without_response() {
+        let handler = AsyncOrderMessageHandler::new(Arc::new(DenyAllAccess));
+        let test_peer = test_peer_pubkey(9);
+        let request_id = new_jsonrpc_request_id();
+        let request_payload = new_order_request_payload(
+            &request_id,
+            &[(
+                1,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )],
+        );
+
+        handler
+            .handle_custom_message(
+                AsyncOrderMessage {
+                    payload: request_payload,
+                },
+                test_peer,
+            )
+            .unwrap();
+
+        assert!(handler.get_and_clear_pending_msg().is_empty());
     }
 }
