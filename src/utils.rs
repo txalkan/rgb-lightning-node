@@ -102,8 +102,9 @@ pub(crate) struct StaticState {
     pub(crate) logger: Arc<FilesystemLogger>,
     pub(crate) max_media_upload_size_mb: u16,
     pub(crate) virtual_peer_pubkeys: Vec<PublicKey>,
-    /// Shared database connection for mnemonic storage and LDK KVStore
     pub(crate) database: Arc<DatabaseConnection>,
+    pub(crate) lsp_base_url: Option<String>,
+    pub(crate) lsp_bearer_token: Option<String>,
 }
 
 pub(crate) struct UnlockedAppState {
@@ -412,6 +413,8 @@ pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppEr
         max_media_upload_size_mb: args.max_media_upload_size_mb,
         virtual_peer_pubkeys: args.virtual_peer_pubkeys.clone(),
         database: Arc::new(database),
+        lsp_base_url: args.lsp_base_url.clone(),
+        lsp_bearer_token: args.lsp_bearer_token.clone(),
     });
 
     let app_state = Arc::new(AppState {
