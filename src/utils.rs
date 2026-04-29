@@ -36,6 +36,7 @@ use std::{
 use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
 use tokio_util::sync::CancellationToken;
 
+use crate::async_order::{AsyncOrderMessageHandler, AsyncPaymentsPreimageRoot};
 use crate::core_types::{DEFAULT_FINAL_CLTV_EXPIRY_DELTA, HTLC_MIN_MSAT};
 use crate::ldk::{ChannelIdsMap, Router, VirtualChannelDraftStore, VirtualChannelSessionStore};
 use crate::rgb::{get_rgb_channel_info_optional, RgbLibWalletWrapper};
@@ -116,6 +117,8 @@ pub(crate) struct UnlockedAppState {
     pub(crate) onion_messenger: Arc<OnionMessenger>,
     pub(crate) outbound_payments: Arc<Mutex<OutboundPaymentInfoStorage>>,
     pub(crate) peer_manager: Arc<PeerManager>,
+    pub(crate) async_order_handler: Arc<AsyncOrderMessageHandler>,
+    pub(crate) async_payments_preimage_root: Arc<AsyncPaymentsPreimageRoot>,
     pub(crate) kv_store: Arc<SeaOrmKvStore>,
     pub(crate) bump_tx_event_handler: Arc<BumpTxEventHandler>,
     pub(crate) maker_swaps: Arc<Mutex<SwapMap>>,
@@ -299,7 +302,6 @@ pub(crate) fn hex_str(value: &[u8]) -> String {
     res
 }
 
-#[cfg(test)]
 pub(crate) fn new_jsonrpc_request_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }

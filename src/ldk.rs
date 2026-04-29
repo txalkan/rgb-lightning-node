@@ -1,4 +1,6 @@
-use crate::async_order::{AsyncOrderAccessControl, AsyncOrderMessageHandler};
+use crate::async_order::{
+    AsyncOrderAccessControl, AsyncOrderMessageHandler, AsyncPaymentsPreimageRoot,
+};
 use crate::kv_store::SeaOrmKvStore;
 use amplify::{map, s};
 use bitcoin::blockdata::locktime::absolute::LockTime;
@@ -3180,12 +3182,20 @@ pub(crate) async fn start_ldk(
         )),
         None => Arc::new(AsyncOrderMessageHandler::new(virtual_channel_access)),
     };
+    let async_payments_preimage_root = Arc::new(
+        AsyncPaymentsPreimageRoot::build_from_mnemonic(
+            &mnemonic,
+            network,
+            &channel_manager.get_our_node_id(),
+        )
+        .map_err(|err| APIError::Unexpected(err.message))?,
+    );
 
     let lightning_msg_handler = MessageHandler {
         chan_handler: channel_manager.clone(),
         route_handler: gossip_sync.clone(),
         onion_message_handler: onion_messenger.clone(),
-        custom_message_handler: async_order_handler,
+        custom_message_handler: Arc::clone(&async_order_handler),
         send_only_message_handler: Arc::clone(&chain_monitor),
     };
     let peer_manager: Arc<PeerManager> = Arc::new(PeerManager::new(
@@ -3381,6 +3391,8 @@ pub(crate) async fn start_ldk(
         onion_messenger: onion_messenger.clone(),
         outbound_payments,
         peer_manager: Arc::clone(&peer_manager),
+        async_order_handler,
+        async_payments_preimage_root,
         kv_store: Arc::clone(&kv_store),
         bump_tx_event_handler,
         rgb_wallet_wrapper,
