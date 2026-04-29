@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::runtime::Handle;
 use tracing::warn;
 
@@ -27,6 +28,7 @@ const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const JSONRPC_PARSE_ERROR: i64 = -32700;
 const JSONRPC_VERSION: &str = "2.0";
 const PROTOCOL_VERSION: u64 = 1;
+const ASYNC_ORDER_LSP_REQUEST_TIMEOUT_SECS: u64 = 25; // Must be above utexo-lsp's default 15s HTTP timeout with a buffer.
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AsyncOrderMessage {
@@ -176,11 +178,15 @@ impl Default for AsyncOrderState {
 }
 
 impl AsyncOrderLspClient {
-    fn new(base_url: String, lsp_bearer_token: Option<String>) -> Self {
+    fn new(base_url: String, lsp_bearer_token: Option<String>, request_timeout: Duration) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(request_timeout)
+            .build()
+            .expect("reqwest client builder to succeed");
         Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
             lsp_bearer_token,
-            client: reqwest::Client::new(),
+            client,
         }
     }
 
@@ -209,7 +215,16 @@ impl AsyncOrderLspClient {
         }
 
         let response = builder.send().await.map_err(|err| {
-            JsonRpcErrorWire::internal_error(format!("utexo_lsp_request_failed: {err}"))
+            if err.is_timeout() {
+                JsonRpcErrorWire::internal_error(
+                    "async_order_lsp_request_failed: POST /internal/async_order/new timed out"
+                        .to_owned(),
+                )
+            } else {
+                JsonRpcErrorWire::internal_error(format!(
+                    "async_order_lsp_request_failed: POST /internal/async_order/new failed: {err}"
+                ))
+            }
         })?;
         let status = response.status();
         let envelope = response
@@ -291,7 +306,11 @@ impl AsyncOrderMessageHandler {
     ) -> Self {
         Self {
             access_control,
-            lsp_client: Some(AsyncOrderLspClient::new(lsp_base_url, lsp_bearer_token)),
+            lsp_client: Some(AsyncOrderLspClient::new(
+                lsp_base_url,
+                lsp_bearer_token,
+                Duration::from_secs(ASYNC_ORDER_LSP_REQUEST_TIMEOUT_SECS),
+            )),
             runtime_handle: Some(runtime_handle),
             state: Arc::new(Mutex::new(AsyncOrderState::default())),
         }
@@ -832,7 +851,9 @@ mod tests {
     use axum::{extract::Json, http::StatusCode, routing::post, Router};
     use bitcoin::secp256k1::{Secp256k1, SecretKey};
     use std::sync::Arc;
+    use std::time::Duration;
     use tokio::net::TcpListener;
+    use tokio::time::sleep;
 
     struct DenyAllAccess;
 
@@ -1299,7 +1320,7 @@ mod tests {
         );
 
         let base_url = spawn_async_order_http_server(app).await;
-        let client = AsyncOrderLspClient::new(base_url, None);
+        let client = AsyncOrderLspClient::new(base_url, None, Duration::from_secs(1));
         let result = client
             .async_order_new(test_peer, request_id, test_async_order_new_params())
             .await
@@ -1340,7 +1361,7 @@ mod tests {
         );
 
         let base_url = spawn_async_order_http_server(app).await;
-        let client = AsyncOrderLspClient::new(base_url, None);
+        let client = AsyncOrderLspClient::new(base_url, None, Duration::from_secs(1));
         let err = client
             .async_order_new(test_peer, request_id, test_async_order_new_params())
             .await
@@ -1348,5 +1369,44 @@ mod tests {
 
         assert_eq!(err.code, ASYNC_ERROR_DUPLICATE_INDEX_CONFLICT);
         assert_eq!(err.message, "duplicate_index_conflict");
+    }
+
+    #[tokio::test]
+    async fn async_order_lsp_client_times_out_on_slow_response() {
+        let test_peer = test_peer_pubkey(12);
+        let expected_peer_pubkey = hex_str(&test_peer.serialize());
+        let request_id = Value::String(new_jsonrpc_request_id());
+        let request_id_for_server = request_id.clone();
+
+        let app = Router::new().route(
+            "/internal/async_order/new",
+            post(move |Json(payload): Json<Value>| {
+                let expected_peer_pubkey = expected_peer_pubkey.clone();
+                let request_id = request_id_for_server.clone();
+                async move {
+                    assert_eq!(payload["peer_pubkey"], expected_peer_pubkey);
+                    assert_eq!(payload["id"], request_id);
+                    sleep(Duration::from_millis(150)).await;
+                    Json(json!({
+                        "jsonrpc": JSONRPC_VERSION,
+                        "id": request_id,
+                        "result": test_async_order_new_result(),
+                    }))
+                }
+            }),
+        );
+
+        let base_url = spawn_async_order_http_server(app).await;
+        let client = AsyncOrderLspClient::new(base_url, None, Duration::from_millis(50));
+        let err = client
+            .async_order_new(test_peer, request_id, test_async_order_new_params())
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, JSONRPC_INTERNAL_ERROR);
+        assert_eq!(
+            err.message,
+            "async_order_lsp_request_failed: POST /internal/async_order/new timed out"
+        );
     }
 }
