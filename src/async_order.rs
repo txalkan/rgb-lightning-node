@@ -26,7 +26,7 @@ const JSONRPC_INTERNAL_ERROR: i64 = -32603;
 const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const JSONRPC_PARSE_ERROR: i64 = -32700;
 const JSONRPC_VERSION: &str = "2.0";
-const PROTOCOL_VERSION: &str = "1";
+const PROTOCOL_VERSION: u64 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AsyncOrderMessage {
@@ -80,19 +80,30 @@ pub(crate) struct AsyncOrderNewHashWire {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AsyncOrderNewParamsWire {
-    pub(crate) protocol_version: String,
+    pub(crate) protocol_version: u64,
     pub(crate) hashes: Vec<AsyncOrderNewHashWire>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 struct AsyncOrderNewResultWire {
-    protocol_version: String,
+    protocol_version: u64,
     order_id: String,
     status: String,
     accepted_through_index: String,
     next_index_expected: String,
     unused_hashes: String,
     refill_batch_size: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AsyncOrderHttpResponseWire {
+    jsonrpc: String,
+    #[serde(default)]
+    id: Option<Value>,
+    #[serde(default)]
+    result: Option<AsyncOrderNewResultWire>,
+    #[serde(default)]
+    error: Option<JsonRpcErrorWire>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -148,8 +159,9 @@ struct AsyncOrderLspClient {
 
 #[derive(Clone, Debug, Serialize)]
 struct AsyncOrderNewStoreRequest {
+    id: Value,
     peer_pubkey: String,
-    protocol_version: String,
+    protocol_version: u64,
     hashes: Vec<AsyncOrderNewHashWire>,
 }
 
@@ -175,9 +187,11 @@ impl AsyncOrderLspClient {
     async fn async_order_new(
         &self,
         sender_node_id: PublicKey,
+        request_id: Value,
         params: AsyncOrderNewParamsWire,
     ) -> Result<AsyncOrderNewResultWire, JsonRpcErrorWire> {
         let request = AsyncOrderNewStoreRequest {
+            id: request_id.clone(),
             peer_pubkey: hex_str(&sender_node_id.serialize()),
             protocol_version: params.protocol_version,
             hashes: params.hashes,
@@ -198,19 +212,62 @@ impl AsyncOrderLspClient {
             JsonRpcErrorWire::internal_error(format!("utexo_lsp_request_failed: {err}"))
         })?;
         let status = response.status();
-        if status.is_success() {
-            return response
-                .json::<AsyncOrderNewResultWire>()
-                .await
-                .map_err(|err| {
-                    JsonRpcErrorWire::internal_error(format!("utexo_lsp_invalid_response: {err}"))
-                });
+        let envelope = response
+            .json::<AsyncOrderHttpResponseWire>()
+            .await
+            .map_err(|err| {
+                JsonRpcErrorWire::internal_error(format!("utexo_lsp_invalid_response: {err}"))
+            })?;
+
+        let AsyncOrderHttpResponseWire {
+            jsonrpc,
+            id,
+            result,
+            error,
+        } = envelope;
+
+        if jsonrpc != JSONRPC_VERSION {
+            return Err(JsonRpcErrorWire::internal_error(format!(
+                "utexo_lsp_invalid_response: expected jsonrpc {JSONRPC_VERSION}, got {jsonrpc}"
+            )));
         }
 
-        match response.json::<JsonRpcErrorWire>().await {
-            Ok(err) => Err(err),
-            Err(err) => Err(JsonRpcErrorWire::internal_error(format!(
-                "utexo_lsp_error_status_{status}: {err}"
+        if id != Some(request_id) {
+            return Err(JsonRpcErrorWire::internal_error(
+                "utexo_lsp_invalid_response: response id did not match request id".to_owned(),
+            ));
+        }
+
+        if result.is_some() && error.is_some() {
+            return Err(JsonRpcErrorWire::internal_error(
+                "utexo_lsp_invalid_response: response contained both result and error".to_owned(),
+            ));
+        }
+
+        if status.is_success() {
+            return match (result, error) {
+                (Some(result), None) => Ok(result),
+                (None, Some(err)) => Err(err),
+                (Some(_), Some(_)) => Err(JsonRpcErrorWire::internal_error(
+                    "utexo_lsp_invalid_response: response contained both result and error"
+                        .to_owned(),
+                )),
+                (None, None) => Err(JsonRpcErrorWire::internal_error(
+                    "utexo_lsp_invalid_response: response missing result".to_owned(),
+                )),
+            };
+        }
+
+        match (result, error) {
+            (Some(_), Some(_)) => Err(JsonRpcErrorWire::internal_error(format!(
+                "utexo_lsp_error_status_{status}: response contained both result and error"
+            ))),
+            (Some(_), None) => Err(JsonRpcErrorWire::internal_error(format!(
+                "utexo_lsp_error_status_{status}: response unexpectedly contained result"
+            ))),
+            (None, Some(err)) => Err(err),
+            (None, None) => Err(JsonRpcErrorWire::internal_error(format!(
+                "utexo_lsp_error_status_{status}: missing error envelope"
             ))),
         }
     }
@@ -373,16 +430,21 @@ impl AsyncOrderMessageHandler {
         sender_node_id: PublicKey,
         id: Value,
         params: AsyncOrderNewParamsWire,
-    ) -> bool {
+    ) -> Result<(), JsonRpcErrorWire> {
         let (Some(lsp_client), Some(runtime_handle)) =
             (self.lsp_client.clone(), self.runtime_handle.clone())
         else {
-            return false;
+            return Err(JsonRpcErrorWire::internal_error(
+                "async_order_lsp_client_not_available".to_owned(),
+            ));
         };
 
         let state = Arc::clone(&self.state);
         runtime_handle.spawn(async move {
-            match lsp_client.async_order_new(sender_node_id, params).await {
+            match lsp_client
+                .async_order_new(sender_node_id, id.clone(), params)
+                .await
+            {
                 Ok(result) => {
                     AsyncOrderMessageHandler::queue_jsonrpc_result_to_state(
                         &state,
@@ -402,7 +464,7 @@ impl AsyncOrderMessageHandler {
                 }
             }
         });
-        true
+        Ok(())
     }
 
     fn validate_async_order_new_params(
@@ -537,13 +599,10 @@ impl CustomMessageHandler for AsyncOrderMessageHandler {
             if self.lsp_client.is_some() {
                 match Self::validate_async_order_new_params(&params) {
                     Ok(()) => {
-                        if !self.send_new_async_order_to_lsp(sender_node_id, id.clone(), params) {
-                            self.queue_jsonrpc_error(
-                                sender_node_id,
-                                id,
-                                JSONRPC_INTERNAL_ERROR,
-                                "async_order_lsp_client_not_available",
-                            );
+                        if let Err(err) =
+                            self.send_new_async_order_to_lsp(sender_node_id, id.clone(), params)
+                        {
+                            self.queue_jsonrpc_error(sender_node_id, id, err.code, &err.message);
                         }
                     }
                     Err(err) => {
@@ -677,7 +736,7 @@ impl AsyncOrderRecord {
 
     fn snapshot_result(&self) -> AsyncOrderNewResultWire {
         AsyncOrderNewResultWire {
-            protocol_version: PROTOCOL_VERSION.to_owned(),
+            protocol_version: PROTOCOL_VERSION,
             order_id: self.order_id.to_string(),
             status: "active".to_owned(),
             accepted_through_index: self.highest_hash_index().to_string(),
@@ -770,8 +829,10 @@ fn parse_hash_batch(
 mod tests {
     use super::*;
     use crate::utils::new_jsonrpc_request_id;
+    use axum::{extract::Json, http::StatusCode, routing::post, Router};
     use bitcoin::secp256k1::{Secp256k1, SecretKey};
     use std::sync::Arc;
+    use tokio::net::TcpListener;
 
     struct DenyAllAccess;
 
@@ -820,6 +881,47 @@ mod tests {
 
     fn payment_hash_for_index(index: u64) -> String {
         format!("{index:064x}")
+    }
+
+    fn test_async_order_new_params() -> AsyncOrderNewParamsWire {
+        AsyncOrderNewParamsWire {
+            protocol_version: PROTOCOL_VERSION,
+            hashes: vec![
+                AsyncOrderNewHashWire {
+                    hash_index: "1".to_owned(),
+                    payment_hash:
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                            .to_owned(),
+                },
+                AsyncOrderNewHashWire {
+                    hash_index: "2".to_owned(),
+                    payment_hash:
+                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                            .to_owned(),
+                },
+            ],
+        }
+    }
+
+    fn test_async_order_new_result() -> AsyncOrderNewResultWire {
+        AsyncOrderNewResultWire {
+            protocol_version: PROTOCOL_VERSION,
+            order_id: "1".to_owned(),
+            status: "active".to_owned(),
+            accepted_through_index: "2".to_owned(),
+            next_index_expected: "3".to_owned(),
+            unused_hashes: "2".to_owned(),
+            refill_batch_size: ASYNC_ORDER_MAX_HASH_BATCH_SIZE.to_string(),
+        }
+    }
+
+    async fn spawn_async_order_http_server(app: Router) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{}", addr)
     }
 
     #[test]
@@ -1167,5 +1269,84 @@ mod tests {
             .unwrap();
 
         assert!(handler.get_and_clear_pending_msg().is_empty());
+    }
+
+    #[tokio::test]
+    async fn async_order_lsp_client_parses_jsonrpc_response_envelope() {
+        let test_peer = test_peer_pubkey(10);
+        let expected_peer_pubkey = hex_str(&test_peer.serialize());
+        let request_id = Value::String(new_jsonrpc_request_id());
+        let request_id_for_server = request_id.clone();
+
+        let app = Router::new().route(
+            "/internal/async_order/new",
+            post(move |Json(payload): Json<Value>| {
+                let expected_peer_pubkey = expected_peer_pubkey.clone();
+                let request_id = request_id_for_server.clone();
+                async move {
+                    assert_eq!(payload["peer_pubkey"], expected_peer_pubkey);
+                    assert_eq!(payload["protocol_version"], json!(PROTOCOL_VERSION));
+                    assert_eq!(payload["id"], request_id);
+                    assert_eq!(payload["hashes"][0]["hash_index"], json!("1"));
+                    assert_eq!(payload["hashes"][1]["hash_index"], json!("2"));
+                    Json(json!({
+                        "jsonrpc": JSONRPC_VERSION,
+                        "id": request_id,
+                        "result": test_async_order_new_result(),
+                    }))
+                }
+            }),
+        );
+
+        let base_url = spawn_async_order_http_server(app).await;
+        let client = AsyncOrderLspClient::new(base_url, None);
+        let result = client
+            .async_order_new(test_peer, request_id, test_async_order_new_params())
+            .await
+            .unwrap();
+
+        assert_eq!(result, test_async_order_new_result());
+    }
+
+    #[tokio::test]
+    async fn async_order_lsp_client_parses_jsonrpc_error_envelope() {
+        let test_peer = test_peer_pubkey(11);
+        let expected_peer_pubkey = hex_str(&test_peer.serialize());
+        let request_id = Value::String(new_jsonrpc_request_id());
+        let request_id_for_server = request_id.clone();
+
+        let app = Router::new().route(
+            "/internal/async_order/new",
+            post(move |Json(payload): Json<Value>| {
+                let expected_peer_pubkey = expected_peer_pubkey.clone();
+                let request_id = request_id_for_server.clone();
+                async move {
+                    assert_eq!(payload["peer_pubkey"], expected_peer_pubkey);
+                    assert_eq!(payload["protocol_version"], json!(PROTOCOL_VERSION));
+                    assert_eq!(payload["id"], request_id);
+                    (
+                        StatusCode::CONFLICT,
+                        Json(json!({
+                            "jsonrpc": JSONRPC_VERSION,
+                            "id": request_id,
+                            "error": {
+                                "code": ASYNC_ERROR_DUPLICATE_INDEX_CONFLICT,
+                                "message": "duplicate_index_conflict",
+                            },
+                        })),
+                    )
+                }
+            }),
+        );
+
+        let base_url = spawn_async_order_http_server(app).await;
+        let client = AsyncOrderLspClient::new(base_url, None);
+        let err = client
+            .async_order_new(test_peer, request_id, test_async_order_new_params())
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, ASYNC_ERROR_DUPLICATE_INDEX_CONFLICT);
+        assert_eq!(err.message, "duplicate_index_conflict");
     }
 }
