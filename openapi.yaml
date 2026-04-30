@@ -731,6 +731,7 @@ paths:
       description: >-
         Get a LN invoice to receive a payment. Provide `payment_hash` to create a HODL invoice.
         Provide `description_hash` to include an out-of-band BOLT11 description hash.
+        Provide `min_final_cltv_expiry_delta` to request an explicit inbound final CLTV policy.
       requestBody:
         content:
           application/json:
@@ -2482,6 +2483,10 @@ components:
           type: string
           description: Optional. When provided, the invoice includes a BOLT11 description hash.
           example: 5ca5d81b482b4015e7b14df7a27fe0a38c226273604ffd3b008b752571811938
+        min_final_cltv_expiry_delta:
+          type: integer
+          description: Optional. Requested inbound final CLTV policy in blocks.
+          example: 144
     LNInvoiceResponse:
       type: object
       required:

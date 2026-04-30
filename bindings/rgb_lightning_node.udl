@@ -491,6 +491,7 @@ dictionary LnInvoiceRequest {
     u64? asset_amount;
     PaymentHash? payment_hash;
     string? description_hash;
+    u16? min_final_cltv_expiry_delta;
 };
 
 dictionary LnInvoiceResponse {

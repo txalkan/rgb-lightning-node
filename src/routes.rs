@@ -851,6 +851,7 @@ pub(crate) struct LNInvoiceRequest {
     pub(crate) asset_amount: Option<u64>,
     pub(crate) payment_hash: Option<String>,
     pub(crate) description_hash: Option<String>,
+    pub(crate) min_final_cltv_expiry_delta: Option<u16>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1985,6 +1986,7 @@ pub(crate) async fn create_utxos(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn decode_ln_invoice(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<DecodeLNInvoiceRequest>, APIError>,
@@ -3078,10 +3080,10 @@ pub(crate) async fn ln_invoice(
             amount_msats: payload.amt_msat,
             description,
             invoice_expiry_delta_secs: Some(payload.expiry_sec),
+            min_final_cltv_expiry_delta: payload.min_final_cltv_expiry_delta,
             payment_hash: requested_payment_hash,
             contract_id,
             asset_amount: payload.asset_amount,
-            ..Default::default()
         };
 
         let invoice = unlocked_state

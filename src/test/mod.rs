@@ -1172,6 +1172,7 @@ async fn ln_invoice_with_type(
         asset_amount,
         payment_hash,
         description_hash: None,
+        min_final_cltv_expiry_delta: None,
     };
     let res = reqwest::Client::new()
         .post(format!("http://{node_address}/lninvoice"))

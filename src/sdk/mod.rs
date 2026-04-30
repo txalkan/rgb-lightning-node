@@ -3248,6 +3248,7 @@ pub(crate) async fn invoice_status(
  * This method is an SDK-facing adapter corresponding to `routes::ln_invoice`.
  * It keeps route-equivalent semantics while using SDK-native parameter shape.
  */
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn create_ln_invoice(
     state: Arc<AppState>,
     amt_msat: Option<u64>,
@@ -3256,6 +3257,7 @@ pub(crate) async fn create_ln_invoice(
     asset_amount: Option<u64>,
     payment_hash: Option<String>,
     description_hash: Option<String>,
+    min_final_cltv_expiry_delta: Option<u16>,
 ) -> Result<LnInvoiceData, APIError> {
     let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
@@ -3298,10 +3300,10 @@ pub(crate) async fn create_ln_invoice(
         amount_msats: amt_msat,
         description,
         invoice_expiry_delta_secs: Some(expiry_sec),
+        min_final_cltv_expiry_delta,
         payment_hash: requested_payment_hash,
         contract_id,
         asset_amount,
-        ..Default::default()
     };
 
     let invoice = match unlocked_state
