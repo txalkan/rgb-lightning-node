@@ -1148,7 +1148,9 @@ async fn ln_invoice_hodl(
         asset_amount,
         expiry_sec,
         payment_hash,
-        InvoiceType::Hodl,
+        InvoiceType::Hodl {
+            async_payment_recipient: false,
+        },
     )
     .await
 }

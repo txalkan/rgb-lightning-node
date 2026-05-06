@@ -267,6 +267,7 @@ pub(crate) struct DecodeLnInvoiceData {
     pub(crate) payment_hash: String,
     pub(crate) payment_secret: String,
     pub(crate) payee_pubkey: Option<String>,
+    pub(crate) min_final_cltv_expiry_delta: u64,
     pub(crate) network: RgbBitcoinNetwork,
 }
 
@@ -1169,10 +1170,10 @@ pub(crate) async fn async_order_new(
 
     let response_rx = unlocked_state
         .async_order_handler
-        .queue_async_order_new_request(host_node_id, Value::String(request_id.clone()), params)
+        .queue_async_order_new(host_node_id, Value::String(request_id.clone()), params)
         .map_err(|err| APIError::InvalidRequest(err.message))?;
     unlocked_state.peer_manager.process_events();
-    let order_state: AsyncOrderNewResultWire = match timeout(
+    let order_state_value = match timeout(
         Duration::from_secs(ASYNC_ORDER_RESPONSE_TIMEOUT_SECS),
         response_rx,
     )
@@ -1199,6 +1200,10 @@ pub(crate) async fn async_order_new(
             )));
         }
     };
+    let order_state: AsyncOrderNewResultWire =
+        serde_json::from_value(order_state_value).map_err(|err| {
+            APIError::InvalidRequest(format!("invalid async_order.new response: {err}"))
+        })?;
     let next_hash_index = order_state.next_index_expected;
     write_async_payments_next_hash_index(
         unlocked_state.kv_store.as_ref(),
@@ -3184,7 +3189,8 @@ pub(crate) async fn decode_ln_invoice(
         asset_amount: invoice.rgb_amount(),
         payment_hash: hex_str(&invoice.payment_hash().to_byte_array()),
         payment_secret: hex_str(&invoice.payment_secret().0),
-        payee_pubkey: invoice.payee_pub_key().map(|p| p.to_string()),
+        payee_pubkey: Some(invoice.get_payee_pub_key().to_string()),
+        min_final_cltv_expiry_delta: invoice.min_final_cltv_expiry_delta(),
         network: match invoice.network() {
             bitcoin::Network::Bitcoin => rgb_lib::BitcoinNetwork::Mainnet,
             bitcoin::Network::Testnet => rgb_lib::BitcoinNetwork::Testnet,
@@ -3315,7 +3321,12 @@ pub(crate) async fn create_ln_invoice(
     };
 
     let (payment_hash, invoice_type) = match requested_payment_hash {
-        Some(payment_hash) => (payment_hash, InvoiceType::Hodl),
+        Some(payment_hash) => (
+            payment_hash,
+            InvoiceType::Hodl {
+                async_payment_recipient: false,
+            },
+        ),
         None => (
             PaymentHash((*invoice.payment_hash()).to_byte_array()),
             InvoiceType::AutoClaim,
@@ -3345,7 +3356,7 @@ pub(crate) async fn create_ln_invoice(
 fn payment_type_from_invoice(invoice_type: Option<InvoiceType>) -> PaymentType {
     match invoice_type.unwrap_or(InvoiceType::AutoClaim) {
         InvoiceType::AutoClaim => PaymentType::InboundAutoClaim,
-        InvoiceType::Hodl => PaymentType::InboundHodl,
+        InvoiceType::Hodl { .. } => PaymentType::InboundHodl,
     }
 }
 
@@ -3496,7 +3507,7 @@ pub(crate) async fn cancel_hodl_invoice(
         .get(&payment_hash)
         .cloned()
         .ok_or(APIError::UnknownLNInvoice)?;
-    if !matches!(payment_info.invoice_type, Some(InvoiceType::Hodl)) {
+    if !matches!(payment_info.invoice_type, Some(InvoiceType::Hodl { .. })) {
         return Err(APIError::InvoiceNotHodl);
     }
     match payment_info.status {
@@ -3527,7 +3538,10 @@ pub(crate) async fn claim_hodl_invoice(
             return Err(APIError::UnknownLNInvoice);
         };
 
-        if !matches!(existing_payment_mut.invoice_type, Some(InvoiceType::Hodl)) {
+        if !matches!(
+            existing_payment_mut.invoice_type,
+            Some(InvoiceType::Hodl { .. })
+        ) {
             return Err(APIError::InvoiceNotHodl);
         }
 

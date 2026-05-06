@@ -72,7 +72,8 @@ use tokio::{
 
 use crate::async_order::{
     read_async_payments_next_hash_index, write_async_payments_next_hash_index,
-    AsyncOrderNewHashWire, AsyncOrderNewResultWire, ASYNC_ORDER_MAX_HASH_BATCH_SIZE,
+    AsyncOrderNewHashWire, AsyncOrderNewResultWire, AsyncOrderOutboundInvoiceResultWire,
+    AsyncOrderRequestInvoiceParamsWire, ASYNC_ORDER_MAX_HASH_BATCH_SIZE,
     ASYNC_ORDER_RESPONSE_TIMEOUT_SECS,
 };
 use crate::ldk::{
@@ -357,6 +358,12 @@ pub(crate) struct AsyncOrderNewRequest {
 }
 
 #[derive(Deserialize, Serialize)]
+pub(crate) struct AsyncOrderOutboundInvoiceRequest {
+    pub(crate) client_node_id: String,
+    pub(crate) params: AsyncOrderRequestInvoiceParamsWire,
+}
+
+#[derive(Deserialize, Serialize)]
 pub(crate) struct AsyncOrderNewResponse {
     pub(crate) request_id: String,
     pub(crate) host_node_id: String,
@@ -537,9 +544,11 @@ pub(crate) struct DecodeLNInvoiceResponse {
     pub(crate) timestamp: u64,
     pub(crate) asset_id: Option<String>,
     pub(crate) asset_amount: Option<u64>,
+    pub(crate) description_hash: Option<String>,
     pub(crate) payment_hash: String,
     pub(crate) payment_secret: String,
     pub(crate) payee_pubkey: Option<String>,
+    pub(crate) min_final_cltv_expiry_delta: u64,
     pub(crate) network: BitcoinNetwork,
 }
 
@@ -976,7 +985,7 @@ pub(crate) struct Payment {
 fn payment_type_from_invoice(invoice_type: Option<InvoiceType>) -> PaymentType {
     match invoice_type.unwrap_or(InvoiceType::AutoClaim) {
         InvoiceType::AutoClaim => PaymentType::InboundAutoClaim,
-        InvoiceType::Hodl => PaymentType::InboundHodl,
+        InvoiceType::Hodl { .. } => PaymentType::InboundHodl,
     }
 }
 
@@ -1444,10 +1453,10 @@ pub(crate) async fn async_order_new(
 
     let response_rx = unlocked_state
         .async_order_handler
-        .queue_async_order_new_request(host_node_id, Value::String(request_id.clone()), params)
+        .queue_async_order_new(host_node_id, Value::String(request_id.clone()), params)
         .map_err(|err| APIError::InvalidRequest(err.message))?;
     unlocked_state.peer_manager.process_events();
-    let order_state: AsyncOrderNewResultWire = match timeout(
+    let order_state_value = match timeout(
         Duration::from_secs(ASYNC_ORDER_RESPONSE_TIMEOUT_SECS),
         response_rx,
     )
@@ -1474,6 +1483,10 @@ pub(crate) async fn async_order_new(
             )));
         }
     };
+    let order_state: AsyncOrderNewResultWire =
+        serde_json::from_value(order_state_value).map_err(|err| {
+            APIError::InvalidRequest(format!("invalid async_order.new response: {err}"))
+        })?;
     let next_hash_index = order_state.next_index_expected;
     write_async_payments_next_hash_index(
         unlocked_state.kv_store.as_ref(),
@@ -1496,6 +1509,76 @@ pub(crate) async fn async_order_new(
         last_hash_index,
         hashes,
     }))
+}
+
+pub(crate) async fn async_order_outbound_invoice(
+    State(state): State<Arc<AppState>>,
+    WithRejection(Json(payload), _): WithRejection<
+        Json<AsyncOrderOutboundInvoiceRequest>,
+        APIError,
+    >,
+) -> Result<Json<AsyncOrderOutboundInvoiceResultWire>, APIError> {
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = Arc::clone(guard.as_ref().unwrap());
+    drop(guard);
+
+    let peer_node_id =
+        hex_str_to_compressed_pubkey(&payload.client_node_id).ok_or(APIError::InvalidPubkey)?;
+    if unlocked_state
+        .peer_manager
+        .peer_by_node_id(&peer_node_id)
+        .is_none()
+    {
+        return Err(APIError::InvalidPeerInfo(s!(
+            "/apay/outboundinvoice requires a connected recipient peer"
+        )));
+    }
+
+    let request_id = payload.params.claim_session_id.clone();
+    let response_rx = unlocked_state
+        .async_order_handler
+        .queue_async_order_request_invoice(
+            peer_node_id,
+            Value::String(request_id.clone()),
+            payload.params,
+        )
+        .map_err(|err| APIError::InvalidRequest(err.message))?;
+    unlocked_state.peer_manager.process_events();
+
+    let response_value = match timeout(
+        Duration::from_secs(ASYNC_ORDER_RESPONSE_TIMEOUT_SECS),
+        response_rx,
+    )
+    .await
+    {
+        Ok(Ok(Ok(result))) => result,
+        Ok(Ok(Err(err))) => {
+            return Err(APIError::InvalidRequest(format!(
+                "async_order host error {}: {}",
+                err.code, err.message
+            )));
+        }
+        Ok(Err(_)) => {
+            return Err(APIError::Network(s!(
+                "/apay/outboundinvoice response channel closed before peer replied"
+            )))
+        }
+        Err(_) => {
+            unlocked_state
+                .async_order_handler
+                .forget_async_order_response(peer_node_id, &request_id);
+            return Err(APIError::Network(s!(
+                "/apay/outboundinvoice timed out waiting for peer response"
+            )));
+        }
+    };
+
+    let response: AsyncOrderOutboundInvoiceResultWire = serde_json::from_value(response_value)
+        .map_err(|err| {
+            APIError::InvalidRequest(format!("invalid request_invoice response: {err}"))
+        })?;
+
+    Ok(Json(response))
 }
 
 pub(crate) async fn asset_balance(
@@ -1625,7 +1708,7 @@ pub(crate) async fn cancel_hodl_invoice(
             .get(&payment_hash)
             .cloned()
             .ok_or(APIError::UnknownLNInvoice)?;
-        if !matches!(payment_info.invoice_type, Some(InvoiceType::Hodl)) {
+        if !matches!(payment_info.invoice_type, Some(InvoiceType::Hodl { .. })) {
             return Err(APIError::InvoiceNotHodl);
         }
         match payment_info.status {
@@ -1702,7 +1785,10 @@ pub(crate) async fn claim_hodl_invoice(
                 return Err(APIError::UnknownLNInvoice);
             };
 
-            if !matches!(existing_payment_mut.invoice_type, Some(InvoiceType::Hodl)) {
+            if !matches!(
+                existing_payment_mut.invoice_type,
+                Some(InvoiceType::Hodl { .. })
+            ) {
                 return Err(APIError::InvoiceNotHodl);
             }
 
@@ -2004,9 +2090,16 @@ pub(crate) async fn decode_ln_invoice(
         timestamp: invoice.duration_since_epoch().as_secs(),
         asset_id: invoice.rgb_contract_id().map(|c| c.to_string()),
         asset_amount: invoice.rgb_amount(),
+        description_hash: match invoice.description() {
+            lightning_invoice::Bolt11InvoiceDescriptionRef::Hash(hash) => {
+                Some(hex_str(&hash.0.to_byte_array()))
+            }
+            _ => None,
+        },
         payment_hash: hex_str(&invoice.payment_hash().to_byte_array()),
         payment_secret: hex_str(&invoice.payment_secret().0),
-        payee_pubkey: invoice.payee_pub_key().map(|p| p.to_string()),
+        payee_pubkey: Some(invoice.get_payee_pub_key().to_string()),
+        min_final_cltv_expiry_delta: invoice.min_final_cltv_expiry_delta(),
         network: invoice.network().into(),
     }))
 }
@@ -3092,7 +3185,12 @@ pub(crate) async fn ln_invoice(
             .map_err(|e| APIError::FailedInvoiceCreation(e.to_string()))?;
 
         let (payment_hash, invoice_type) = match requested_payment_hash {
-            Some(payment_hash) => (payment_hash, InvoiceType::Hodl),
+            Some(payment_hash) => (
+                payment_hash,
+                InvoiceType::Hodl {
+                    async_payment_recipient: false,
+                },
+            ),
             None => (
                 PaymentHash((*invoice.payment_hash()).to_byte_array()),
                 InvoiceType::AutoClaim,
