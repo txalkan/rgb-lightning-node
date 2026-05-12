@@ -25,7 +25,7 @@ use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 use tracing::warn;
 
-use crate::utils::{hex_str, validate_and_parse_payment_hash};
+use crate::utils::{hex_str, validate_and_parse_description_hash, validate_and_parse_payment_hash};
 
 pub(crate) const ASYNC_ORDER_MESSAGE_TYPE_ID: u16 = 37915;
 pub(crate) const ASYNC_ORDER_MAX_HASH_BATCH_SIZE: usize = 200;
@@ -278,6 +278,31 @@ struct AsyncOrderRequestInvoiceCacheEntry {
     params: AsyncOrderRequestInvoiceParamsWire,
     result: AsyncOrderOutboundInvoiceResultWire,
     expires_at: Instant,
+}
+
+fn canonicalize_request_invoice_params(
+    params: &AsyncOrderRequestInvoiceParamsWire,
+) -> Result<AsyncOrderRequestInvoiceParamsWire, JsonRpcErrorWire> {
+    let hash_index = params
+        .hash_index
+        .parse::<u64>()
+        .map_err(|_| JsonRpcErrorWire::invalid_params("invalid_hash_index"))?;
+    let payment_hash = validate_and_parse_payment_hash(&params.payment_hash)
+        .map_err(|_| JsonRpcErrorWire::invalid_params("invalid_payment_hash"))?;
+    let description_hash = validate_and_parse_description_hash(params.description_hash.trim())
+        .map_err(|_| JsonRpcErrorWire::invalid_params("invalid_description_hash"))?;
+
+    Ok(AsyncOrderRequestInvoiceParamsWire {
+        claim_session_id: params.claim_session_id.clone(),
+        hash_index: hash_index.to_string(),
+        payment_hash: hex_str(&payment_hash.0),
+        amount_msat: params.amount_msat,
+        asset_id: params.asset_id.clone(),
+        asset_amount: params.asset_amount,
+        description_hash: hex_str(&description_hash.0.to_byte_array()),
+        invoice_expiry_sec: params.invoice_expiry_sec,
+        min_final_cltv_expiry_delta: params.min_final_cltv_expiry_delta,
+    })
 }
 
 #[derive(Clone)]
@@ -863,6 +888,7 @@ impl AsyncOrderMessageHandler {
         sender_node_id: PublicKey,
         params: AsyncOrderRequestInvoiceParamsWire,
     ) -> Result<AsyncOrderOutboundInvoiceResultWire, JsonRpcErrorWire> {
+        let canonical_params = canonicalize_request_invoice_params(&params)?;
         let Some(invoice_provider) = self.invoice_provider.lock().unwrap().clone() else {
             return Err(JsonRpcErrorWire::internal_error(
                 "async_order_invoice_provider_not_available".to_owned(),
@@ -872,7 +898,7 @@ impl AsyncOrderMessageHandler {
         let cache_key = (sender_node_id, params.claim_session_id.clone());
         let mut state = self.state.lock().unwrap();
         if let Some(cached) = state.request_invoice_cache.get(&cache_key) {
-            if cached.params == params {
+            if cached.params == canonical_params {
                 if Instant::now() >= cached.expires_at {
                     return Err(JsonRpcErrorWire::stale_flow());
                 }
@@ -890,7 +916,7 @@ impl AsyncOrderMessageHandler {
         state.request_invoice_cache.insert(
             cache_key,
             AsyncOrderRequestInvoiceCacheEntry {
-                params,
+                params: canonical_params,
                 result: result.clone(),
                 expires_at,
             },
@@ -2017,6 +2043,54 @@ mod tests {
             response_value["error"]["message"],
             "async_order_invoice_provider_not_available"
         );
+    }
+
+    #[test]
+    fn async_order_request_invoice_replays_canonicalized_params() {
+        let handler = AsyncOrderMessageHandler::new_allowing_all_peers();
+        let provider = Arc::new(TestInvoiceProvider::new(test_request_invoice_result()));
+        handler.set_invoice_provider(provider.clone());
+        let test_peer = test_peer_pubkey(39);
+        let first_request_id = new_jsonrpc_request_id();
+        let second_request_id = new_jsonrpc_request_id();
+        let params = test_request_invoice_params();
+        let mut replay_params = params.clone();
+        replay_params.hash_index = "0042".to_owned();
+        replay_params.payment_hash = replay_params.payment_hash.to_uppercase();
+        replay_params.description_hash = replay_params.description_hash.to_uppercase();
+
+        handler
+            .handle_custom_message(
+                AsyncOrderMessage {
+                    payload: request_invoice_payload(
+                        &first_request_id,
+                        ASYNC_ORDER_REQUEST_INVOICE_METHOD,
+                        &params,
+                    ),
+                },
+                test_peer,
+            )
+            .unwrap();
+        let first_response = read_single_response(&handler);
+
+        handler
+            .handle_custom_message(
+                AsyncOrderMessage {
+                    payload: request_invoice_payload(
+                        &second_request_id,
+                        ASYNC_ORDER_REQUEST_INVOICE_METHOD,
+                        &replay_params,
+                    ),
+                },
+                test_peer,
+            )
+            .unwrap();
+        let second_response = read_single_response(&handler);
+
+        assert_eq!(first_response["result"], second_response["result"]);
+        assert_eq!(first_response["id"], first_request_id);
+        assert_eq!(second_response["id"], second_request_id);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

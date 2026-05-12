@@ -353,6 +353,27 @@ impl VirtualChannelSessionStore {
     }
 }
 
+fn persist_staged_inbound_payment(
+    kv_store: &dyn KVStoreSync,
+    inbound: &mut InboundPaymentInfoStorage,
+    payment_hash: PaymentHash,
+    payment_info: PaymentInfo,
+) -> Result<(), JsonRpcErrorWire> {
+    let mut staged_inbound = InboundPaymentInfoStorage {
+        payments: inbound.payments.clone(),
+    };
+    staged_inbound.payments.insert(payment_hash, payment_info);
+    kv_store
+        .write("", "", INBOUND_PAYMENTS_KEY, staged_inbound.encode())
+        .map_err(|err| {
+            JsonRpcErrorWire::internal_error(format!(
+                "async_order_request_outbound_invoice_persist_failed: {err}"
+            ))
+        })?;
+    inbound.payments = staged_inbound.payments;
+    Ok(())
+}
+
 impl UnlockedAppState {
     pub(crate) fn add_maker_swap(&self, payment_hash: PaymentHash, swap: SwapData) {
         let mut maker_swaps = self.get_maker_swaps();
@@ -1124,7 +1145,9 @@ impl AsyncOrderInvoiceProvider for AsyncOrderRecipientInvoiceProvider {
             payment_hash: params.payment_hash.clone(),
             bolt11: invoice.to_string(),
         };
-        inbound.payments.insert(
+        persist_staged_inbound_payment(
+            self.kv_store.as_ref(),
+            &mut inbound,
             requested_payment_hash,
             PaymentInfo {
                 preimage: Some(material.payment_preimage),
@@ -1140,15 +1163,7 @@ impl AsyncOrderInvoiceProvider for AsyncOrderRecipientInvoiceProvider {
                     async_payment_recipient: true,
                 }),
             },
-        );
-        self.kv_store
-            .write("", "", INBOUND_PAYMENTS_KEY, inbound.encode())
-            .map_err(|err| {
-                JsonRpcErrorWire::internal_error(format!(
-                    "async_order_request_outbound_invoice_persist_failed: {err}"
-                ))
-            })?;
-        drop(inbound);
+        )?;
 
         Ok(result)
     }
