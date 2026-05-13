@@ -135,6 +135,7 @@ async fn invalid_description_hash_invoice() {
         asset_amount: None,
         payment_hash: None,
         description_hash: Some("not-a-valid-description-hash".to_string()),
+        min_final_cltv_expiry_delta: None,
     };
     let res = reqwest::Client::new()
         .post(format!("http://{node1_addr}/lninvoice"))
