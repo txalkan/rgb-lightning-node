@@ -1265,7 +1265,6 @@ components:
     AsyncOrderRequestInvoiceParams:
       type: object
       required:
-        - claim_session_id
         - hash_index
         - payment_hash
         - amount_msat
@@ -1273,9 +1272,6 @@ components:
         - invoice_expiry_sec
         - min_final_cltv_expiry_delta
       properties:
-        claim_session_id:
-          type: string
-          example: claim-session-1
         hash_index:
           type: string
           example: '42'

@@ -3,8 +3,12 @@
 
 use crate::async_order::{
     read_async_payments_next_hash_index, write_async_payments_next_hash_index,
-    AsyncOrderNewHashWire, AsyncOrderNewResultWire, JsonRpcErrorWire,
-    ASYNC_ORDER_MAX_HASH_BATCH_SIZE, ASYNC_ORDER_RESPONSE_TIMEOUT_SECS,
+    AsyncOrderNewResultWire, AsyncOrderOutboundInvoiceResultWire, ASYNC_ORDER_MAX_HASH_BATCH_SIZE,
+    ASYNC_ORDER_RESPONSE_TIMEOUT_SECS,
+};
+use crate::core_types::async_order::{
+    AsyncOrderNewRequest, AsyncOrderNewResponse, AsyncOrderOutboundInvoiceRequest,
+    AsyncOrderOutboundInvoiceResponse,
 };
 use crate::core_types::{FEE_RATE, MIN_CHANNEL_CONFIRMATIONS};
 use crate::disk;
@@ -226,25 +230,6 @@ pub(crate) struct AssetMetadataData {
     pub(crate) ticker: Option<String>,
     pub(crate) details: Option<String>,
     pub(crate) token: Option<Token>,
-}
-
-pub(crate) struct AsyncOrderNewRequestData {
-    pub(crate) host_node_id: String,
-}
-
-pub(crate) struct AsyncOrderNewData {
-    pub(crate) request_id: String,
-    pub(crate) host_node_id: String,
-    pub(crate) protocol_version: u64,
-    pub(crate) order_id: String,
-    pub(crate) status: String,
-    pub(crate) accepted_through_index: u64,
-    pub(crate) next_index_expected: u64,
-    pub(crate) unused_hashes: u64,
-    pub(crate) refill_batch_size: u64,
-    pub(crate) first_hash_index: u64,
-    pub(crate) last_hash_index: u64,
-    pub(crate) hashes: Vec<AsyncOrderNewHashWire>,
 }
 
 pub(crate) struct BtcBalance {
@@ -1131,8 +1116,8 @@ pub(crate) async fn address(state: Arc<AppState>) -> Result<AddressData, APIErro
 
 pub(crate) async fn async_order_new(
     state: Arc<AppState>,
-    request: AsyncOrderNewRequestData,
-) -> Result<AsyncOrderNewData, APIError> {
+    request: AsyncOrderNewRequest,
+) -> Result<AsyncOrderNewResponse, APIError> {
     let guard = check_unlocked(&state).await?;
     let unlocked_state = Arc::clone(guard.as_ref().unwrap());
     drop(guard);
@@ -1212,7 +1197,7 @@ pub(crate) async fn async_order_new(
     )
     .map_err(|err| APIError::Unexpected(err.message))?;
 
-    Ok(AsyncOrderNewData {
+    Ok(AsyncOrderNewResponse {
         request_id,
         host_node_id: hex_str(&host_node_id.serialize()),
         protocol_version: order_state.protocol_version,
@@ -1225,6 +1210,76 @@ pub(crate) async fn async_order_new(
         first_hash_index,
         last_hash_index,
         hashes,
+    })
+}
+
+pub(crate) async fn async_order_outbound_invoice(
+    state: Arc<AppState>,
+    request: AsyncOrderOutboundInvoiceRequest,
+) -> Result<AsyncOrderOutboundInvoiceResponse, APIError> {
+    let guard = check_unlocked(&state).await?;
+    let unlocked_state = Arc::clone(guard.as_ref().unwrap());
+    drop(guard);
+
+    let peer_node_id =
+        hex_str_to_compressed_pubkey(&request.client_node_id).ok_or(APIError::InvalidPubkey)?;
+    if unlocked_state
+        .peer_manager
+        .peer_by_node_id(&peer_node_id)
+        .is_none()
+    {
+        return Err(APIError::InvalidPeerInfo(s!(
+            "/apay/outboundinvoice requires a connected recipient peer"
+        )));
+    }
+
+    let request_id = new_jsonrpc_request_id();
+    let response_rx = unlocked_state
+        .async_order_handler
+        .queue_async_order_request_invoice(
+            peer_node_id,
+            Value::String(request_id.clone()),
+            request.params,
+        )
+        .map_err(|err| APIError::InvalidRequest(err.message))?;
+    unlocked_state.peer_manager.process_events();
+
+    let response_value = match timeout(
+        Duration::from_secs(ASYNC_ORDER_RESPONSE_TIMEOUT_SECS),
+        response_rx,
+    )
+    .await
+    {
+        Ok(Ok(Ok(result))) => result,
+        Ok(Ok(Err(err))) => {
+            return Err(APIError::InvalidRequest(format!(
+                "async_order host error {}: {}",
+                err.code, err.message
+            )));
+        }
+        Ok(Err(_)) => {
+            return Err(APIError::Network(s!(
+                "/apay/outboundinvoice response channel closed before peer replied"
+            )))
+        }
+        Err(_) => {
+            unlocked_state
+                .async_order_handler
+                .forget_async_order_response(peer_node_id, &request_id);
+            return Err(APIError::Network(s!(
+                "/apay/outboundinvoice timed out waiting for peer response"
+            )));
+        }
+    };
+
+    let response: AsyncOrderOutboundInvoiceResultWire = serde_json::from_value(response_value)
+        .map_err(|err| {
+            APIError::InvalidRequest(format!("invalid request_invoice response: {err}"))
+        })?;
+
+    Ok(AsyncOrderOutboundInvoiceResponse {
+        payment_hash: response.payment_hash,
+        bolt11: response.bolt11,
     })
 }
 

@@ -1044,7 +1044,7 @@ struct AsyncOrderRecipientInvoiceProvider {
     channel_manager: Arc<ChannelManager>,
     inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
     async_payments_preimage_root: Arc<AsyncPaymentsPreimageRoot>,
-    kv_store: Arc<SeaOrmKvStore>,
+    kv_store: Arc<SyncedKvStore>,
 }
 
 impl AsyncOrderRecipientInvoiceProvider {
@@ -1065,9 +1065,6 @@ impl AsyncOrderInvoiceProvider for AsyncOrderRecipientInvoiceProvider {
         _sender_node_id: PublicKey,
         params: AsyncOrderRequestInvoiceParamsWire,
     ) -> Result<AsyncOrderOutboundInvoiceResultWire, JsonRpcErrorWire> {
-        if params.claim_session_id.trim().is_empty() || params.claim_session_id.len() > 128 {
-            return Err(JsonRpcErrorWire::invalid_params("invalid_claim_session_id"));
-        }
         let hash_index = Self::parse_u64_field(&params.hash_index, "hash_index")?;
         let amount_msat = params.amount_msat;
         if amount_msat < HTLC_MIN_MSAT {
@@ -1112,8 +1109,16 @@ impl AsyncOrderInvoiceProvider for AsyncOrderRecipientInvoiceProvider {
         }
 
         let mut inbound = self.inbound_payments.lock().unwrap();
-        if inbound.payments.contains_key(&requested_payment_hash) {
-            return Err(Self::stale_flow_error());
+        if let Some(existing) = inbound.payments.get(&requested_payment_hash) {
+            let expired = existing
+                .expires_at
+                .map(|expires_at| get_current_timestamp() >= expires_at)
+                .unwrap_or(false);
+            let reusable = matches!(existing.status, HTLCStatus::Failed | HTLCStatus::Cancelled)
+                || (matches!(existing.status, HTLCStatus::Pending) && expired);
+            if !reusable {
+                return Err(Self::stale_flow_error());
+            }
         }
 
         let description_hash = lightning_invoice::Sha256(
@@ -1142,7 +1147,7 @@ impl AsyncOrderInvoiceProvider for AsyncOrderRecipientInvoiceProvider {
         let created_at = get_current_timestamp();
         let expires_at = created_at + params.invoice_expiry_sec as u64;
         let result = AsyncOrderOutboundInvoiceResultWire {
-            payment_hash: params.payment_hash.clone(),
+            payment_hash: hex_str(&requested_payment_hash.0),
             bolt11: invoice.to_string(),
         };
         persist_staged_inbound_payment(

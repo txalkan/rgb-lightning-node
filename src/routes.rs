@@ -72,9 +72,12 @@ use tokio::{
 
 use crate::async_order::{
     read_async_payments_next_hash_index, write_async_payments_next_hash_index,
-    AsyncOrderNewHashWire, AsyncOrderNewResultWire, AsyncOrderOutboundInvoiceResultWire,
-    AsyncOrderRequestInvoiceParamsWire, ASYNC_ORDER_MAX_HASH_BATCH_SIZE,
+    AsyncOrderNewResultWire, AsyncOrderOutboundInvoiceResultWire, ASYNC_ORDER_MAX_HASH_BATCH_SIZE,
     ASYNC_ORDER_RESPONSE_TIMEOUT_SECS,
+};
+use crate::core_types::async_order::{
+    AsyncOrderNewRequest, AsyncOrderNewResponse, AsyncOrderOutboundInvoiceRequest,
+    AsyncOrderOutboundInvoiceResponse,
 };
 use crate::ldk::{
     clear_rgb_payment_pending, start_ldk, stop_ldk, LdkBackgroundServices,
@@ -350,33 +353,6 @@ impl From<Assignment> for RgbLibAssignment {
             Assignment::Any => Self::Any,
         }
     }
-}
-
-#[derive(Deserialize, Serialize)]
-pub(crate) struct AsyncOrderNewRequest {
-    pub(crate) host_node_id: String,
-}
-
-#[derive(Deserialize, Serialize)]
-pub(crate) struct AsyncOrderOutboundInvoiceRequest {
-    pub(crate) client_node_id: String,
-    pub(crate) params: AsyncOrderRequestInvoiceParamsWire,
-}
-
-#[derive(Deserialize, Serialize)]
-pub(crate) struct AsyncOrderNewResponse {
-    pub(crate) request_id: String,
-    pub(crate) host_node_id: String,
-    pub(crate) protocol_version: u64,
-    pub(crate) order_id: String,
-    pub(crate) status: String,
-    pub(crate) accepted_through_index: u64,
-    pub(crate) next_index_expected: u64,
-    pub(crate) unused_hashes: u64,
-    pub(crate) refill_batch_size: u64,
-    pub(crate) first_hash_index: u64,
-    pub(crate) last_hash_index: u64,
-    pub(crate) hashes: Vec<AsyncOrderNewHashWire>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1517,7 +1493,7 @@ pub(crate) async fn async_order_outbound_invoice(
         Json<AsyncOrderOutboundInvoiceRequest>,
         APIError,
     >,
-) -> Result<Json<AsyncOrderOutboundInvoiceResultWire>, APIError> {
+) -> Result<Json<AsyncOrderOutboundInvoiceResponse>, APIError> {
     let guard = state.check_unlocked().await?;
     let unlocked_state = Arc::clone(guard.as_ref().unwrap());
     drop(guard);
@@ -1534,7 +1510,7 @@ pub(crate) async fn async_order_outbound_invoice(
         )));
     }
 
-    let request_id = payload.params.claim_session_id.clone();
+    let request_id = new_jsonrpc_request_id();
     let response_rx = unlocked_state
         .async_order_handler
         .queue_async_order_request_invoice(
@@ -1578,7 +1554,10 @@ pub(crate) async fn async_order_outbound_invoice(
             APIError::InvalidRequest(format!("invalid request_invoice response: {err}"))
         })?;
 
-    Ok(Json(response))
+    Ok(Json(AsyncOrderOutboundInvoiceResponse {
+        payment_hash: response.payment_hash,
+        bolt11: response.bolt11,
+    }))
 }
 
 pub(crate) async fn asset_balance(
