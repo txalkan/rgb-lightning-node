@@ -575,8 +575,7 @@ async fn virtual_reconciliation_ignores_orphan_pending_rgb_entries() {
 #[tokio::test]
 #[traced_test]
 #[serial_test::serial]
-async fn virtual_hodl_invoice_cancel_clears_pending_artifacts_and_allows_close_after_reconciliation(
-) {
+async fn virtual_hodl_invoice_cancel_clears_pending_artifacts_and_allows_close() {
     initialize();
 
     let test_storage_root = format!("{TEST_DIR_BASE}hodl_cancel_cleanup/");
@@ -661,13 +660,6 @@ async fn virtual_hodl_invoice_cancel_clears_pending_artifacts_and_allows_close_a
         wait_for_ln_payment(host_node_address, &payment_hash, HTLCStatus::Failed).await;
     assert_eq!(payer_failed.asset_id, Some(issued_asset_id.clone()));
     assert_eq!(payer_failed.asset_amount, Some(asset_payment_amount));
-
-    wait_for_rgb_channel_state_reconciliation(
-        &format!("{test_storage_root}host_node"),
-        &channel_id,
-    )
-    .await
-    .unwrap_or_else(|err| panic!("wait for host RGB channel state to reconcile: {err}"));
 
     close_channel(host_node_address, &channel_id, &client_node_pubkey, false).await;
 

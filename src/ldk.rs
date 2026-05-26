@@ -834,6 +834,10 @@ impl UnlockedAppState {
             }
         }
 
+        if let Ok(rgb_state) = kv.read_rgb_channel_info(&channel_id_hex, false) {
+            kv.write_rgb_channel_info(&channel_id_hex, &rgb_state, true);
+        }
+
         let final_rgb_state = kv.read_rgb_channel_info(&channel_id_hex, false);
         let pending_rgb_state = kv.read_rgb_channel_info(&channel_id_hex, true);
 

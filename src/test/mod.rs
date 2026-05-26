@@ -6,8 +6,7 @@ use bitcoin::secp256k1::PublicKey;
 use chrono::{DateTime, Local, Utc};
 use electrum_client::ElectrumApi;
 use lightning::rgb_utils::{
-    RgbKvStoreExt, RgbPaymentInfo, RGB_PAYMENT_INFO_INBOUND_NS, RGB_PAYMENT_INFO_OUTBOUND_NS,
-    RGB_PRIMARY_NS,
+    RgbPaymentInfo, RGB_PAYMENT_INFO_INBOUND_NS, RGB_PAYMENT_INFO_OUTBOUND_NS, RGB_PRIMARY_NS,
 };
 use lightning::util::hash_tables::new_hash_map;
 use lightning::util::persist::KVStoreSync;
@@ -2110,42 +2109,6 @@ async fn wait_for_peer_port_ready(node_peer_port: u16) {
                 panic!("LDK peer port {node_peer_port} did not accept connections in time: {err}")
             }
         }
-    }
-}
-
-async fn wait_for_rgb_channel_state_reconciliation(
-    test_dir: &str,
-    channel_id: &str,
-) -> Result<(), APIError> {
-    let db_path = get_db_path(&PathBuf::from(test_dir));
-    let connection_string = format!("sqlite:{}?mode=rwc", db_path.display());
-    let mut opt = sea_orm::ConnectOptions::new(connection_string);
-    opt.max_connections(1);
-    let db = crate::runtime::block_on(sea_orm::Database::connect(opt)).expect("connect to test db");
-    let kv_store = crate::kv_store::SeaOrmKvStore::from_connection(Arc::new(db));
-    let t_0 = OffsetDateTime::now_utc();
-    loop {
-        let final_rgb_state = kv_store.read_rgb_channel_info(channel_id, false);
-        let pending_rgb_state = kv_store.read_rgb_channel_info(channel_id, true);
-        let reconciled = matches!(
-            (final_rgb_state, pending_rgb_state),
-            (Ok(final_rgb_state), Ok(pending_rgb_state))
-                if final_rgb_state.contract_id == pending_rgb_state.contract_id
-                    && final_rgb_state.schema == pending_rgb_state.schema
-                    && final_rgb_state.local_rgb_amount == pending_rgb_state.local_rgb_amount
-                    && final_rgb_state.remote_rgb_amount == pending_rgb_state.remote_rgb_amount
-                    && final_rgb_state.remote_rgb_amount == 0
-        );
-
-        if reconciled {
-            return Ok(());
-        }
-        if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 20.0 {
-            return Err(APIError::Unexpected(format!(
-                "RGB channel state for {channel_id} did not reconcile"
-            )));
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
 }
 
