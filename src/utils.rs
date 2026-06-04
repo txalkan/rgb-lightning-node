@@ -184,6 +184,52 @@ pub(crate) struct UnlockedAppState {
 }
 
 impl UnlockedAppState {
+    pub(crate) fn attach_apay_signatures(
+        &self,
+        mut params: crate::async_order::AsyncOrderNewParamsWire,
+        host_pubkey_hex: &str,
+        first_hash_index: u64,
+        username: Option<&str>,
+        domain: Option<&str>,
+    ) -> Result<crate::async_order::AsyncOrderNewParamsWire, APIError> {
+        if username.is_some() != domain.is_some() {
+            return Err(APIError::InvalidRequest(
+                "username and domain must be supplied together".to_string(),
+            ));
+        }
+
+        let recipient_pubkey = self.runtime_node_pubkey();
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let expires_at = created_at.saturating_add(crate::async_order::APAY_BATCH_EXPIRY_SECS);
+        let batch = crate::async_order::build_apay_batch_commitment(
+            &recipient_pubkey,
+            host_pubkey_hex,
+            first_hash_index,
+            &params.hashes,
+            created_at,
+            expires_at,
+            |msg| self.sign_node_message(msg).map_err(|_| ()),
+        )
+        .map_err(|err| APIError::InvalidRequest(err.message))?;
+        params.batch = Some(batch);
+
+        if let (Some(username), Some(domain)) = (username, domain) {
+            let address_sig = crate::async_order::build_apay_address_attestation(
+                &recipient_pubkey,
+                domain,
+                username,
+                0,
+                |msg| self.sign_node_message(msg).map_err(|_| ()),
+            )
+            .map_err(|err| APIError::InvalidRequest(err.message))?;
+            params.address_sig = Some(address_sig);
+        }
+        Ok(params)
+    }
+
     pub(crate) fn get_inbound_payments(&self) -> MutexGuard<'_, InboundPaymentInfoStorage> {
         self.inbound_payments.lock().unwrap()
     }

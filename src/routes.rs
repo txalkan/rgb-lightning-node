@@ -1517,6 +1517,8 @@ pub(crate) async fn async_order_new(
                     payment_hash: entry.payment_hash_hex,
                 })
                 .collect(),
+            batch: None,
+            address_sig: None,
         }
     } else {
         unlocked_state
@@ -1533,6 +1535,15 @@ pub(crate) async fn async_order_new(
         .last()
         .map(|entry| entry.hash_index)
         .expect("validated async_order.new hash batch is non-empty");
+
+    let params = unlocked_state.attach_apay_signatures(
+        params,
+        &hex_str(&host_node_id.serialize()),
+        first_hash_index,
+        payload.username.as_deref(),
+        payload.domain.as_deref(),
+    )?;
+
     let request_id = new_jsonrpc_request_id();
 
     let response_rx = unlocked_state

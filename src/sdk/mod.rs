@@ -1184,6 +1184,15 @@ pub(crate) async fn async_order_new(
         .last()
         .map(|entry| entry.hash_index)
         .expect("validated async_order.new hash batch is non-empty");
+
+    let params = unlocked_state.attach_apay_signatures(
+        params,
+        &crate::utils::hex_str(&host_node_id.serialize()),
+        first_hash_index,
+        request.username.as_deref(),
+        request.domain.as_deref(),
+    )?;
+
     let request_id = new_jsonrpc_request_id();
 
     let response_rx = unlocked_state
