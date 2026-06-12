@@ -1704,13 +1704,13 @@ fn validate_async_payments_next_hash_index(next_index: u64) -> Result<(), JsonRp
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kv_store::test_support::MemoryKvStore;
     use crate::utils::new_jsonrpc_request_id;
     use axum::{extract::Json, http::StatusCode, routing::post, Router};
     use bitcoin::secp256k1::{Secp256k1, SecretKey};
-    use std::collections::HashMap as StdHashMap;
     use std::str::FromStr;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex as StdMutex};
+    use std::sync::Arc;
     use std::time::Duration;
     use tokio::net::TcpListener;
     use tokio::time::sleep;
@@ -1739,81 +1739,6 @@ mod tests {
         ) -> Result<AsyncOrderOutboundInvoiceResultWire, JsonRpcErrorWire> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.result.clone())
-        }
-    }
-
-    #[derive(Default)]
-    struct MemoryKvStore {
-        entries: StdMutex<StdHashMap<(String, String, String), Vec<u8>>>,
-    }
-
-    impl KVStoreSync for MemoryKvStore {
-        fn read(
-            &self,
-            primary_namespace: &str,
-            secondary_namespace: &str,
-            key: &str,
-        ) -> Result<Vec<u8>, io::Error> {
-            self.entries
-                .lock()
-                .unwrap()
-                .get(&(
-                    primary_namespace.to_owned(),
-                    secondary_namespace.to_owned(),
-                    key.to_owned(),
-                ))
-                .cloned()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing key"))
-        }
-
-        fn write(
-            &self,
-            primary_namespace: &str,
-            secondary_namespace: &str,
-            key: &str,
-            buf: Vec<u8>,
-        ) -> Result<(), io::Error> {
-            self.entries.lock().unwrap().insert(
-                (
-                    primary_namespace.to_owned(),
-                    secondary_namespace.to_owned(),
-                    key.to_owned(),
-                ),
-                buf,
-            );
-            Ok(())
-        }
-
-        fn remove(
-            &self,
-            primary_namespace: &str,
-            secondary_namespace: &str,
-            key: &str,
-            _lazy: bool,
-        ) -> Result<(), io::Error> {
-            self.entries.lock().unwrap().remove(&(
-                primary_namespace.to_owned(),
-                secondary_namespace.to_owned(),
-                key.to_owned(),
-            ));
-            Ok(())
-        }
-
-        fn list(
-            &self,
-            primary_namespace: &str,
-            secondary_namespace: &str,
-        ) -> Result<Vec<String>, io::Error> {
-            Ok(self
-                .entries
-                .lock()
-                .unwrap()
-                .keys()
-                .filter(|(primary, secondary, _)| {
-                    primary == primary_namespace && secondary == secondary_namespace
-                })
-                .map(|(_, _, key)| key.clone())
-                .collect())
         }
     }
 

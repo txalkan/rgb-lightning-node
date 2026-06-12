@@ -71,9 +71,8 @@ use tokio::{
 };
 
 use crate::async_order::{
-    read_async_payments_next_hash_index, write_async_payments_next_hash_index,
-    AsyncOrderNewParamsWire, AsyncOrderNewResultWire, AsyncOrderOutboundInvoiceResultWire,
-    ASYNC_ORDER_MAX_HASH_BATCH_SIZE, ASYNC_ORDER_RESPONSE_TIMEOUT_SECS,
+    write_async_payments_next_hash_index, AsyncOrderNewResultWire,
+    AsyncOrderOutboundInvoiceResultWire, ASYNC_ORDER_RESPONSE_TIMEOUT_SECS,
 };
 use crate::core_types::async_order::{
     AsyncOrderNewRequest, AsyncOrderNewResponse, AsyncOrderOutboundInvoiceRequest,
@@ -1493,39 +1492,7 @@ pub(crate) async fn async_order_new(
         )));
     }
 
-    let start_index =
-        read_async_payments_next_hash_index(unlocked_state.kv_store.as_ref(), &host_node_id)
-            .map_err(|err| APIError::Unexpected(err.message))?;
-    let params = if unlocked_state.external_signer_mode {
-        let external_signer = unlocked_state
-            .external_signer
-            .as_ref()
-            .ok_or_else(|| APIError::Unexpected("external signer missing".to_string()))?;
-        let hashes = external_signer
-            .prepare_async_payments_hashes(
-                hex_str(&host_node_id.serialize()),
-                start_index,
-                ASYNC_ORDER_MAX_HASH_BATCH_SIZE as u32,
-            )
-            .map_err(|e| APIError::ExternalSignerProtocolError(e.to_string()))?;
-        AsyncOrderNewParamsWire {
-            protocol_version: 1,
-            hashes: hashes
-                .into_iter()
-                .map(|entry| crate::async_order::AsyncOrderNewHashWire {
-                    hash_index: entry.hash_index,
-                    payment_hash: entry.payment_hash_hex,
-                })
-                .collect(),
-            batch: None,
-            address_sig: None,
-        }
-    } else {
-        unlocked_state
-            .async_payments_preimage_root
-            .prepare_async_order_new_params(start_index, ASYNC_ORDER_MAX_HASH_BATCH_SIZE)
-            .map_err(|err| APIError::InvalidRequest(err.message))?
-    };
+    let params = unlocked_state.prepare_apay_order_params(&host_node_id)?;
     let hashes = params.hashes.clone();
     let first_hash_index = hashes
         .first()
