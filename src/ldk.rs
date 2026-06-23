@@ -1102,16 +1102,20 @@ trait LiveChannelLookup: Send + Sync {
     fn peer_has_live_channel(&self, peer: &PublicKey) -> bool;
 }
 
+pub(crate) fn peer_has_live_channel(channel_manager: &ChannelManager, peer: &PublicKey) -> bool {
+    channel_manager
+        .list_usable_channels()
+        .iter()
+        .any(|channel| channel.counterparty.node_id == *peer)
+}
+
 struct UsablePeerChannelLookup {
     channel_manager: Arc<ChannelManager>,
 }
 
 impl LiveChannelLookup for UsablePeerChannelLookup {
     fn peer_has_live_channel(&self, peer: &PublicKey) -> bool {
-        self.channel_manager
-            .list_usable_channels()
-            .iter()
-            .any(|channel| channel.counterparty.node_id == *peer)
+        peer_has_live_channel(&self.channel_manager, peer)
     }
 }
 
