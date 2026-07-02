@@ -2790,7 +2790,7 @@ dependencies = [
  "lightning-types 0.3.1",
  "musig2",
  "possiblyrandom 0.2.0",
- "rgb-lib",
+ "rgb-lib 0.3.0-beta.6 (git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.26)",
  "serde",
  "tokio",
 ]
@@ -2847,7 +2847,7 @@ dependencies = [
  "bech32 0.11.1",
  "bitcoin 0.32.101",
  "lightning-types 0.3.1",
- "rgb-lib",
+ "rgb-lib 0.3.0-beta.6 (git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.26)",
  "serde",
 ]
 
@@ -4249,6 +4249,48 @@ dependencies = [
 [[package]]
 name = "rgb-lib"
 version = "0.3.0-beta.6"
+source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.26#117e8ca0411ebc8fd8e771f702daa0fa35ab66dd"
+dependencies = [
+ "amplify",
+ "base64 0.22.1",
+ "bdk_electrum",
+ "bdk_esplora",
+ "bdk_wallet",
+ "chacha20poly1305",
+ "file-format",
+ "generic-array",
+ "hex",
+ "rand 0.10.1",
+ "reqwest 0.13.4",
+ "rgb-invoicing",
+ "rgb-lib-migration 0.3.0-beta.4 (git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.26)",
+ "rgb-ops",
+ "rgb-psbt-utils",
+ "rgb-schemas",
+ "rgb-strict-encoding",
+ "rgb-strict-types",
+ "rustls 0.23.41",
+ "scrypt",
+ "sea-orm",
+ "sea-query",
+ "serde",
+ "serde_json",
+ "slog",
+ "slog-async",
+ "slog-term",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "typenum",
+ "url",
+ "walkdir",
+ "zip 8.6.0",
+]
+
+[[package]]
+name = "rgb-lib"
+version = "0.3.0-beta.6"
 source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.27#d8dba807d5028635143ffc8098e1b59086b646a0"
 dependencies = [
  "amplify",
@@ -4264,7 +4306,7 @@ dependencies = [
  "rand 0.10.1",
  "reqwest 0.13.4",
  "rgb-invoicing",
- "rgb-lib-migration",
+ "rgb-lib-migration 0.3.0-beta.4 (git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.27)",
  "rgb-ops",
  "rgb-psbt-utils",
  "rgb-schemas",
@@ -4289,6 +4331,15 @@ dependencies = [
  "vss-client-ng",
  "walkdir",
  "zip 8.6.0",
+]
+
+[[package]]
+name = "rgb-lib-migration"
+version = "0.3.0-beta.4"
+source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.26#117e8ca0411ebc8fd8e771f702daa0fa35ab66dd"
+dependencies = [
+ "sea-orm-migration",
+ "tokio",
 ]
 
 [[package]]
@@ -4344,7 +4395,7 @@ dependencies = [
  "rcgen",
  "regex",
  "reqwest 0.12.28",
- "rgb-lib",
+ "rgb-lib 0.3.0-beta.6 (git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.27)",
  "rgb-psbt-utils",
  "rln-migration",
  "rustls 0.23.41",

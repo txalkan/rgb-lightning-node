@@ -4,6 +4,7 @@
 
 mod apay_merkle;
 mod args;
+mod asset_link;
 #[cfg(feature = "vss")]
 mod async_kv_store;
 mod async_order;
@@ -13,6 +14,7 @@ mod bitcoind;
 mod chain_backend;
 mod config;
 mod core_types;
+mod custom_msg_rpc;
 mod database;
 mod disk;
 mod error;
