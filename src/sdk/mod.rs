@@ -58,6 +58,7 @@ use lightning::util::config::{
 };
 use lightning::util::errors::APIError as LDKAPIError;
 use lightning::util::message_signing;
+use lightning::util::persist::KVStoreSync;
 use lightning::util::IS_SWAP_SCID;
 use lightning::{
     onion_message::messenger::Destination, onion_message::messenger::MessageSendInstructions,
@@ -88,14 +89,17 @@ use rgb_lib::wallet::rust_only::IndexerProtocol as RgbLibIndexerProtocol;
 use rgb_lib::wallet::RecipientType as RgbLibRecipientType;
 use rgb_lib::wallet::{
     AssetCFA as RgbLibAssetCFA, AssetIFA as RgbLibAssetIFA, AssetNIA as RgbLibAssetNIA,
-    AssetUDA as RgbLibAssetUDA, EmbeddedMedia as RgbLibEmbeddedMedia, Media as RgbLibMedia,
+    AssetUDA as RgbLibAssetUDA, EmbeddedMedia as RgbLibEmbeddedMedia,
+    IfaIssuanceType as RgbLibIfaIssuanceType, Media as RgbLibMedia, Outpoint as RgbLibOutpoint,
     ProofOfReserves as RgbLibProofOfReserves, Token as RgbLibToken, TokenLight as RgbLibTokenLight,
 };
 use rgb_lib::BitcoinNetwork as RgbBitcoinNetwork;
 use rgb_lib::{AssetSchema as RgbLibAssetSchema, Assignment as RgbLibAssignment};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST: &str = "trusted_no_broadcast";
+const ASSET_LINK_NAMESPACE: &str = "asset_link";
 
 struct OpenChannelVirtualIntentGuard {
     unlocked_state: Arc<crate::utils::UnlockedAppState>,
@@ -463,6 +467,7 @@ pub(crate) struct IssueAssetIFARequestData {
     pub(crate) name: String,
     pub(crate) precision: u8,
     pub(crate) reject_list_url: Option<String>,
+    pub(crate) issuance_type: Option<RgbLibIfaIssuanceType>,
 }
 
 pub(crate) struct IssueAssetUdaRequestData {
@@ -746,6 +751,7 @@ pub(crate) enum TransferKind {
     Send,
     Inflation,
     Burn,
+    Link,
 }
 
 #[derive(Debug, PartialEq)]
@@ -993,6 +999,16 @@ pub(crate) struct AssetIFA {
     pub(crate) balance: AssetBalance,
     pub(crate) media: Option<Media>,
     pub(crate) reject_list_url: Option<String>,
+    pub(crate) link_right_outpoint: Option<RgbLibOutpoint>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct AssetLink {
+    asset_id: String,
+    linked_asset_id: Option<String>,
+    created_at: Option<u64>,
+    link_right_outpoint: Option<RgbLibOutpoint>,
+    txid: Option<String>,
 }
 
 impl From<RgbLibAssetIFA> for AssetIFA {
@@ -1017,8 +1033,24 @@ impl From<RgbLibAssetIFA> for AssetIFA {
             },
             media: value.media.map(Into::into),
             reject_list_url: value.reject_list_url,
+            link_right_outpoint: value.link_right_outpoint,
         }
     }
+}
+
+fn asset_link_write_record(
+    kv_store: &dyn KVStoreSync,
+    asset_link: &AssetLink,
+) -> Result<(), APIError> {
+    let encoded = serde_json::to_vec(asset_link)
+        .map_err(|e| APIError::Unexpected(format!("failed to serialize asset link: {e}")))?;
+    kv_store
+        .write(ASSET_LINK_NAMESPACE, "", &asset_link.asset_id, encoded)
+        .map_err(|e| {
+            APIError::IO(std::io::Error::other(format!(
+                "asset link write failed: {e}"
+            )))
+        })
 }
 
 /*
@@ -2474,7 +2506,17 @@ pub(crate) async fn issue_asset_ifa(
         request.amounts,
         request.inflation_amounts,
         request.reject_list_url,
+        request.issuance_type,
     )?;
+
+    let no_asset_link = AssetLink {
+        asset_id: asset.asset_id.clone(),
+        linked_asset_id: None,
+        created_at: None,
+        link_right_outpoint: asset.link_right_outpoint.clone(),
+        txid: None,
+    };
+    asset_link_write_record(unlocked_state.kv_store.as_ref(), &no_asset_link)?;
 
     Ok(asset.into())
 }
@@ -4259,6 +4301,7 @@ fn to_transfer_data(transfer: rgb_lib::wallet::Transfer) -> TransferData {
             rgb_lib::wallet::TransferKind::Send => TransferKind::Send,
             rgb_lib::wallet::TransferKind::Inflation => TransferKind::Inflation,
             rgb_lib::wallet::TransferKind::Burn => TransferKind::Burn,
+            rgb_lib::wallet::TransferKind::Link => TransferKind::Link,
         },
         txid: transfer.txid,
         recipient_id: transfer.recipient_id,
@@ -4930,6 +4973,7 @@ mod tests {
                 name: "IFA".to_string(),
                 precision: 0,
                 reject_list_url: None,
+                issuance_type: None,
             },
         )
         .await;
