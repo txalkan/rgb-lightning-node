@@ -256,6 +256,8 @@ pub struct AssetMetadataInfo {
     pub ticker: Option<String>,
     pub details: Option<String>,
     pub token: Option<Token>,
+    pub linked_from_asset_id: Option<String>,
+    pub linked_to_asset_id: Option<String>,
 }
 
 pub struct AssetMediaResponse {
@@ -357,6 +359,8 @@ pub struct AssetIfa {
     pub media: Option<Media>,
     pub reject_list_url: Option<String>,
     pub link_right_outpoint: Option<RgbOutpoint>,
+    pub linked_from_asset_id: Option<String>,
+    pub linked_to_asset_id: Option<String>,
 }
 
 pub struct RgbOutpoint {

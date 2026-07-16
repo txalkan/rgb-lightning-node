@@ -33,7 +33,6 @@ use lightning::{
         router::{PaymentParameters, RouteParameters},
     },
     util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig},
-    util::persist::KVStoreSync,
     util::{errors::APIError as LDKAPIError, IS_SWAP_SCID},
 };
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description, PaymentSecret};
@@ -116,7 +115,6 @@ use crate::{
 };
 
 const VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST: &str = "trusted_no_broadcast";
-const ASSET_LINK_NAMESPACE: &str = "asset_link";
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct AddressResponse {
@@ -194,6 +192,8 @@ pub(crate) struct AssetIFA {
     pub(crate) media: Option<Media>,
     pub(crate) reject_list_url: Option<String>,
     pub(crate) link_right_outpoint: Option<RgbLibOutpoint>,
+    pub(crate) linked_from_asset_id: Option<String>,
+    pub(crate) linked_to_asset_id: Option<String>,
 }
 
 impl From<RgbLibAssetIFA> for AssetIFA {
@@ -213,6 +213,8 @@ impl From<RgbLibAssetIFA> for AssetIFA {
             media: value.media.map(|m| m.into()),
             reject_list_url: value.reject_list_url,
             link_right_outpoint: value.link_right_outpoint,
+            linked_from_asset_id: value.linked_from_asset_id,
+            linked_to_asset_id: value.linked_to_asset_id,
         }
     }
 }
@@ -239,53 +241,6 @@ pub(crate) struct AssetLinkCreateResponse {
     pub(crate) asset_link: AssetLink,
 }
 
-pub(crate) fn asset_link_read_record(
-    kv_store: &dyn KVStoreSync,
-    asset_id: &str,
-) -> Result<AssetLink, APIError> {
-    match kv_store.read(ASSET_LINK_NAMESPACE, "", asset_id) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map_err(|e| APIError::Unexpected(format!("invalid persisted asset link: {e}"))),
-        Err(e) if e.kind() == bitcoin::io::ErrorKind::NotFound => Err(APIError::InvalidRequest(
-            format!("asset link record for {asset_id} is missing"),
-        )),
-        Err(e) => Err(APIError::IO(std::io::Error::other(format!(
-            "asset link read failed: {e}"
-        )))),
-    }
-}
-
-fn asset_link_write_record(
-    kv_store: &dyn KVStoreSync,
-    asset_link: &AssetLink,
-) -> Result<(), APIError> {
-    let encoded = serde_json::to_vec(asset_link)
-        .map_err(|e| APIError::Unexpected(format!("failed to serialize asset link: {e}")))?;
-    kv_store
-        .write(ASSET_LINK_NAMESPACE, "", &asset_link.asset_id, encoded)
-        .map_err(|e| {
-            APIError::IO(std::io::Error::other(format!(
-                "asset link write failed: {e}"
-            )))
-        })
-}
-
-fn asset_link_write_reverse_record(
-    kv_store: &dyn KVStoreSync,
-    parent_asset_id: &str,
-    child_asset_id: &str,
-    txid: Option<String>,
-) -> Result<(), APIError> {
-    let reverse_asset_link = AssetLink {
-        asset_id: child_asset_id.to_string(),
-        linked_asset_id: Some(parent_asset_id.to_string()),
-        created_at: None,
-        link_right_outpoint: None,
-        txid,
-    };
-    asset_link_write_record(kv_store, &reverse_asset_link)
-}
-
 #[derive(Deserialize, Serialize)]
 pub(crate) struct AssetMetadataRequest {
     pub(crate) asset_id: String,
@@ -303,6 +258,8 @@ pub(crate) struct AssetMetadataResponse {
     pub(crate) ticker: Option<String>,
     pub(crate) details: Option<String>,
     pub(crate) token: Option<Token>,
+    pub(crate) linked_from_asset_id: Option<String>,
+    pub(crate) linked_to_asset_id: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1930,32 +1887,62 @@ pub(crate) async fn asset_link_create(
             ));
         }
 
-        let asset_record = asset_link_read_record(unlocked_state.kv_store.as_ref(), &asset_id)?;
+        let parent_metadata = unlocked_state.rgb_get_asset_metadata(contract_id)?;
+        let child_metadata = unlocked_state.rgb_get_asset_metadata(linked_contract_id)?;
 
-        match asset_record.linked_asset_id.as_deref() {
-            None => {}
-            Some(existing_linked_asset_id) if existing_linked_asset_id == linked_asset_id => {
-                if asset_record.link_right_outpoint.is_none() && asset_record.created_at.is_some() {
-                    return Ok(Json(AssetLinkCreateResponse {
-                        asset_link: asset_record,
-                    }));
-                }
-                return Err(APIError::InvalidRequest(format!(
-                    "asset link record for asset_id {asset_id} is partially populated"
+        if parent_metadata.asset_schema != RgbLibAssetSchema::Ifa
+            || child_metadata.asset_schema != RgbLibAssetSchema::Ifa
+        {
+            return Err(APIError::InvalidContractLink(
+                "asset linking is only supported for IFA assets".to_string(),
+            ));
+        }
+
+        match child_metadata.linked_from_asset_id.as_deref() {
+            Some(existing_parent_id) if existing_parent_id == asset_id => {}
+            Some(existing_parent_id) => {
+                return Err(APIError::InvalidContractLink(format!(
+                    "linked_asset_id {linked_asset_id} is already linked from {existing_parent_id}"
                 )));
             }
-            Some(_) => {
-                return Err(APIError::InvalidRequest(format!(
-                    "asset link already exists for asset_id {asset_id}"
+            None => {
+                return Err(APIError::InvalidContractLink(format!(
+                    "linked_asset_id {linked_asset_id} does not declare asset_id {asset_id} as its parent"
                 )));
             }
         }
 
-        let link_right_outpoint = asset_record.link_right_outpoint.clone().ok_or_else(|| {
-            APIError::InvalidRequest(format!(
-                "asset link record for asset_id {asset_id} is missing link_right_outpoint"
-            ))
-        })?;
+        match parent_metadata.linked_to_asset_id.as_deref() {
+            Some(existing_linked_asset_id) if existing_linked_asset_id == linked_asset_id => {
+                let link_transfer = unlocked_state.rgb_find_link_transfer(contract_id)?;
+                let created_at = link_transfer
+                    .as_ref()
+                    .map(|transfer| transfer.created_at.max(0) as u64)
+                    .unwrap_or_else(get_current_timestamp);
+                let asset_link = AssetLink {
+                    asset_id: asset_id.clone(),
+                    linked_asset_id: Some(linked_asset_id),
+                    created_at: Some(created_at),
+                    link_right_outpoint: None,
+                    txid: link_transfer.and_then(|transfer| transfer.txid),
+                };
+                return Ok(Json(AssetLinkCreateResponse { asset_link }));
+            }
+            Some(existing_linked_asset_id) => {
+                return Err(APIError::InvalidContractLink(format!(
+                    "asset_id {asset_id} is already linked to {existing_linked_asset_id}"
+                )));
+            }
+            None => {}
+        }
+
+        let link_right_outpoint = unlocked_state
+            .rgb_find_link_right_outpoint(contract_id)?
+            .ok_or_else(|| {
+                APIError::InvalidRequest(format!(
+                    "missing link_right_outpoint for asset_id {asset_id}"
+                ))
+            })?;
 
         let link_ifa = unlocked_state.rgb_link_ifa(
             asset_id.clone(),
@@ -1964,23 +1951,18 @@ pub(crate) async fn asset_link_create(
             payload.fee_rate,
             payload.min_confirmations,
         )?;
+        let link_transfer = unlocked_state.rgb_find_link_transfer(contract_id)?;
+        let created_at = link_transfer
+            .as_ref()
+            .map(|transfer| transfer.created_at.max(0) as u64)
+            .unwrap_or_else(get_current_timestamp);
         let asset_link = AssetLink {
             asset_id: asset_id.clone(),
             linked_asset_id: Some(linked_asset_id),
-            created_at: Some(get_current_timestamp()),
+            created_at: Some(created_at),
             link_right_outpoint: None,
             txid: Some(link_ifa.txid),
         };
-        asset_link_write_record(unlocked_state.kv_store.as_ref(), &asset_link)?;
-        asset_link_write_reverse_record(
-            unlocked_state.kv_store.as_ref(),
-            &asset_link.asset_id,
-            asset_link
-                .linked_asset_id
-                .as_deref()
-                .expect("linked asset id"),
-            asset_link.txid.clone(),
-        )?;
 
         Ok(Json(AssetLinkCreateResponse { asset_link }))
     })
@@ -2268,6 +2250,8 @@ pub(crate) async fn asset_metadata(
         ticker: metadata.ticker,
         details: metadata.details,
         token: metadata.token.map(|t| t.into()),
+        linked_from_asset_id: metadata.linked_from_asset_id,
+        linked_to_asset_id: metadata.linked_to_asset_id,
     }))
 }
 
@@ -3265,15 +3249,6 @@ pub(crate) async fn issue_asset_ifa(
             payload.reject_list_url,
             payload.issuance_type,
         )?;
-
-        let no_asset_link = AssetLink {
-            asset_id: asset.asset_id.clone(),
-            linked_asset_id: None,
-            created_at: None,
-            link_right_outpoint: asset.link_right_outpoint.clone(),
-            txid: None,
-        };
-        asset_link_write_record(unlocked_state.kv_store.as_ref(), &no_asset_link)?;
 
         Ok(Json(IssueAssetIFAResponse {
             asset: asset.into(),

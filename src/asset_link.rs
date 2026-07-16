@@ -24,6 +24,7 @@ use crate::custom_msg_rpc::{
 const ASSET_LINK_AUTHORIZE_SWAP_METHOD: &str = "asset_link.authorize_swap";
 pub(crate) const ASSET_LINK_ERROR_DUPLICATE_PAYMENT_HASH: i64 = 1203;
 pub(crate) const ASSET_LINK_ERROR_INSUFFICIENT_LIQUIDITY: i64 = 1202;
+pub(crate) const ASSET_LINK_ERROR_UNKNOWN_ASSET: i64 = 1204;
 pub(crate) const ASSET_LINK_ERROR_UNKNOWN_LINK: i64 = 1201;
 pub(crate) const ASSET_LINK_ERROR_UNSUPPORTED_PROTOCOL_VERSION: i64 = 1200;
 pub(crate) const ASSET_LINK_MESSAGE_TYPE_ID: u16 = 37917;

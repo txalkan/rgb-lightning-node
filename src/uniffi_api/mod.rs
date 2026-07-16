@@ -569,6 +569,8 @@ impl SdkNode {
             media: asset.media.map(map_media),
             reject_list_url: asset.reject_list_url,
             link_right_outpoint: asset.link_right_outpoint.map(map_rgb_outpoint),
+            linked_from_asset_id: asset.linked_from_asset_id,
+            linked_to_asset_id: asset.linked_to_asset_id,
         })
     }
 
@@ -1155,6 +1157,8 @@ impl SdkNode {
             ticker: resp.ticker,
             details: resp.details,
             token: resp.token.map(map_token),
+            linked_from_asset_id: resp.linked_from_asset_id,
+            linked_to_asset_id: resp.linked_to_asset_id,
         })
     }
 
@@ -1285,6 +1289,8 @@ impl SdkNode {
                             media: a.media.map(map_media),
                             reject_list_url: a.reject_list_url,
                             link_right_outpoint: a.link_right_outpoint.map(map_rgb_outpoint),
+                            linked_from_asset_id: a.linked_from_asset_id,
+                            linked_to_asset_id: a.linked_to_asset_id,
                         })
                     })
                     .collect::<Result<Vec<_>, RlnError>>()

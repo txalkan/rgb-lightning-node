@@ -2,23 +2,10 @@ use super::*;
 
 const TEST_DIR_BASE: &str = "tmp/asset_link/";
 
-fn read_asset_link_record(test_dir: &str, asset_id: &str) -> AssetLink {
-    let db_path = get_db_path(&std::path::PathBuf::from(test_dir));
-    let connection_string = format!("sqlite:{}?mode=rwc", db_path.display());
-    let mut opt = ConnectOptions::new(connection_string);
-    opt.max_connections(1);
-    let db = crate::runtime::block_on(Database::connect(opt)).expect("connect to test db");
-    let kv_store = SeaOrmKvStore::from_connection(Arc::new(db));
-    let bytes = kv_store
-        .read("asset_link", "", asset_id)
-        .expect("asset link record");
-    serde_json::from_slice(&bytes).expect("parse asset link")
-}
-
 #[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[traced_test]
-async fn asset_link_create_is_persisted_and_idempotent() {
+async fn asset_link_create_uses_rgb_link_state_and_is_idempotent() {
     initialize();
 
     let test_dir_node = format!("{TEST_DIR_BASE}node");
@@ -42,6 +29,13 @@ async fn asset_link_create_is_persisted_and_idempotent() {
     .await;
     assert_eq!(linked_asset.link_right_outpoint, None);
     let linked_asset_id = linked_asset.asset_id;
+
+    let parent_metadata = asset_metadata(node_addr, &asset_id).await;
+    assert_eq!(parent_metadata.linked_from_asset_id, None);
+    assert_eq!(parent_metadata.linked_to_asset_id, None);
+    let child_metadata = asset_metadata(node_addr, &linked_asset_id).await;
+    assert_eq!(child_metadata.linked_from_asset_id, Some(asset_id.clone()));
+    assert_eq!(child_metadata.linked_to_asset_id, None);
 
     let invalid_link_payload = AssetLinkCreateRequest {
         asset_id: asset_id.clone(),
@@ -93,15 +87,14 @@ async fn asset_link_create_is_persisted_and_idempotent() {
 
     let asset_link = asset_link_create(node_addr, &asset_id, &linked_asset_id).await;
     assert_eq!(asset_link.asset_id, asset_id);
-    assert_eq!(asset_link.linked_asset_id, Some(linked_asset_id));
+    assert_eq!(asset_link.linked_asset_id, Some(linked_asset_id.clone()));
     assert!(asset_link
         .txid
         .as_deref()
         .is_some_and(|txid| !txid.is_empty()));
     assert!(asset_link.created_at.is_some());
 
-    let persisted_asset_link = read_asset_link_record(&test_dir_node, &asset_id);
-    assert_eq!(persisted_asset_link, asset_link);
+    assert!(asset_link.link_right_outpoint.is_none());
 
     let duplicate = asset_link_create(
         node_addr,
@@ -112,7 +105,13 @@ async fn asset_link_create_is_persisted_and_idempotent() {
             .expect("linked asset id"),
     )
     .await;
-    assert_eq!(duplicate, asset_link);
+    assert_eq!(duplicate.asset_id, asset_link.asset_id);
+    assert_eq!(duplicate.linked_asset_id, asset_link.linked_asset_id);
+    assert!(duplicate
+        .txid
+        .as_deref()
+        .is_some_and(|txid| !txid.is_empty()));
+    assert!(duplicate.created_at.is_some());
 
     let conflicting_linked_asset_id = issue_asset_ifa_with_type(
         node_addr,
@@ -138,8 +137,8 @@ async fn asset_link_create_is_persisted_and_idempotent() {
     check_response_is_nok(
         conflict_res,
         StatusCode::BAD_REQUEST,
-        "asset link already exists",
-        "InvalidRequest",
+        "already linked to",
+        "InvalidContractLink",
     )
     .await;
 
@@ -155,7 +154,43 @@ async fn asset_link_create_is_persisted_and_idempotent() {
             .expect("linked asset id"),
     )
     .await;
-    assert_eq!(after_restart, asset_link);
+    assert_eq!(after_restart.asset_id, asset_link.asset_id);
+    assert_eq!(after_restart.linked_asset_id, asset_link.linked_asset_id);
+    assert!(after_restart
+        .txid
+        .as_deref()
+        .is_some_and(|txid| !txid.is_empty()));
+    assert!(after_restart.created_at.is_some());
+
+    let restarted_parent_metadata = asset_metadata(node_addr, &asset_id).await;
+    assert_eq!(
+        restarted_parent_metadata.linked_to_asset_id,
+        Some(linked_asset_id.clone())
+    );
+    let restarted_child_metadata = asset_metadata(node_addr, &linked_asset_id).await;
+    assert_eq!(
+        restarted_child_metadata.linked_from_asset_id,
+        Some(asset_id.clone())
+    );
+    assert_eq!(restarted_child_metadata.linked_to_asset_id, None);
+
+    let assets = list_assets(node_addr).await;
+    let listed_parent = assets
+        .ifa
+        .as_ref()
+        .and_then(|ifa| ifa.iter().find(|asset| asset.asset_id == asset_id))
+        .expect("listed parent");
+    assert_eq!(
+        listed_parent.linked_to_asset_id,
+        Some(linked_asset_id.clone())
+    );
+    let listed_child = assets
+        .ifa
+        .as_ref()
+        .and_then(|ifa| ifa.iter().find(|asset| asset.asset_id == linked_asset_id))
+        .expect("listed child");
+    assert_eq!(listed_child.linked_from_asset_id, Some(asset_id.clone()));
+    assert_eq!(listed_child.linked_to_asset_id, None);
 }
 
 #[serial_test::serial]

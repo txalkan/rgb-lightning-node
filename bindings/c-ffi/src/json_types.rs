@@ -1395,6 +1395,8 @@ pub(crate) struct JsonAssetIfa {
     pub media: Option<JsonMedia>,
     pub reject_list_url: Option<String>,
     pub link_right_outpoint: Option<JsonRgbOutpoint>,
+    pub linked_from_asset_id: Option<String>,
+    pub linked_to_asset_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1429,6 +1431,8 @@ impl From<AssetIfa> for JsonAssetIfa {
             media: a.media.map(Into::into),
             reject_list_url: a.reject_list_url,
             link_right_outpoint: a.link_right_outpoint.map(Into::into),
+            linked_from_asset_id: a.linked_from_asset_id,
+            linked_to_asset_id: a.linked_to_asset_id,
         }
     }
 }
@@ -1493,6 +1497,8 @@ pub(crate) struct JsonAssetMetadataInfo {
     pub ticker: Option<String>,
     pub details: Option<String>,
     pub token: Option<JsonToken>,
+    pub linked_from_asset_id: Option<String>,
+    pub linked_to_asset_id: Option<String>,
 }
 
 impl From<AssetMetadataInfo> for JsonAssetMetadataInfo {
@@ -1508,6 +1514,8 @@ impl From<AssetMetadataInfo> for JsonAssetMetadataInfo {
             ticker: a.ticker,
             details: a.details,
             token: a.token.map(Into::into),
+            linked_from_asset_id: a.linked_from_asset_id,
+            linked_to_asset_id: a.linked_to_asset_id,
         }
     }
 }

@@ -1,7 +1,7 @@
 use crate::asset_link::{
     AssetLinkAuthorizeParamsWire, AssetLinkAuthorizer, AssetLinkMessageHandler,
     ASSET_LINK_ERROR_DUPLICATE_PAYMENT_HASH, ASSET_LINK_ERROR_INSUFFICIENT_LIQUIDITY,
-    ASSET_LINK_ERROR_UNKNOWN_LINK,
+    ASSET_LINK_ERROR_UNKNOWN_ASSET, ASSET_LINK_ERROR_UNKNOWN_LINK,
 };
 use crate::async_order::{
     AsyncOrderInvoiceProvider, AsyncOrderMessageHandler, AsyncOrderOutboundInvoiceResultWire,
@@ -114,7 +114,7 @@ use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::time::{Duration, SystemTime};
 use time::OffsetDateTime;
 use tokio::runtime::Handle;
@@ -153,7 +153,6 @@ use crate::rgb::{
     check_rgb_proxy_endpoint, get_rgb_channel_info_optional, RgbBumpWalletSource,
     RgbLibWalletWrapper,
 };
-use crate::routes::asset_link_read_record;
 use crate::signer::vls_adapter::{ExternalSignerBackend, VlsSignerAdapter};
 use crate::signer::{
     read_key_source_file, validate_bootstrap_payload, validate_key_source_matches_bootstrap,
@@ -1216,6 +1215,7 @@ impl CustomMsgPeerAccessControl for LiveChannelAccess {
 }
 
 struct NodeAssetLinkAuthorizer {
+    unlocked_state_weak: Weak<UnlockedAppState>,
     channel_manager: Arc<ChannelManager>,
     kv_store: Arc<SyncedKvStore>,
     taker_swaps: Arc<Mutex<SwapMap>>,
@@ -1240,11 +1240,25 @@ impl AssetLinkAuthorizer for NodeAssetLinkAuthorizer {
             return Err(JsonRpcErrorWire::invalid_params("invalid_expiry_sec"));
         }
 
-        let record =
-            asset_link_read_record(self.kv_store.as_ref(), &params.asset_id).map_err(|_| {
-                JsonRpcErrorWire::application_error(ASSET_LINK_ERROR_UNKNOWN_LINK, "unknown_link")
+        let unlocked_state = self.unlocked_state_weak.upgrade().ok_or_else(|| {
+            JsonRpcErrorWire::internal_error("asset_link_state_unavailable".to_owned())
+        })?;
+        let child_metadata = unlocked_state
+            .rgb_get_asset_metadata(asset_contract_id)
+            .map_err(|_| {
+                JsonRpcErrorWire::application_error(ASSET_LINK_ERROR_UNKNOWN_ASSET, "unknown_link")
             })?;
-        if record.linked_asset_id.as_deref() != Some(params.linked_asset_id.as_str()) {
+        let parent_metadata = unlocked_state
+            .rgb_get_asset_metadata(linked_contract_id)
+            .map_err(|_| {
+                JsonRpcErrorWire::application_error(ASSET_LINK_ERROR_UNKNOWN_ASSET, "unknown_link")
+            })?;
+        if child_metadata.asset_schema != AssetSchema::Ifa
+            || parent_metadata.asset_schema != AssetSchema::Ifa
+            || child_metadata.linked_from_asset_id.as_deref() != Some(params.asset_id.as_str())
+            || parent_metadata.linked_to_asset_id.as_deref()
+                != Some(params.linked_asset_id.as_str())
+        {
             return Err(JsonRpcErrorWire::application_error(
                 ASSET_LINK_ERROR_UNKNOWN_LINK,
                 "unknown_link",
@@ -1252,7 +1266,7 @@ impl AssetLinkAuthorizer for NodeAssetLinkAuthorizer {
         }
 
         let max_balance = get_max_local_rgb_amount(
-            linked_contract_id,
+            asset_contract_id,
             self.channel_manager.list_channels().iter(),
             self.kv_store.as_ref(),
         );
@@ -1277,8 +1291,8 @@ impl AssetLinkAuthorizer for NodeAssetLinkAuthorizer {
         let swap_info = SwapInfo {
             qty_from: params.amount,
             qty_to: params.amount,
-            from_asset: Some(linked_contract_id),
-            to_asset: Some(asset_contract_id),
+            from_asset: Some(asset_contract_id),
+            to_asset: Some(linked_contract_id),
             expiry: get_current_timestamp().saturating_add(expiry_sec),
         };
         let mut swap_data = SwapData::create_from_swap_info(&swap_info);
@@ -5433,12 +5447,6 @@ pub(crate) async fn start_ldk(
         external_signer: external_signer.clone(),
     }));
 
-    asset_link_handler.set_authorizer(Arc::new(NodeAssetLinkAuthorizer {
-        channel_manager: Arc::clone(&channel_manager),
-        kv_store: Arc::clone(&kv_store),
-        taker_swaps: Arc::clone(&taker_swaps),
-    }));
-
     let unlocked_state = Arc::new(UnlockedAppState {
         config: static_state.config.clone(),
         channel_manager: Arc::clone(&channel_manager),
@@ -5452,7 +5460,7 @@ pub(crate) async fn start_ldk(
         outbound_payments,
         peer_manager: Arc::clone(&peer_manager),
         async_order_handler,
-        asset_link_handler,
+        asset_link_handler: Arc::clone(&asset_link_handler),
         async_payments_preimage_root,
         kv_store: Arc::clone(&kv_store),
         #[cfg(feature = "vss")]
@@ -5460,7 +5468,7 @@ pub(crate) async fn start_ldk(
         bump_tx_event_handler,
         rgb_wallet_wrapper,
         maker_swaps,
-        taker_swaps,
+        taker_swaps: Arc::clone(&taker_swaps),
         router: Arc::clone(&router),
         output_sweeper: Arc::clone(&output_sweeper),
         channel_ids_map,
@@ -5472,6 +5480,13 @@ pub(crate) async fn start_ldk(
         virtual_channel_session_store,
         next_payment_idx,
     });
+
+    asset_link_handler.set_authorizer(Arc::new(NodeAssetLinkAuthorizer {
+        unlocked_state_weak: Arc::downgrade(&unlocked_state),
+        channel_manager: Arc::clone(&channel_manager),
+        kv_store: Arc::clone(&kv_store),
+        taker_swaps: Arc::clone(&taker_swaps),
+    }));
 
     // Refresh the RGS snapshot on a fixed interval (RGS mode only). The first
     // tick fires immediately, so a freshly unlocked node syncs right away.

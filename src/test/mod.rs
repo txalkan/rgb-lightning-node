@@ -45,27 +45,28 @@ use crate::ldk::{
 use crate::routes::VssClearFenceRequest;
 use crate::routes::{
     AddressResponse, AssetBalanceRequest, AssetBalanceResponse, AssetCFA, AssetIFA, AssetLink,
-    AssetLinkCreateRequest, AssetLinkCreateResponse, AssetNIA, AssetUDA, Assignment, BackupRequest,
-    BtcBalanceRequest, BtcBalanceResponse, CancelHodlInvoiceRequest, ChangePasswordRequest,
-    Channel, ChannelStatus, ClaimHodlInvoiceRequest, ClaimHodlInvoiceResponse, CloseChannelRequest,
-    ConnectPeerRequest, CreateUtxosRequest, DecodeLNInvoiceRequest, DecodeLNInvoiceResponse,
-    DecodeRGBInvoiceRequest, DecodeRGBInvoiceResponse, DecodeSwapstringRequest,
-    DecodeSwapstringResponse, DisconnectPeerRequest, EmptyResponse, FailTransfersRequest,
-    FailTransfersResponse, GetAssetMediaRequest, GetAssetMediaResponse, GetChannelIdRequest,
-    GetChannelIdResponse, GetPaymentRequest, GetPaymentResponse, GetSwapRequest, GetSwapResponse,
-    InflateRequest, InflateResponse, InitRequest, InitResponse, InvoiceStatus,
-    InvoiceStatusRequest, InvoiceStatusResponse, IssueAssetCFARequest, IssueAssetCFAResponse,
-    IssueAssetIFARequest, IssueAssetIFAResponse, IssueAssetNIARequest, IssueAssetNIAResponse,
-    IssueAssetUDARequest, IssueAssetUDAResponse, KeysendRequest, KeysendResponse, LNInvoiceRequest,
-    LNInvoiceResponse, ListAssetsRequest, ListAssetsResponse, ListChannelsResponse,
-    ListPaymentsResponse, ListPeersResponse, ListSwapsResponse, ListTransactionsRequest,
-    ListTransactionsResponse, ListTransfersRequest, ListTransfersResponse, ListUnspentsRequest,
-    ListUnspentsResponse, MakerExecuteRequest, MakerInitRequest, MakerInitResponse,
-    NetworkInfoResponse, NodeInfoResponse, OpenChannelRequest, OpenChannelResponse, Payment,
-    PaymentDirection, PaymentType, Peer, PostAssetMediaResponse, Recipient, RefreshRequest,
-    RestoreRequest, RevokeTokenRequest, RgbInvoiceRequest, RgbInvoiceResponse, SendBtcRequest,
-    SendBtcResponse, SendPaymentRequest, SendPaymentResponse, SendRgbRequest, SendRgbResponse,
-    Swap, TakerRequest, Transaction, Transfer, TransferStatus, UnlockRequest, Unspent, WitnessData,
+    AssetLinkCreateRequest, AssetLinkCreateResponse, AssetMetadataRequest, AssetMetadataResponse,
+    AssetNIA, AssetUDA, Assignment, BackupRequest, BtcBalanceRequest, BtcBalanceResponse,
+    CancelHodlInvoiceRequest, ChangePasswordRequest, Channel, ChannelStatus,
+    ClaimHodlInvoiceRequest, ClaimHodlInvoiceResponse, CloseChannelRequest, ConnectPeerRequest,
+    CreateUtxosRequest, DecodeLNInvoiceRequest, DecodeLNInvoiceResponse, DecodeRGBInvoiceRequest,
+    DecodeRGBInvoiceResponse, DecodeSwapstringRequest, DecodeSwapstringResponse,
+    DisconnectPeerRequest, EmptyResponse, FailTransfersRequest, FailTransfersResponse,
+    GetAssetMediaRequest, GetAssetMediaResponse, GetChannelIdRequest, GetChannelIdResponse,
+    GetPaymentRequest, GetPaymentResponse, GetSwapRequest, GetSwapResponse, InflateRequest,
+    InflateResponse, InitRequest, InitResponse, InvoiceStatus, InvoiceStatusRequest,
+    InvoiceStatusResponse, IssueAssetCFARequest, IssueAssetCFAResponse, IssueAssetIFARequest,
+    IssueAssetIFAResponse, IssueAssetNIARequest, IssueAssetNIAResponse, IssueAssetUDARequest,
+    IssueAssetUDAResponse, KeysendRequest, KeysendResponse, LNInvoiceRequest, LNInvoiceResponse,
+    ListAssetsRequest, ListAssetsResponse, ListChannelsResponse, ListPaymentsResponse,
+    ListPeersResponse, ListSwapsResponse, ListTransactionsRequest, ListTransactionsResponse,
+    ListTransfersRequest, ListTransfersResponse, ListUnspentsRequest, ListUnspentsResponse,
+    MakerExecuteRequest, MakerInitRequest, MakerInitResponse, NetworkInfoResponse,
+    NodeInfoResponse, OpenChannelRequest, OpenChannelResponse, Payment, PaymentDirection,
+    PaymentType, Peer, PostAssetMediaResponse, Recipient, RefreshRequest, RestoreRequest,
+    RevokeTokenRequest, RgbInvoiceRequest, RgbInvoiceResponse, SendBtcRequest, SendBtcResponse,
+    SendPaymentRequest, SendPaymentResponse, SendRgbRequest, SendRgbResponse, Swap, TakerRequest,
+    Transaction, Transfer, TransferStatus, UnlockRequest, Unspent, WitnessData,
 };
 use crate::utils::{
     get_db_path, hex_str, hex_str_to_vec, validate_and_parse_payment_hash, AppState,
@@ -569,6 +570,23 @@ async fn asset_balance_offchain_outbound(node_address: SocketAddr, asset_id: &st
     asset_balance(node_address, asset_id)
         .await
         .offchain_outbound
+}
+
+async fn asset_metadata(node_address: SocketAddr, asset_id: &str) -> AssetMetadataResponse {
+    let payload = AssetMetadataRequest {
+        asset_id: asset_id.to_string(),
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/assetmetadata"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    check_response_is_ok(res)
+        .await
+        .json::<AssetMetadataResponse>()
+        .await
+        .unwrap()
 }
 
 async fn asset_balance_spendable(node_address: SocketAddr, asset_id: &str) -> u64 {

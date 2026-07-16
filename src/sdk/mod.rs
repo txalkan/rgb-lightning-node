@@ -99,7 +99,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST: &str = "trusted_no_broadcast";
-const ASSET_LINK_NAMESPACE: &str = "asset_link";
 
 struct OpenChannelVirtualIntentGuard {
     unlocked_state: Arc<crate::utils::UnlockedAppState>,
@@ -233,6 +232,8 @@ pub(crate) struct AssetMetadataData {
     pub(crate) ticker: Option<String>,
     pub(crate) details: Option<String>,
     pub(crate) token: Option<Token>,
+    pub(crate) linked_from_asset_id: Option<String>,
+    pub(crate) linked_to_asset_id: Option<String>,
 }
 
 pub(crate) struct BtcBalance {
@@ -1000,15 +1001,8 @@ pub(crate) struct AssetIFA {
     pub(crate) media: Option<Media>,
     pub(crate) reject_list_url: Option<String>,
     pub(crate) link_right_outpoint: Option<RgbLibOutpoint>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-struct AssetLink {
-    asset_id: String,
-    linked_asset_id: Option<String>,
-    created_at: Option<u64>,
-    link_right_outpoint: Option<RgbLibOutpoint>,
-    txid: Option<String>,
+    pub(crate) linked_from_asset_id: Option<String>,
+    pub(crate) linked_to_asset_id: Option<String>,
 }
 
 impl From<RgbLibAssetIFA> for AssetIFA {
@@ -1034,23 +1028,10 @@ impl From<RgbLibAssetIFA> for AssetIFA {
             media: value.media.map(Into::into),
             reject_list_url: value.reject_list_url,
             link_right_outpoint: value.link_right_outpoint,
+            linked_from_asset_id: value.linked_from_asset_id,
+            linked_to_asset_id: value.linked_to_asset_id,
         }
     }
-}
-
-fn asset_link_write_record(
-    kv_store: &dyn KVStoreSync,
-    asset_link: &AssetLink,
-) -> Result<(), APIError> {
-    let encoded = serde_json::to_vec(asset_link)
-        .map_err(|e| APIError::Unexpected(format!("failed to serialize asset link: {e}")))?;
-    kv_store
-        .write(ASSET_LINK_NAMESPACE, "", &asset_link.asset_id, encoded)
-        .map_err(|e| {
-            APIError::IO(std::io::Error::other(format!(
-                "asset link write failed: {e}"
-            )))
-        })
 }
 
 /*
@@ -1619,6 +1600,8 @@ pub(crate) async fn asset_metadata(
         ticker: metadata.ticker,
         details: metadata.details,
         token: metadata.token.map(Into::into),
+        linked_from_asset_id: metadata.linked_from_asset_id,
+        linked_to_asset_id: metadata.linked_to_asset_id,
     })
 }
 
@@ -2508,15 +2491,6 @@ pub(crate) async fn issue_asset_ifa(
         request.reject_list_url,
         request.issuance_type,
     )?;
-
-    let no_asset_link = AssetLink {
-        asset_id: asset.asset_id.clone(),
-        linked_asset_id: None,
-        created_at: None,
-        link_right_outpoint: asset.link_right_outpoint.clone(),
-        txid: None,
-    };
-    asset_link_write_record(unlocked_state.kv_store.as_ref(), &no_asset_link)?;
 
     Ok(asset.into())
 }

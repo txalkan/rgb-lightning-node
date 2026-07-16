@@ -21,8 +21,8 @@ use rgb_lib::{
         AssetCFA, AssetIFA, AssetNIA, AssetUDA, Assets, Balance, BtcBalance, IfaIssuanceType,
         Metadata, Online, OperationResult, Outpoint, ReceiveData, Recipient, RefreshFilter,
         RefreshResult, RgbWalletOpsOffline, RgbWalletOpsOnline, SendBeginResult, SinglesigKeys,
-        SyncOptions, Transaction as RgbLibTransaction, Transfer, TransportEndpoint, Unspent,
-        Wallet as RgbLibWallet,
+        SyncOptions, Transaction as RgbLibTransaction, Transfer, TransferKind, TransportEndpoint,
+        Unspent, Wallet as RgbLibWallet,
     },
     AssetSchema, Assignment, BitcoinNetwork, ContractId, Error as RgbLibError, Fascia, RgbTransfer,
     RgbTransport, RgbTxid, UpdateRes, WitnessOrd,
@@ -287,6 +287,33 @@ impl UnlockedAppState {
             reject_list_url,
             issuance_type,
         )
+    }
+
+    pub(crate) fn rgb_find_link_right_outpoint(
+        &self,
+        contract_id: ContractId,
+    ) -> Result<Option<Outpoint>, RgbLibError> {
+        let contract_id = contract_id.to_string();
+        Ok(self
+            .rgb_list_unspents(false, false)?
+            .into_iter()
+            .find_map(|unspent| {
+                let has_link_right = unspent.rgb_allocations.iter().any(|allocation| {
+                    allocation.asset_id.as_deref() == Some(contract_id.as_str())
+                        && allocation.assignment == Assignment::LinkRight
+                });
+                has_link_right.then_some(unspent.utxo.outpoint)
+            }))
+    }
+
+    pub(crate) fn rgb_find_link_transfer(
+        &self,
+        contract_id: ContractId,
+    ) -> Result<Option<Transfer>, RgbLibError> {
+        Ok(self
+            .rgb_list_transfers(contract_id.to_string())?
+            .into_iter()
+            .find(|transfer| transfer.kind == TransferKind::Link))
     }
 
     #[allow(clippy::too_many_arguments)]
