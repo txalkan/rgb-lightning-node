@@ -16,30 +16,36 @@ async fn asset_link_create_uses_rgb_link_state_and_is_idempotent() {
     assert_eq!(legacy_asset.link_right_outpoint, None);
     let legacy_asset_id = legacy_asset.asset_id;
 
-    let asset = issue_asset_ifa_with_type(node_addr, Some(IfaIssuanceType::LinkRightOnly)).await;
-    let asset_id = asset.asset_id;
-    let _link_right_outpoint = asset.link_right_outpoint.expect("link-right outpoint");
-    let linked_asset = issue_asset_ifa_with_type(
+    let parent_asset =
+        issue_asset_ifa_with_type(node_addr, Some(IfaIssuanceType::LinkRightOnly)).await;
+    let parent_asset_id = parent_asset.asset_id;
+    let _link_right_outpoint = parent_asset
+        .link_right_outpoint
+        .expect("link-right outpoint");
+    let child_asset = issue_asset_ifa_with_type(
         node_addr,
         Some(IfaIssuanceType::LinkedFromParent {
-            contract_id: asset_id.clone(),
+            contract_id: parent_asset_id.clone(),
             request_link_right: false,
         }),
     )
     .await;
-    assert_eq!(linked_asset.link_right_outpoint, None);
-    let linked_asset_id = linked_asset.asset_id;
+    assert_eq!(child_asset.link_right_outpoint, None);
+    let child_asset_id = child_asset.asset_id;
 
-    let parent_metadata = asset_metadata(node_addr, &asset_id).await;
+    let parent_metadata = asset_metadata(node_addr, &parent_asset_id).await;
     assert_eq!(parent_metadata.linked_from_asset_id, None);
     assert_eq!(parent_metadata.linked_to_asset_id, None);
-    let child_metadata = asset_metadata(node_addr, &linked_asset_id).await;
-    assert_eq!(child_metadata.linked_from_asset_id, Some(asset_id.clone()));
+    let child_metadata = asset_metadata(node_addr, &child_asset_id).await;
+    assert_eq!(
+        child_metadata.linked_from_asset_id,
+        Some(parent_asset_id.clone())
+    );
     assert_eq!(child_metadata.linked_to_asset_id, None);
 
     let invalid_link_payload = AssetLinkCreateRequest {
-        asset_id: asset_id.clone(),
-        linked_asset_id: legacy_asset_id.clone(),
+        parent_asset_id: parent_asset_id.clone(),
+        child_asset_id: legacy_asset_id.clone(),
         fee_rate: FEE_RATE,
         min_confirmations: 1,
     };
@@ -66,8 +72,8 @@ async fn asset_link_create_uses_rgb_link_state_and_is_idempotent() {
     )
     .await;
     let missing_link_right_payload = AssetLinkCreateRequest {
-        asset_id: legacy_asset_id.clone(),
-        linked_asset_id: missing_link_right_child.asset_id.clone(),
+        parent_asset_id: legacy_asset_id.clone(),
+        child_asset_id: missing_link_right_child.asset_id.clone(),
         fee_rate: FEE_RATE,
         min_confirmations: 1,
     };
@@ -85,9 +91,9 @@ async fn asset_link_create_uses_rgb_link_state_and_is_idempotent() {
     )
     .await;
 
-    let asset_link = asset_link_create(node_addr, &asset_id, &linked_asset_id).await;
-    assert_eq!(asset_link.asset_id, asset_id);
-    assert_eq!(asset_link.linked_asset_id, Some(linked_asset_id.clone()));
+    let asset_link = asset_link_create(node_addr, &parent_asset_id, &child_asset_id).await;
+    assert_eq!(asset_link.parent_asset_id, parent_asset_id);
+    assert_eq!(asset_link.child_asset_id, Some(child_asset_id.clone()));
     assert!(asset_link
         .txid
         .as_deref()
@@ -98,15 +104,15 @@ async fn asset_link_create_uses_rgb_link_state_and_is_idempotent() {
 
     let duplicate = asset_link_create(
         node_addr,
-        &asset_link.asset_id,
+        &asset_link.parent_asset_id,
         asset_link
-            .linked_asset_id
+            .child_asset_id
             .as_deref()
-            .expect("linked asset id"),
+            .expect("child asset id"),
     )
     .await;
-    assert_eq!(duplicate.asset_id, asset_link.asset_id);
-    assert_eq!(duplicate.linked_asset_id, asset_link.linked_asset_id);
+    assert_eq!(duplicate.parent_asset_id, asset_link.parent_asset_id);
+    assert_eq!(duplicate.child_asset_id, asset_link.child_asset_id);
     assert!(duplicate
         .txid
         .as_deref()
@@ -116,15 +122,15 @@ async fn asset_link_create_uses_rgb_link_state_and_is_idempotent() {
     let conflicting_linked_asset_id = issue_asset_ifa_with_type(
         node_addr,
         Some(IfaIssuanceType::LinkedFromParent {
-            contract_id: asset_id.clone(),
+            contract_id: parent_asset_id.clone(),
             request_link_right: false,
         }),
     )
     .await
     .asset_id;
     let conflict_payload = AssetLinkCreateRequest {
-        asset_id: asset_link.asset_id.clone(),
-        linked_asset_id: conflicting_linked_asset_id,
+        parent_asset_id: asset_link.parent_asset_id.clone(),
+        child_asset_id: conflicting_linked_asset_id,
         fee_rate: FEE_RATE,
         min_confirmations: 1,
     };
@@ -147,30 +153,30 @@ async fn asset_link_create_uses_rgb_link_state_and_is_idempotent() {
 
     let after_restart = asset_link_create(
         node_addr,
-        &asset_link.asset_id,
+        &asset_link.parent_asset_id,
         asset_link
-            .linked_asset_id
+            .child_asset_id
             .as_deref()
-            .expect("linked asset id"),
+            .expect("child asset id"),
     )
     .await;
-    assert_eq!(after_restart.asset_id, asset_link.asset_id);
-    assert_eq!(after_restart.linked_asset_id, asset_link.linked_asset_id);
+    assert_eq!(after_restart.parent_asset_id, asset_link.parent_asset_id);
+    assert_eq!(after_restart.child_asset_id, asset_link.child_asset_id);
     assert!(after_restart
         .txid
         .as_deref()
         .is_some_and(|txid| !txid.is_empty()));
     assert!(after_restart.created_at.is_some());
 
-    let restarted_parent_metadata = asset_metadata(node_addr, &asset_id).await;
+    let restarted_parent_metadata = asset_metadata(node_addr, &parent_asset_id).await;
     assert_eq!(
         restarted_parent_metadata.linked_to_asset_id,
-        Some(linked_asset_id.clone())
+        Some(child_asset_id.clone())
     );
-    let restarted_child_metadata = asset_metadata(node_addr, &linked_asset_id).await;
+    let restarted_child_metadata = asset_metadata(node_addr, &child_asset_id).await;
     assert_eq!(
         restarted_child_metadata.linked_from_asset_id,
-        Some(asset_id.clone())
+        Some(parent_asset_id.clone())
     );
     assert_eq!(restarted_child_metadata.linked_to_asset_id, None);
 
@@ -178,18 +184,21 @@ async fn asset_link_create_uses_rgb_link_state_and_is_idempotent() {
     let listed_parent = assets
         .ifa
         .as_ref()
-        .and_then(|ifa| ifa.iter().find(|asset| asset.asset_id == asset_id))
+        .and_then(|ifa| ifa.iter().find(|asset| asset.asset_id == parent_asset_id))
         .expect("listed parent");
     assert_eq!(
         listed_parent.linked_to_asset_id,
-        Some(linked_asset_id.clone())
+        Some(child_asset_id.clone())
     );
     let listed_child = assets
         .ifa
         .as_ref()
-        .and_then(|ifa| ifa.iter().find(|asset| asset.asset_id == linked_asset_id))
+        .and_then(|ifa| ifa.iter().find(|asset| asset.asset_id == child_asset_id))
         .expect("listed child");
-    assert_eq!(listed_child.linked_from_asset_id, Some(asset_id.clone()));
+    assert_eq!(
+        listed_child.linked_from_asset_id,
+        Some(parent_asset_id.clone())
+    );
     assert_eq!(listed_child.linked_to_asset_id, None);
 }
 

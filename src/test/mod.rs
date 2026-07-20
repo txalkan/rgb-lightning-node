@@ -595,13 +595,13 @@ async fn asset_balance_spendable(node_address: SocketAddr, asset_id: &str) -> u6
 
 async fn asset_link_create(
     node_address: SocketAddr,
-    asset_id: &str,
-    linked_asset_id: &str,
+    parent_asset_id: &str,
+    child_asset_id: &str,
 ) -> AssetLink {
-    println!("creating asset link for asset {asset_id} on node {node_address}");
+    println!("creating asset link for asset {parent_asset_id} on node {node_address}");
     let payload = AssetLinkCreateRequest {
-        asset_id: asset_id.to_string(),
-        linked_asset_id: linked_asset_id.to_string(),
+        parent_asset_id: parent_asset_id.to_string(),
+        child_asset_id: child_asset_id.to_string(),
         fee_rate: FEE_RATE,
         min_confirmations: 1,
     };

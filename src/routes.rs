@@ -221,8 +221,8 @@ impl From<RgbLibAssetIFA> for AssetIFA {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct AssetLink {
-    pub(crate) asset_id: String,
-    pub(crate) linked_asset_id: Option<String>,
+    pub(crate) parent_asset_id: String,
+    pub(crate) child_asset_id: Option<String>,
     pub(crate) created_at: Option<u64>,
     pub(crate) link_right_outpoint: Option<RgbLibOutpoint>,
     pub(crate) txid: Option<String>,
@@ -230,8 +230,8 @@ pub(crate) struct AssetLink {
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct AssetLinkCreateRequest {
-    pub(crate) asset_id: String,
-    pub(crate) linked_asset_id: String,
+    pub(crate) parent_asset_id: String,
+    pub(crate) child_asset_id: String,
     pub(crate) fee_rate: u64,
     pub(crate) min_confirmations: u8,
 }
@@ -1873,22 +1873,22 @@ pub(crate) async fn asset_link_create(
             ));
         }
 
-        let asset_id = payload.asset_id.trim().to_string();
-        let linked_asset_id = payload.linked_asset_id.trim().to_string();
+        let parent_id = payload.parent_asset_id.trim().to_string();
+        let child_id = payload.child_asset_id.trim().to_string();
 
-        let contract_id = ContractId::from_str(&asset_id)
-            .map_err(|_| APIError::InvalidAssetID(asset_id.clone()))?;
-        let linked_contract_id = ContractId::from_str(&linked_asset_id)
-            .map_err(|_| APIError::InvalidAssetID(linked_asset_id.clone()))?;
+        let parent_contract_id = ContractId::from_str(&parent_id)
+            .map_err(|_| APIError::InvalidAssetID(parent_id.clone()))?;
+        let child_contract_id = ContractId::from_str(&child_id)
+            .map_err(|_| APIError::InvalidAssetID(child_id.clone()))?;
 
-        if contract_id == linked_contract_id {
+        if parent_contract_id == child_contract_id {
             return Err(APIError::InvalidRequest(
-                "asset_id and linked_asset_id must be different".to_string(),
+                "parent and child contracts must be different".to_string(),
             ));
         }
 
-        let parent_metadata = unlocked_state.rgb_get_asset_metadata(contract_id)?;
-        let child_metadata = unlocked_state.rgb_get_asset_metadata(linked_contract_id)?;
+        let parent_metadata = unlocked_state.rgb_get_asset_metadata(parent_contract_id)?;
+        let child_metadata = unlocked_state.rgb_get_asset_metadata(child_contract_id)?;
 
         if parent_metadata.asset_schema != RgbLibAssetSchema::Ifa
             || child_metadata.asset_schema != RgbLibAssetSchema::Ifa
@@ -1899,29 +1899,29 @@ pub(crate) async fn asset_link_create(
         }
 
         match child_metadata.linked_from_asset_id.as_deref() {
-            Some(existing_parent_id) if existing_parent_id == asset_id => {}
+            Some(existing_parent_id) if existing_parent_id == parent_id => {}
             Some(existing_parent_id) => {
                 return Err(APIError::InvalidContractLink(format!(
-                    "linked_asset_id {linked_asset_id} is already linked from {existing_parent_id}"
+                    "child_asset_id {child_id} is already linked from {existing_parent_id}"
                 )));
             }
             None => {
                 return Err(APIError::InvalidContractLink(format!(
-                    "linked_asset_id {linked_asset_id} does not declare asset_id {asset_id} as its parent"
+                    "child_asset_id {child_id} does not declare parent_asset_id {parent_id} as its parent"
                 )));
             }
         }
 
         match parent_metadata.linked_to_asset_id.as_deref() {
-            Some(existing_linked_asset_id) if existing_linked_asset_id == linked_asset_id => {
-                let link_transfer = unlocked_state.rgb_find_link_transfer(contract_id)?;
+            Some(existing_linked_asset_id) if existing_linked_asset_id == child_id => {
+                let link_transfer = unlocked_state.rgb_find_link_transfer(parent_contract_id)?;
                 let created_at = link_transfer
                     .as_ref()
                     .map(|transfer| transfer.created_at.max(0) as u64)
                     .unwrap_or_else(get_current_timestamp);
                 let asset_link = AssetLink {
-                    asset_id: asset_id.clone(),
-                    linked_asset_id: Some(linked_asset_id),
+                    parent_asset_id: parent_id.clone(),
+                    child_asset_id: Some(child_id),
                     created_at: Some(created_at),
                     link_right_outpoint: None,
                     txid: link_transfer.and_then(|transfer| transfer.txid),
@@ -1930,35 +1930,35 @@ pub(crate) async fn asset_link_create(
             }
             Some(existing_linked_asset_id) => {
                 return Err(APIError::InvalidContractLink(format!(
-                    "asset_id {asset_id} is already linked to {existing_linked_asset_id}"
+                    "parent_asset_id {parent_id} is already linked to {existing_linked_asset_id}"
                 )));
             }
             None => {}
         }
 
         let link_right_outpoint = unlocked_state
-            .rgb_find_link_right_outpoint(contract_id)?
+            .rgb_find_link_right_outpoint(parent_contract_id)?
             .ok_or_else(|| {
                 APIError::InvalidRequest(format!(
-                    "missing link_right_outpoint for asset_id {asset_id}"
+                    "missing link_right_outpoint for parent_asset_id {parent_id}"
                 ))
             })?;
 
         let link_ifa = unlocked_state.rgb_link_ifa(
-            asset_id.clone(),
-            linked_asset_id.clone(),
+            parent_id.clone(),
+            child_id.clone(),
             link_right_outpoint,
             payload.fee_rate,
             payload.min_confirmations,
         )?;
-        let link_transfer = unlocked_state.rgb_find_link_transfer(contract_id)?;
+        let link_transfer = unlocked_state.rgb_find_link_transfer(parent_contract_id)?;
         let created_at = link_transfer
             .as_ref()
             .map(|transfer| transfer.created_at.max(0) as u64)
             .unwrap_or_else(get_current_timestamp);
         let asset_link = AssetLink {
-            asset_id: asset_id.clone(),
-            linked_asset_id: Some(linked_asset_id),
+            parent_asset_id: parent_id.clone(),
+            child_asset_id: Some(child_id),
             created_at: Some(created_at),
             link_right_outpoint: None,
             txid: Some(link_ifa.txid),
@@ -1979,7 +1979,7 @@ pub(crate) async fn asset_link_send_payment(
 
         let host_pubkey =
             PublicKey::from_str(&payload.host_pubkey).map_err(|_| APIError::InvalidPubkey)?;
-        let asset_contract_id = ContractId::from_str(&payload.asset_id)
+        let child_contract_id = ContractId::from_str(&payload.asset_id)
             .map_err(|_| APIError::InvalidAssetID(payload.asset_id.clone()))?;
 
         let invoice = Bolt11Invoice::from_str(&payload.invoice)
@@ -1988,7 +1988,7 @@ pub(crate) async fn asset_link_send_payment(
             return Err(APIError::InvalidInvoice(s!("invoice has expired")));
         }
 
-        let (linked_contract_id, asset_amount) =
+        let (parent_contract_id, asset_amount) =
             match (invoice.rgb_contract_id(), invoice.rgb_amount()) {
                 (Some(contract_id), Some(amount)) => (contract_id, amount),
                 _ => {
@@ -1997,7 +1997,7 @@ pub(crate) async fn asset_link_send_payment(
                     )))
                 }
             };
-        if linked_contract_id == asset_contract_id {
+        if parent_contract_id == child_contract_id {
             return Err(APIError::InvalidRequest(
                 "asset_id and the invoice asset must be different".to_string(),
             ));
@@ -2028,7 +2028,7 @@ pub(crate) async fn asset_link_send_payment(
             unlocked_state.runtime_node_id(),
             host_pubkey,
             Some(amt_msat),
-            Some((asset_contract_id, asset_amount)),
+            Some((child_contract_id, asset_amount)),
             vec![],
         );
         let second_leg = get_route(
@@ -2038,7 +2038,7 @@ pub(crate) async fn asset_link_send_payment(
             host_pubkey,
             receiver_pubkey,
             Some(amt_msat),
-            Some((linked_contract_id, asset_amount)),
+            Some((parent_contract_id, asset_amount)),
             invoice.route_hints(),
         );
         let (mut first_leg, mut second_leg) = match (first_leg, second_leg) {
@@ -2061,11 +2061,11 @@ pub(crate) async fn asset_link_send_payment(
             .clone()
             .into_iter()
             .map(|mut hop| {
-                hop.rgb_payment = Some((asset_contract_id, asset_amount));
+                hop.rgb_payment = Some((child_contract_id, asset_amount));
                 hop
             })
             .chain(second_leg.paths[0].hops.clone().into_iter().map(|mut hop| {
-                hop.rgb_payment = Some((linked_contract_id, asset_amount));
+                hop.rgb_payment = Some((parent_contract_id, asset_amount));
                 hop
             }))
             .collect::<Vec<_>>();
@@ -2095,7 +2095,7 @@ pub(crate) async fn asset_link_send_payment(
         let mut route_params = RouteParameters::from_payment_params_and_value(
             PaymentParameters::from_bolt11_invoice(&invoice),
             amt_msat,
-            Some((linked_contract_id, asset_amount)),
+            Some((parent_contract_id, asset_amount)),
         );
         route_params
             .set_max_path_length(
@@ -2115,8 +2115,8 @@ pub(crate) async fn asset_link_send_payment(
         let params = AssetLinkAuthorizeParamsWire {
             protocol_version: ASSET_LINK_PROTOCOL_VERSION,
             payment_hash: hex_str(&payment_hash.0),
-            asset_id: payload.asset_id.clone(),
-            linked_asset_id: linked_contract_id.to_string(),
+            asset_id: parent_contract_id.to_string(),
+            linked_asset_id: child_contract_id.to_string(),
             amount: asset_amount,
             expiry_sec: invoice.duration_until_expiry().as_secs(),
         };
@@ -2187,7 +2187,7 @@ pub(crate) async fn asset_link_send_payment(
         )?;
         write_rgb_payment_info_file(
             &payment_hash,
-            asset_contract_id,
+            child_contract_id,
             asset_amount,
             true,
             false,

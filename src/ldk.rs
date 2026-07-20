@@ -1243,21 +1243,33 @@ impl AssetLinkAuthorizer for NodeAssetLinkAuthorizer {
         let unlocked_state = self.unlocked_state_weak.upgrade().ok_or_else(|| {
             JsonRpcErrorWire::internal_error("asset_link_state_unavailable".to_owned())
         })?;
-        let child_metadata = unlocked_state
+        let asset_metadata = unlocked_state
             .rgb_get_asset_metadata(asset_contract_id)
             .map_err(|_| {
                 JsonRpcErrorWire::application_error(ASSET_LINK_ERROR_UNKNOWN_ASSET, "unknown_link")
             })?;
-        let parent_metadata = unlocked_state
+        let linked_asset_metadata = unlocked_state
             .rgb_get_asset_metadata(linked_contract_id)
             .map_err(|_| {
                 JsonRpcErrorWire::application_error(ASSET_LINK_ERROR_UNKNOWN_ASSET, "unknown_link")
             })?;
-        if child_metadata.asset_schema != AssetSchema::Ifa
-            || parent_metadata.asset_schema != AssetSchema::Ifa
-            || child_metadata.linked_from_asset_id.as_deref() != Some(params.asset_id.as_str())
-            || parent_metadata.linked_to_asset_id.as_deref()
-                != Some(params.linked_asset_id.as_str())
+
+        let asset_is_parent_of_linked_asset = asset_metadata.linked_to_asset_id.as_deref()
+            == Some(params.linked_asset_id.as_str())
+            && linked_asset_metadata.linked_from_asset_id.as_deref()
+                == Some(params.asset_id.as_str());
+
+        let linked_asset_is_parent_of_asset = linked_asset_metadata.linked_to_asset_id.as_deref()
+            == Some(params.asset_id.as_str())
+            && asset_metadata.linked_from_asset_id.as_deref()
+                == Some(params.linked_asset_id.as_str());
+
+        let contracts_are_linked =
+            asset_is_parent_of_linked_asset || linked_asset_is_parent_of_asset;
+
+        if asset_metadata.asset_schema != AssetSchema::Ifa
+            || linked_asset_metadata.asset_schema != AssetSchema::Ifa
+            || !contracts_are_linked
         {
             return Err(JsonRpcErrorWire::application_error(
                 ASSET_LINK_ERROR_UNKNOWN_LINK,
