@@ -164,11 +164,11 @@ use crate::signer::{
 };
 use crate::swap::{SwapData, SwapInfo};
 use crate::utils::{
-    check_port_is_available, connect_peer_if_necessary, do_connect_peer, get_current_timestamp,
-    get_max_local_rgb_amount, hex_str, validate_and_parse_payment_hash,
-    validate_and_parse_payment_preimage, AppState, StaticState, UnlockedAppState,
-    ELECTRUM_URL_MAINNET, ELECTRUM_URL_REGTEST, ELECTRUM_URL_SIGNET, ELECTRUM_URL_TESTNET,
-    ELECTRUM_URL_TESTNET4, PROXY_ENDPOINT_LOCAL, PROXY_ENDPOINT_PUBLIC,
+    check_port_is_available, connect_peer_if_necessary, description_hash_from_invoice,
+    do_connect_peer, get_current_timestamp, get_max_local_rgb_amount, hex_str,
+    validate_and_parse_payment_hash, validate_and_parse_payment_preimage, AppState, StaticState,
+    UnlockedAppState, ELECTRUM_URL_MAINNET, ELECTRUM_URL_REGTEST, ELECTRUM_URL_SIGNET,
+    ELECTRUM_URL_TESTNET, ELECTRUM_URL_TESTNET4, PROXY_ENDPOINT_LOCAL, PROXY_ENDPOINT_PUBLIC,
 };
 
 const VIRTUAL_CHANNEL_DOMAIN_SEPARATOR: &[u8] = b"rln_virtual_channels_v0";
@@ -1494,7 +1494,7 @@ impl AsyncOrderInvoiceProvider for AsyncOrderRecipientInvoiceProvider {
                 invoice_type: Some(InvoiceType::Hodl {
                     async_payment_recipient: true,
                 }),
-                description_hash: crate::routes::description_hash_from_invoice(&invoice),
+                description_hash: description_hash_from_invoice(&invoice),
                 payment_idx: None,
                 async_hash_index: self.external_signer_mode.then_some(hash_index),
                 async_host_node_id: self.external_signer_mode.then_some(sender_node_id),

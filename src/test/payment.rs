@@ -352,6 +352,26 @@ async fn same_invoice_twice_and_expired_inbound_payments() {
     // wait for the invoices to expire
     tokio::time::sleep(std::time::Duration::from_secs(SHORT_EXPIRY_SEC as u64 + 1)).await;
 
+    let payload = SendPaymentRequest {
+        invoice: invoice1,
+        amt_msat: None,
+        asset_id: None,
+        asset_amount: None,
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node1_addr}/sendpayment"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    check_response_is_nok(
+        res,
+        reqwest::StatusCode::BAD_REQUEST,
+        "invoice has expired",
+        "InvalidInvoice",
+    )
+    .await;
+
     // getting a payment should trigger expiration-based status transition
     let payment = get_payment(
         node2_addr,

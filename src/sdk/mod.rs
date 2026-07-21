@@ -24,11 +24,12 @@ use crate::signer::{
 use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{
     check_already_initialized, check_channel_id, check_password_strength, check_password_validity,
-    connect_peer_if_necessary, encrypt_and_save_mnemonic, get_current_timestamp,
-    get_max_local_rgb_amount, get_route, hex_str, hex_str_to_compressed_pubkey, hex_str_to_vec,
-    is_external_signer_mode_configured, new_jsonrpc_request_id, parse_peer_info,
-    validate_and_parse_description_hash, validate_and_parse_payment_hash,
-    validate_and_parse_payment_preimage, AppState, UserOnionMessageContents,
+    connect_peer_if_necessary, description_hash_from_invoice, encrypt_and_save_mnemonic,
+    get_current_timestamp, get_max_local_rgb_amount, get_route, hex_str,
+    hex_str_to_compressed_pubkey, hex_str_to_vec, is_external_signer_mode_configured,
+    new_jsonrpc_request_id, parse_peer_info, validate_and_parse_description_hash,
+    validate_and_parse_payment_hash, validate_and_parse_payment_preimage, AppState,
+    UserOnionMessageContents,
 };
 use amplify::{map, s};
 use bitcoin::hashes::sha256::Hash as Sha256;
@@ -3159,6 +3160,9 @@ pub(crate) async fn send_payment(
     } else {
         let invoice = Bolt11Invoice::from_str(&request.invoice)
             .map_err(|e| APIError::InvalidInvoice(e.to_string()))?;
+        if invoice.is_expired() {
+            return Err(APIError::InvalidInvoice(s!("invoice has expired")));
+        }
 
         let payment_id = PaymentId((*invoice.payment_hash()).to_byte_array());
         let payment_secret = Some(*invoice.payment_secret());
@@ -3234,7 +3238,7 @@ pub(crate) async fn send_payment(
                 payee_pubkey: invoice.get_payee_pub_key(),
                 expires_at: None,
                 invoice_type: None,
-                description_hash: crate::routes::description_hash_from_invoice(&invoice),
+                description_hash: description_hash_from_invoice(&invoice),
                 payment_idx: None,
                 async_hash_index: None,
                 async_host_node_id: None,
@@ -3856,7 +3860,7 @@ pub(crate) async fn create_ln_invoice(
             payee_pubkey: unlocked_state.runtime_node_id(),
             expires_at: Some(created_at + expiry_sec as u64),
             invoice_type: Some(invoice_type),
-            description_hash: crate::routes::description_hash_from_invoice(&invoice),
+            description_hash: description_hash_from_invoice(&invoice),
             payment_idx: None,
             async_hash_index: None,
             async_host_node_id: None,

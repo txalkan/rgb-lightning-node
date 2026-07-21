@@ -19,6 +19,7 @@ use lightning::{
     util::persist::KVStoreSync,
     util::ser::{Writeable, Writer},
 };
+use lightning_invoice::Bolt11Invoice;
 use magic_crypt::{new_magic_crypt, MagicCryptTrait};
 use rgb_lib::{bdk_wallet::keys::bip39::Mnemonic, BitcoinNetwork, ContractId};
 use rln_migration::{Migrator, MigratorTrait};
@@ -548,6 +549,13 @@ pub(crate) async fn connect_peer_if_necessary(
     do_connect_peer(pubkey, address, peer_manager).await?;
     tracing::info!("connected to peer (pubkey: {pubkey}, addr: {address})");
     Ok(())
+}
+
+pub(crate) fn description_hash_from_invoice(invoice: &Bolt11Invoice) -> Option<[u8; 32]> {
+    match invoice.description() {
+        lightning_invoice::Bolt11InvoiceDescriptionRef::Hash(hash) => Some(hash.0.to_byte_array()),
+        _ => None,
+    }
 }
 
 pub(crate) async fn do_connect_peer(

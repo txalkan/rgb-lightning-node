@@ -72,8 +72,7 @@ use tokio::{
 };
 
 use crate::asset_link::{
-    AssetLinkAuthorizeParamsWire, AssetLinkAuthorizeResultWire, AssetLinkSendPaymentRequest,
-    ASSET_LINK_PROTOCOL_VERSION,
+    find_linked_asset_channel, has_sufficient_asset_channel, send_linked_asset_payment,
 };
 use crate::async_order::{
     write_async_payments_next_hash_index, AsyncOrderNewResultWire,
@@ -83,7 +82,6 @@ use crate::core_types::async_order::{
     AsyncOrderNewRequest, AsyncOrderNewResponse, AsyncOrderOutboundInvoiceRequest,
     AsyncOrderOutboundInvoiceResponse,
 };
-use crate::custom_msg_rpc::JSONRPC_MSG_RESPONSE_TIMEOUT_SECS;
 use crate::ldk::{
     clear_rgb_payment_pending, peer_has_live_channel, start_ldk, stop_ldk, LdkBackgroundServices,
     VirtualChannelSessionStatus,
@@ -95,8 +93,8 @@ use crate::signer::read_key_source_file;
 use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{
     check_already_initialized, check_channel_id, check_password_strength, check_password_validity,
-    encrypt_and_save_mnemonic, get_max_local_rgb_amount, get_route, hex_str,
-    hex_str_to_compressed_pubkey, hex_str_to_vec, is_external_signer_mode_configured,
+    description_hash_from_invoice, encrypt_and_save_mnemonic, get_max_local_rgb_amount, get_route,
+    hex_str, hex_str_to_compressed_pubkey, hex_str_to_vec, is_external_signer_mode_configured,
     new_jsonrpc_request_id, open_database_pool, validate_and_parse_description_hash,
     validate_and_parse_payment_hash, validate_and_parse_payment_preimage, UnlockedAppState,
     UserOnionMessageContents,
@@ -1086,13 +1084,6 @@ pub(crate) struct Payment {
     pub(crate) description_hash: Option<String>,
 }
 
-pub(crate) fn description_hash_from_invoice(invoice: &Bolt11Invoice) -> Option<[u8; 32]> {
-    match invoice.description() {
-        lightning_invoice::Bolt11InvoiceDescriptionRef::Hash(hash) => Some(hash.0.to_byte_array()),
-        _ => None,
-    }
-}
-
 fn payment_type_from_invoice(invoice_type: Option<InvoiceType>) -> PaymentType {
     match invoice_type.unwrap_or(InvoiceType::AutoClaim) {
         InvoiceType::AutoClaim => PaymentType::InboundAutoClaim,
@@ -1965,262 +1956,6 @@ pub(crate) async fn asset_link_create(
         };
 
         Ok(Json(AssetLinkCreateResponse { asset_link }))
-    })
-    .await
-}
-
-pub(crate) async fn asset_link_send_payment(
-    State(state): State<Arc<AppState>>,
-    WithRejection(Json(payload), _): WithRejection<Json<AssetLinkSendPaymentRequest>, APIError>,
-) -> Result<Json<SendPaymentResponse>, APIError> {
-    no_cancel(async move {
-        let guard = state.check_unlocked().await?;
-        let unlocked_state = guard.as_ref().unwrap();
-
-        let host_pubkey =
-            PublicKey::from_str(&payload.host_pubkey).map_err(|_| APIError::InvalidPubkey)?;
-        let child_contract_id = ContractId::from_str(&payload.asset_id)
-            .map_err(|_| APIError::InvalidAssetID(payload.asset_id.clone()))?;
-
-        let invoice = Bolt11Invoice::from_str(&payload.invoice)
-            .map_err(|e| APIError::InvalidInvoice(e.to_string()))?;
-        if invoice.is_expired() {
-            return Err(APIError::InvalidInvoice(s!("invoice has expired")));
-        }
-
-        let (parent_contract_id, asset_amount) =
-            match (invoice.rgb_contract_id(), invoice.rgb_amount()) {
-                (Some(contract_id), Some(amount)) => (contract_id, amount),
-                _ => {
-                    return Err(APIError::InvalidInvoice(s!(
-                        "linked payment requires an RGB invoice with contract ID and amount"
-                    )))
-                }
-            };
-        if parent_contract_id == child_contract_id {
-            return Err(APIError::InvalidRequest(
-                "asset_id and the invoice asset must be different".to_string(),
-            ));
-        }
-        let amt_msat = match invoice.amount_milli_satoshis() {
-            Some(amt) if amt > 0 => amt,
-            _ => {
-                return Err(APIError::InvalidAmount(s!(
-                    "linked payment requires an invoice with a msat amount"
-                )))
-            }
-        };
-
-        let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
-        let payment_secret = *invoice.payment_secret();
-        let receiver_pubkey = invoice.recover_payee_pub_key();
-
-        if host_pubkey == unlocked_state.runtime_node_id() || host_pubkey == receiver_pubkey {
-            return Err(APIError::InvalidRequest(
-                "host_pubkey must differ from this node and the invoice receiver".to_string(),
-            ));
-        }
-
-        let first_leg = get_route(
-            &unlocked_state.channel_manager,
-            &unlocked_state.router,
-            unlocked_state.kv_store.as_ref(),
-            unlocked_state.runtime_node_id(),
-            host_pubkey,
-            Some(amt_msat),
-            Some((child_contract_id, asset_amount)),
-            vec![],
-        );
-        let second_leg = get_route(
-            &unlocked_state.channel_manager,
-            &unlocked_state.router,
-            unlocked_state.kv_store.as_ref(),
-            host_pubkey,
-            receiver_pubkey,
-            Some(amt_msat),
-            Some((parent_contract_id, asset_amount)),
-            invoice.route_hints(),
-        );
-        let (mut first_leg, mut second_leg) = match (first_leg, second_leg) {
-            (Some(f), Some(s)) => (f, s),
-            _ => {
-                return Err(APIError::NoRoute);
-            }
-        };
-
-        second_leg.paths[0].hops[0].short_channel_id |= IS_SWAP_SCID;
-
-        first_leg.paths[0]
-            .hops
-            .last_mut()
-            .expect("Path not to be empty")
-            .fee_msat = 0;
-
-        let mut fullpaths = first_leg.paths[0]
-            .hops
-            .clone()
-            .into_iter()
-            .map(|mut hop| {
-                hop.rgb_payment = Some((child_contract_id, asset_amount));
-                hop
-            })
-            .chain(second_leg.paths[0].hops.clone().into_iter().map(|mut hop| {
-                hop.rgb_payment = Some((parent_contract_id, asset_amount));
-                hop
-            }))
-            .collect::<Vec<_>>();
-
-        if let Some(last_hop) = fullpaths.last_mut() {
-            last_hop.cltv_expiry_delta = last_hop
-                .cltv_expiry_delta
-                .max(invoice.min_final_cltv_expiry_delta() as u32);
-        }
-
-        let total_fee = fullpaths
-            .iter()
-            .rev()
-            .skip(1)
-            .map(|hop| hop.fee_msat)
-            .sum::<u64>();
-
-        if total_fee >= MAX_SWAP_FEE_MSAT {
-            return Err(APIError::FailedPayment(format!(
-                "Fee too high: {total_fee}"
-            )));
-        }
-
-        let mut recipient_onion = RecipientOnionFields::secret_only(payment_secret);
-        recipient_onion.payment_metadata = invoice.payment_metadata().cloned();
-
-        let mut route_params = RouteParameters::from_payment_params_and_value(
-            PaymentParameters::from_bolt11_invoice(&invoice),
-            amt_msat,
-            Some((parent_contract_id, asset_amount)),
-        );
-        route_params
-            .set_max_path_length(
-                &recipient_onion,
-                false,
-                unlocked_state.channel_manager.current_best_block().height,
-            )
-            .map_err(|()| APIError::FailedPayment(s!("onion packet size exceeded")))?;
-        let route = Route {
-            paths: vec![LnPath {
-                hops: fullpaths,
-                blinded_tail: None,
-            }],
-            route_params: Some(route_params),
-        };
-
-        let params = AssetLinkAuthorizeParamsWire {
-            protocol_version: ASSET_LINK_PROTOCOL_VERSION,
-            payment_hash: hex_str(&payment_hash.0),
-            asset_id: parent_contract_id.to_string(),
-            linked_asset_id: child_contract_id.to_string(),
-            amount: asset_amount,
-            expiry_sec: invoice.duration_until_expiry().as_secs(),
-        };
-        let request_id = new_jsonrpc_request_id();
-        let response_rx = unlocked_state
-            .asset_link_handler
-            .queue_asset_link_authorize(host_pubkey, Value::String(request_id.clone()), params)
-            .map_err(|err| APIError::InvalidRequest(err.message))?;
-        unlocked_state.peer_manager.process_events();
-        match timeout(
-            Duration::from_secs(JSONRPC_MSG_RESPONSE_TIMEOUT_SECS),
-            response_rx,
-        )
-        .await
-        {
-            Ok(Ok(Ok(result))) => {
-                let authorized = serde_json::from_value::<AssetLinkAuthorizeResultWire>(result)
-                    .map(|r| r.authorized)
-                    .unwrap_or(false);
-                if !authorized {
-                    return Err(APIError::InvalidRequest(s!(
-                        "host did not authorize the linked payment"
-                    )));
-                }
-            }
-            Ok(Ok(Err(err))) => {
-                return Err(APIError::InvalidRequest(format!(
-                    "asset_link host error {}: {}",
-                    err.code, err.message
-                )));
-            }
-            Ok(Err(_)) => {
-                return Err(APIError::Network(s!(
-                    "/assetlink/sendpayment response channel closed before the host replied"
-                )));
-            }
-            Err(_) => {
-                unlocked_state
-                    .asset_link_handler
-                    .forget_asset_link_response(host_pubkey, &request_id);
-                return Err(APIError::Network(s!(
-                    "/assetlink/sendpayment timed out waiting for host authorization"
-                )));
-            }
-        }
-
-        let created_at = get_current_timestamp();
-        let payment_id = PaymentId(payment_hash.0);
-        let mut status = HTLCStatus::Pending;
-        unlocked_state.add_outbound_payment(
-            payment_id,
-            PaymentInfo {
-                preimage: None,
-                secret: Some(payment_secret),
-                status,
-                amt_msat: Some(amt_msat),
-                created_at,
-                updated_at: created_at,
-                payee_pubkey: invoice.get_payee_pub_key(),
-                expires_at: None,
-                claim_deadline_height: None,
-                invoice_type: None,
-                description_hash: description_hash_from_invoice(&invoice),
-                payment_idx: None,
-                async_hash_index: None,
-                async_host_node_id: None,
-            },
-        )?;
-        write_rgb_payment_info_file(
-            &payment_hash,
-            child_contract_id,
-            asset_amount,
-            true,
-            false,
-            unlocked_state.kv_store.as_ref(),
-        );
-
-        match unlocked_state.channel_manager.send_payment_with_route(
-            route,
-            payment_hash,
-            recipient_onion,
-            payment_id,
-        ) {
-            Ok(()) => {
-                tracing::info!(
-                    "EVENT: sent linked-asset payment of {} to {}",
-                    asset_amount,
-                    receiver_pubkey
-                );
-            }
-            Err(e) => {
-                tracing::error!("ERROR: failed to send linked-asset payment: {:?}", e);
-                clear_rgb_payment_pending(&payment_hash, false, unlocked_state.kv_store.as_ref());
-                status = HTLCStatus::Failed;
-                unlocked_state.update_outbound_payment_status(payment_id, status);
-            }
-        }
-
-        Ok(Json(SendPaymentResponse {
-            payment_id: hex_str(&payment_id.0),
-            payment_hash: Some(hex_str(&payment_hash.0)),
-            payment_secret: Some(hex_str(&payment_secret.0)),
-            status,
-        }))
     })
     .await
 }
@@ -5227,6 +4962,9 @@ pub(crate) async fn send_payment(
                 Err(e) => return Err(APIError::InvalidInvoice(e.to_string())),
                 Ok(v) => v,
             };
+            if invoice.is_expired() {
+                return Err(APIError::InvalidInvoice(s!("invoice has expired")));
+            }
 
             let payment_id = PaymentId((*invoice.payment_hash()).to_byte_array());
             let payment_secret = Some(*invoice.payment_secret());
@@ -5289,6 +5027,41 @@ pub(crate) async fn send_payment(
                     )))
                 }
             };
+
+            if let Some((contract_id, asset_amount)) = rgb_payment {
+                if !has_sufficient_asset_channel(
+                    unlocked_state,
+                    contract_id,
+                    asset_amount,
+                    amt_msat,
+                ) {
+                    if let Some((linked_contract_id, host_pubkey)) = find_linked_asset_channel(
+                        unlocked_state,
+                        contract_id,
+                        asset_amount,
+                        amt_msat,
+                        invoice.recover_payee_pub_key(),
+                    ) {
+                        let linked_payment = send_linked_asset_payment(
+                            unlocked_state,
+                            &invoice,
+                            contract_id,
+                            linked_contract_id,
+                            asset_amount,
+                            amt_msat,
+                            host_pubkey,
+                        )
+                        .await?;
+
+                        return Ok(Json(SendPaymentResponse {
+                            payment_id: hex_str(&linked_payment.payment_id.0),
+                            payment_hash: Some(hex_str(&linked_payment.payment_hash.0)),
+                            payment_secret: Some(hex_str(&linked_payment.payment_secret.0)),
+                            status: linked_payment.status,
+                        }));
+                    }
+                }
+            }
 
             if rgb_payment.is_none() {
                 let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
@@ -5879,6 +5652,7 @@ mod external_signer_auth_tests {
 
         Arc::new(AppState {
             static_state: Arc::new(StaticState {
+                config: Default::default(),
                 ldk_peer_listening_port: 9735,
                 network: rgb_lib::BitcoinNetwork::Regtest,
                 storage_dir_path: path.clone(),

@@ -2107,9 +2107,9 @@ checksum = "e629b9b98ef3dd8afe6ca2bd0f89306cec16d43d907889945bc5d6687f2f13c7"
 
 [[package]]
 name = "glob"
-version = "0.3.3"
+version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "goblin"
@@ -2746,9 +2746,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.186"
+version = "0.2.188"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+checksum = "22053b6a34f84abc97f9129e61334f40174659a1b9bd18c970b83db6a9a6348b"
 
 [[package]]
 name = "libm"
@@ -2811,7 +2811,7 @@ dependencies = [
  "lightning-types 0.3.1",
  "musig2",
  "possiblyrandom 0.2.0",
- "rgb-lib 0.3.0-beta.6 (git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.26)",
+ "rgb-lib",
  "serde",
  "tokio",
 ]
@@ -2868,7 +2868,7 @@ dependencies = [
  "bech32 0.11.1",
  "bitcoin 0.32.102",
  "lightning-types 0.3.1",
- "rgb-lib 0.3.0-beta.6 (git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.26)",
+ "rgb-lib",
  "serde",
 ]
 
@@ -4279,48 +4279,6 @@ dependencies = [
 [[package]]
 name = "rgb-lib"
 version = "0.3.0-beta.6"
-source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.26#117e8ca0411ebc8fd8e771f702daa0fa35ab66dd"
-dependencies = [
- "amplify",
- "base64 0.22.1",
- "bdk_electrum",
- "bdk_esplora",
- "bdk_wallet",
- "chacha20poly1305",
- "file-format",
- "generic-array",
- "hex",
- "rand 0.10.1",
- "reqwest 0.13.4",
- "rgb-invoicing",
- "rgb-lib-migration 0.3.0-beta.4 (git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.26)",
- "rgb-ops",
- "rgb-psbt-utils",
- "rgb-schemas",
- "rgb-strict-encoding",
- "rgb-strict-types",
- "rustls 0.23.41",
- "scrypt",
- "sea-orm",
- "sea-query",
- "serde",
- "serde_json",
- "slog",
- "slog-async",
- "slog-term",
- "tempfile",
- "thiserror 2.0.18",
- "time",
- "tokio",
- "typenum",
- "url",
- "walkdir",
- "zip 8.6.0",
-]
-
-[[package]]
-name = "rgb-lib"
-version = "0.3.0-beta.6"
 source = "git+https://github.com/txalkan/rgb-lib.git?branch=feat%2Fasset-link#20d87dc4b5786137a8b296dcdd3d6a2d48948396"
 dependencies = [
  "amplify",
@@ -4336,7 +4294,7 @@ dependencies = [
  "rand 0.10.2",
  "reqwest 0.13.4",
  "rgb-invoicing",
- "rgb-lib-migration 0.3.0-beta.4 (git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.27)",
+ "rgb-lib-migration",
  "rgb-ops",
  "rgb-psbt-utils",
  "rgb-schemas",
@@ -4361,15 +4319,6 @@ dependencies = [
  "vss-client-ng",
  "walkdir",
  "zip 8.6.0",
-]
-
-[[package]]
-name = "rgb-lib-migration"
-version = "0.3.0-beta.4"
-source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.26#117e8ca0411ebc8fd8e771f702daa0fa35ab66dd"
-dependencies = [
- "sea-orm-migration",
- "tokio",
 ]
 
 [[package]]
@@ -4425,7 +4374,7 @@ dependencies = [
  "rcgen",
  "regex",
  "reqwest 0.12.28",
- "rgb-lib 0.3.0-beta.6 (git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.27)",
+ "rgb-lib",
  "rgb-psbt-utils",
  "rln-migration",
  "rustls 0.23.42",
@@ -6040,13 +5989,14 @@ dependencies = [
 
 [[package]]
 name = "tokio-util"
-version = "0.7.18"
+version = "0.7.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ae9cec805b01e8fc3fd2fe289f89149a9b66dd16786abd8b19cfa7b48cb0098"
+checksum = "494815d09bf52b5548659851081238f0ca39ff638363907596da739561c62c52"
 dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "libc",
  "pin-project-lite",
  "tokio",
 ]

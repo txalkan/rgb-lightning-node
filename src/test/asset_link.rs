@@ -205,7 +205,7 @@ async fn asset_link_create_uses_rgb_link_state_and_is_idempotent() {
 #[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[traced_test]
-async fn asset_link_send_payment_swaps_virtual_to_reserve_asset() {
+async fn asset_link_send_payment_uses_linked_asset_when_invoice_asset_liquidity_is_insufficient() {
     initialize();
 
     const LINK_AMT: u64 = 100;
@@ -295,7 +295,7 @@ async fn asset_link_send_payment_swaps_virtual_to_reserve_asset() {
     .await
     .invoice;
 
-    let payment = asset_link_send_payment(payer_addr, &invoice, &asset_v, &host_info.pubkey).await;
+    let payment = send_payment(payer_addr, invoice).await;
     let payment_hash = payment.payment_hash.clone();
     check_preimage_matches_hash(&payment, &payment_hash);
     assert_eq!(payment.asset_id.as_deref(), Some(asset_v.as_str()));
@@ -327,24 +327,6 @@ async fn asset_link_send_payment_swaps_virtual_to_reserve_asset() {
     assert_eq!(linked_swap.qty_from, LINK_AMT);
     assert_eq!(linked_swap.qty_to, LINK_AMT);
 
-    let asset_unlinked = issue_asset_ifa(host_addr).await.asset_id;
-    let r_invoice_unlinked = ln_invoice(
-        receiver_addr,
-        Some(3_000_000),
-        Some(&asset_r),
-        Some(1),
-        3600,
-    )
-    .await
-    .invoice;
-    let res = asset_link_send_payment_raw(
-        payer_addr,
-        &r_invoice_unlinked,
-        &asset_unlinked,
-        &host_info.pubkey,
-    )
-    .await;
-    check_response_is_nok(res, StatusCode::FORBIDDEN, "No route found", "NoRoute").await;
     wait_for_ln_balance(receiver_addr, &asset_r, CHANNEL_AMT).await;
     wait_for_ln_balance(host_addr, &asset_r, 0).await;
 
