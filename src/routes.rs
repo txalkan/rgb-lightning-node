@@ -101,7 +101,9 @@ use crate::utils::{
 };
 use crate::{
     backup::{do_backup, restore_backup},
-    core_types::{HTLCStatus, SwapStatus, UnlockRequest as CoreUnlockRequest},
+    core_types::{
+        HTLCStatus, SwapStatus, UnlockRequest as CoreUnlockRequest, PENDING_SWAP_TIMEOUT_SECS,
+    },
     rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional},
 };
 use crate::{
@@ -2729,7 +2731,7 @@ pub(crate) async fn get_swap(
         if status == SwapStatus::Waiting && get_current_timestamp() > swap_data.swap_info.expiry {
             status = SwapStatus::Expired;
         } else if status == SwapStatus::Pending
-            && get_current_timestamp() > swap_data.initiated_at.unwrap() + 86400
+            && get_current_timestamp() > swap_data.initiated_at.unwrap() + PENDING_SWAP_TIMEOUT_SECS
         {
             status = SwapStatus::Failed;
         }
@@ -3466,7 +3468,7 @@ pub(crate) async fn list_swaps(
         if status == SwapStatus::Waiting && get_current_timestamp() > swap_data.swap_info.expiry {
             status = SwapStatus::Expired;
         } else if status == SwapStatus::Pending
-            && get_current_timestamp() > swap_data.initiated_at.unwrap() + 86400
+            && get_current_timestamp() > swap_data.initiated_at.unwrap() + PENDING_SWAP_TIMEOUT_SECS
         {
             status = SwapStatus::Failed;
         }

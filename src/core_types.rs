@@ -13,6 +13,7 @@ pub(crate) const DUST_LIMIT_MSAT: u64 = 546000;
 pub(crate) const HTLC_MIN_MSAT: u64 = 3_000_000;
 pub(crate) const VIRTUAL_HTLC_MIN_MSAT: u64 = 1_000;
 pub(crate) const MAX_SWAP_FEE_MSAT: u64 = 3_000_000;
+pub(crate) const PENDING_SWAP_TIMEOUT_SECS: u64 = 24 * 60 * 60;
 pub(crate) const DEFAULT_FINAL_CLTV_EXPIRY_DELTA: u32 = 14;
 
 pub mod async_order {

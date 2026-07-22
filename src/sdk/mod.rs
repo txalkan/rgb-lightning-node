@@ -9,6 +9,7 @@ use crate::core_types::async_order::{
     AsyncOrderNewRequest, AsyncOrderNewResponse, AsyncOrderOutboundInvoiceRequest,
     AsyncOrderOutboundInvoiceResponse,
 };
+use crate::core_types::PENDING_SWAP_TIMEOUT_SECS;
 use crate::error::APIError;
 use crate::ldk::{
     clear_rgb_payment_pending, peer_has_live_channel, start_ldk, write_rgb_payment_info_file,
@@ -4162,7 +4163,7 @@ fn map_swap(
     if status == SwapStatus::Waiting && get_current_timestamp() > swap_data.swap_info.expiry {
         status = SwapStatus::Expired;
     } else if status == SwapStatus::Pending
-        && get_current_timestamp() > swap_data.initiated_at.unwrap() + 86400
+        && get_current_timestamp() > swap_data.initiated_at.unwrap() + PENDING_SWAP_TIMEOUT_SECS
     {
         status = SwapStatus::Failed;
     }

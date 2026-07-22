@@ -125,7 +125,9 @@ use tokio::task::JoinHandle;
 use crate::async_kv_store::RemoteFirstKvStore;
 use crate::bitcoind::BitcoindClient;
 use crate::chain_backend::ChainBackend;
-use crate::core_types::{HTLCStatus, NodeKeySource, SwapStatus, UnlockRequest};
+use crate::core_types::{
+    HTLCStatus, NodeKeySource, SwapStatus, UnlockRequest, PENDING_SWAP_TIMEOUT_SECS,
+};
 use crate::database::RlnDatabase;
 use crate::disk::{self, FilesystemLogger};
 use crate::gossip::{GossipSource, GossipSourceConfig};
@@ -1221,6 +1223,32 @@ struct NodeAssetLinkAuthorizer {
     taker_swaps: Arc<Mutex<SwapMap>>,
 }
 
+fn reserved_outbound_rgb_amount(
+    taker_swaps: &SwapMap,
+    outbound_contract_id: ContractId,
+    current_time: u64,
+) -> u64 {
+    taker_swaps
+        .swaps
+        .values()
+        .filter(|swap| {
+            if swap.swap_info.from_asset != Some(outbound_contract_id) {
+                return false;
+            }
+
+            match swap.status {
+                SwapStatus::Waiting => current_time <= swap.swap_info.expiry,
+                SwapStatus::Pending => swap.initiated_at.is_none_or(|initiated_at| {
+                    current_time <= initiated_at.saturating_add(PENDING_SWAP_TIMEOUT_SECS)
+                }),
+                SwapStatus::Succeeded | SwapStatus::Expired | SwapStatus::Failed => false,
+            }
+        })
+        .fold(0, |reserved_amount, swap| {
+            reserved_amount.saturating_add(swap.swap_info.qty_from)
+        })
+}
+
 impl AssetLinkAuthorizer for NodeAssetLinkAuthorizer {
     fn authorize_swap(
         &self,
@@ -1282,18 +1310,22 @@ impl AssetLinkAuthorizer for NodeAssetLinkAuthorizer {
             self.channel_manager.list_channels().iter(),
             self.kv_store.as_ref(),
         );
-        if params.amount > max_balance {
-            return Err(JsonRpcErrorWire::application_error(
-                ASSET_LINK_ERROR_INSUFFICIENT_LIQUIDITY,
-                "insufficient_liquidity",
-            ));
-        }
-
         let mut taker_swaps = self.taker_swaps.lock().unwrap();
         if taker_swaps.swaps.contains_key(&payment_hash) {
             return Err(JsonRpcErrorWire::application_error(
                 ASSET_LINK_ERROR_DUPLICATE_PAYMENT_HASH,
                 "duplicate_payment_hash",
+            ));
+        }
+
+        let authorization_time = get_current_timestamp();
+        let reserved_amount =
+            reserved_outbound_rgb_amount(&taker_swaps, asset_contract_id, authorization_time);
+        let available_amount = max_balance.saturating_sub(reserved_amount);
+        if params.amount > available_amount {
+            return Err(JsonRpcErrorWire::application_error(
+                ASSET_LINK_ERROR_INSUFFICIENT_LIQUIDITY,
+                "insufficient_liquidity",
             ));
         }
 
@@ -1305,16 +1337,20 @@ impl AssetLinkAuthorizer for NodeAssetLinkAuthorizer {
             qty_to: params.amount,
             from_asset: Some(asset_contract_id),
             to_asset: Some(linked_contract_id),
-            expiry: get_current_timestamp().saturating_add(expiry_sec),
+            expiry: authorization_time.saturating_add(expiry_sec),
         };
         let mut swap_data = SwapData::create_from_swap_info(&swap_info);
         swap_data.authorized_peer = Some(sender_node_id);
         taker_swaps.swaps.insert(payment_hash, swap_data);
-        self.kv_store
+        if let Err(e) = self
+            .kv_store
             .write("", "", TAKER_SWAPS_KEY, taker_swaps.encode())
-            .map_err(|e| {
-                JsonRpcErrorWire::internal_error(format!("taker_swaps_write_failed: {e}"))
-            })?;
+        {
+            taker_swaps.swaps.remove(&payment_hash);
+            return Err(JsonRpcErrorWire::internal_error(format!(
+                "taker_swaps_write_failed: {e}"
+            )));
+        }
 
         tracing::info!(
             peer = %sender_node_id,
