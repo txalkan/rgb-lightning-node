@@ -99,6 +99,24 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AssetBalanceResponse'
+  /assetlink:
+    post:
+      tags:
+        - RGB
+      summary: Create a contract link
+      description: Link a parent IFA contract to a child IFA contract using a link-right UTXO
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssetLinkRequest'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssetLinkResponse'
   /assetmetadata:
     post:
       tags:
@@ -1593,6 +1611,52 @@ components:
             - string
             - 'null'
           example: https://some.domain/someasset/rejectlist
+    AssetLinkRequest:
+      type: object
+      required:
+        - parent_asset_id
+        - child_asset_id
+        - fee_rate
+        - min_confirmations
+      properties:
+        parent_asset_id:
+          type: string
+          example: rgb:CJkb4YZw-jRiz2sk-~PARPio-wtVYI1c-XAEYCqO-wTfvRZ8
+        child_asset_id:
+          type: string
+          example: rgb:CJkb4YZw-jRiz2sk-~PARPio-wtVYI1c-XAEYCqO-wTfvRZ9
+        fee_rate:
+          type: integer
+          example: 5
+        min_confirmations:
+          type: integer
+          example: 1
+    AssetLinkResponse:
+      type: object
+      required:
+        - parent_asset_id
+        - child_asset_id
+        - created_at
+        - txid
+      properties:
+        parent_asset_id:
+          type: string
+          example: rgb:CJkb4YZw-jRiz2sk-~PARPio-wtVYI1c-XAEYCqO-wTfvRZ8
+        child_asset_id:
+          type:
+            - string
+            - 'null'
+          example: rgb:CJkb4YZw-jRiz2sk-~PARPio-wtVYI1c-XAEYCqO-wTfvRZ9
+        created_at:
+          type:
+            - integer
+            - 'null'
+          example: 1691160565
+        txid:
+          type:
+            - string
+            - 'null'
+          example: 4b0d1f2c0d8a4e8d7e5e3f8f5a6b7c8d9e0f102132435465768798a9b0c1d2e3
     AssetMetadataRequest:
       type: object
       required:

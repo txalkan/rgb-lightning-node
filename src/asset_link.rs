@@ -23,6 +23,7 @@ use rgb_lib::{AssetSchema as RgbLibAssetSchema, ContractId};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -36,6 +37,7 @@ use crate::custom_msg_rpc::{
     JSONRPC_MSG_RESPONSE_TIMEOUT_SECS, JSONRPC_VERSION,
 };
 use crate::{
+    core_types::asset_link::{AssetLinkRequest, AssetLinkResponse},
     core_types::{HTLCStatus, MAX_SWAP_FEE_MSAT},
     error::APIError,
     ldk::{clear_rgb_payment_pending, write_rgb_payment_info_file, PaymentInfo},
@@ -411,6 +413,103 @@ impl CustomMessageHandler for AssetLinkMessageHandler {
     }
 }
 
+pub(crate) fn create_asset_link(
+    unlocked_state: &UnlockedAppState,
+    params: AssetLinkRequest,
+) -> Result<AssetLinkResponse, APIError> {
+    if unlocked_state.external_signer_mode {
+        return Err(APIError::UnsupportedInExternalSignerMode(s!(
+            "asset linking is not supported in external signer mode"
+        )));
+    }
+
+    let parent_id = params.parent_asset_id.trim().to_string();
+    let child_id = params.child_asset_id.trim().to_string();
+    let parent_contract_id = ContractId::from_str(&parent_id)
+        .map_err(|_| APIError::InvalidAssetID(parent_id.clone()))?;
+    let child_contract_id =
+        ContractId::from_str(&child_id).map_err(|_| APIError::InvalidAssetID(child_id.clone()))?;
+
+    if parent_contract_id == child_contract_id {
+        return Err(APIError::InvalidRequest(s!(
+            "parent and child contracts must be different"
+        )));
+    }
+
+    let parent_metadata = unlocked_state.rgb_get_asset_metadata(parent_contract_id)?;
+    let child_metadata = unlocked_state.rgb_get_asset_metadata(child_contract_id)?;
+    if parent_metadata.asset_schema != RgbLibAssetSchema::Ifa
+        || child_metadata.asset_schema != RgbLibAssetSchema::Ifa
+    {
+        return Err(APIError::InvalidContractLink(s!(
+            "asset linking is only supported for IFA assets"
+        )));
+    }
+
+    match child_metadata.linked_from_asset_id.as_deref() {
+        Some(existing_parent_id) if existing_parent_id == parent_id => {}
+        Some(existing_parent_id) => {
+            return Err(APIError::InvalidContractLink(format!(
+                "child_asset_id {child_id} is already linked from {existing_parent_id}"
+            )));
+        }
+        None => {
+            return Err(APIError::InvalidContractLink(format!(
+                "child_asset_id {child_id} does not declare parent_asset_id {parent_id} as its parent"
+            )));
+        }
+    }
+
+    match parent_metadata.linked_to_asset_id.as_deref() {
+        Some(existing_child_id) if existing_child_id == child_id => {
+            let link_transfer = unlocked_state.rgb_find_link_transfer(parent_contract_id)?;
+            let created_at = link_transfer
+                .as_ref()
+                .map(|transfer| transfer.created_at.max(0) as u64)
+                .unwrap_or_else(get_current_timestamp);
+            return Ok(AssetLinkResponse {
+                parent_asset_id: parent_id,
+                child_asset_id: Some(child_id),
+                created_at: Some(created_at),
+                txid: link_transfer.and_then(|transfer| transfer.txid),
+            });
+        }
+        Some(existing_child_id) => {
+            return Err(APIError::InvalidContractLink(format!(
+                "parent_asset_id {parent_id} is already linked to {existing_child_id}"
+            )));
+        }
+        None => {}
+    }
+
+    let link_right_outpoint = unlocked_state
+        .rgb_find_link_right_outpoint(parent_contract_id)?
+        .ok_or_else(|| {
+            APIError::InvalidRequest(format!(
+                "missing link_right_outpoint for parent_asset_id {parent_id}"
+            ))
+        })?;
+    let link_ifa = unlocked_state.rgb_link_ifa(
+        parent_id.clone(),
+        child_id.clone(),
+        link_right_outpoint,
+        params.fee_rate,
+        params.min_confirmations,
+    )?;
+    let link_transfer = unlocked_state.rgb_find_link_transfer(parent_contract_id)?;
+    let created_at = link_transfer
+        .as_ref()
+        .map(|transfer| transfer.created_at.max(0) as u64)
+        .unwrap_or_else(get_current_timestamp);
+
+    Ok(AssetLinkResponse {
+        parent_asset_id: parent_id,
+        child_asset_id: Some(child_id),
+        created_at: Some(created_at),
+        txid: Some(link_ifa.txid),
+    })
+}
+
 pub(crate) fn find_linked_asset_channel(
     unlocked_state: &UnlockedAppState,
     contract_id: ContractId,
@@ -501,9 +600,9 @@ pub(crate) async fn send_linked_asset_payment(
         || host_pubkey == unlocked_state.runtime_node_id()
         || host_pubkey == recipient_pubkey
     {
-        return Err(APIError::InvalidRequest(
-            "linked payment requires distinct payer, host, recipient, and asset IDs".to_string(),
-        ));
+        return Err(APIError::InvalidRequest(s!(
+            "linked payment requires distinct payer, host, recipient, and asset IDs"
+        )));
     }
 
     let first_leg = get_route(

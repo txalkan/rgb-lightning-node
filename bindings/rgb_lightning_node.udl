@@ -57,6 +57,8 @@ interface SdkNode {
     [Throws=RlnError]
     void createutxos(SdkCreateUtxosRequest request);
     [Throws=RlnError]
+    AssetLinkRecord asset_link(SdkAssetLinkRequest request);
+    [Throws=RlnError]
     AssetNia issueassetnia(SdkIssueAssetNiaRequest request);
     [Throws=RlnError]
     AssetCfa issueassetcfa(SdkIssueAssetCfaRequest request);
@@ -328,6 +330,13 @@ dictionary AssetBalanceInfo {
     u64 spendable;
     u64 offchain_outbound;
     u64 offchain_inbound;
+};
+
+dictionary AssetLinkRecord {
+    ContractId parent_asset_id;
+    ContractId? child_asset_id;
+    u64? created_at;
+    Txid? txid;
 };
 
 dictionary AssetMetadataInfo {
@@ -695,6 +704,14 @@ interface IfaIssuanceType {
     Legacy();
     LinkRightOnly();
     LinkedFromParent(ContractId contract_id, boolean request_link_right);
+};
+
+
+dictionary SdkAssetLinkRequest {
+    ContractId parent_asset_id;
+    ContractId child_asset_id;
+    u64 fee_rate;
+    u8 min_confirmations;
 };
 
 dictionary SdkIssueAssetUdaRequest {

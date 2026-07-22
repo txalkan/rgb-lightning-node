@@ -229,6 +229,7 @@ The node currently exposes the following APIs:
 - `/apay/new` (POST)
 - `/apay/outboundinvoice` (POST)
 - `/assetbalance` (POST)
+- `/assetlink` (POST)
 - `/assetmetadata` (POST)
 - `/backup` (POST)
 - `/btcbalance` (POST)

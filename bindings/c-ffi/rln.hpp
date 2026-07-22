@@ -39,6 +39,8 @@ CResultString rln_address(const COpaqueStruct *node);
 
 CResultString rln_asset_balance(const COpaqueStruct *node, const char *asset_id);
 
+CResultString rln_asset_link_create(const COpaqueStruct *node, const char *request_json);
+
 CResultString rln_asset_metadata(const COpaqueStruct *node, const char *asset_id);
 
 CResultString rln_btc_balance(const COpaqueStruct *node, bool skip_sync);

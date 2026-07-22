@@ -43,14 +43,14 @@ async fn asset_link_create_uses_rgb_link_state_and_is_idempotent() {
     );
     assert_eq!(child_metadata.linked_to_asset_id, None);
 
-    let invalid_link_payload = AssetLinkCreateRequest {
+    let invalid_link_payload = AssetLinkRequest {
         parent_asset_id: parent_asset_id.clone(),
         child_asset_id: legacy_asset_id.clone(),
         fee_rate: FEE_RATE,
         min_confirmations: 1,
     };
     let invalid_link_res = reqwest::Client::new()
-        .post(format!("http://{node_addr}/assetlink/create"))
+        .post(format!("http://{node_addr}/assetlink"))
         .json(&invalid_link_payload)
         .send()
         .await
@@ -71,14 +71,14 @@ async fn asset_link_create_uses_rgb_link_state_and_is_idempotent() {
         }),
     )
     .await;
-    let missing_link_right_payload = AssetLinkCreateRequest {
+    let missing_link_right_payload = AssetLinkRequest {
         parent_asset_id: legacy_asset_id.clone(),
         child_asset_id: missing_link_right_child.asset_id.clone(),
         fee_rate: FEE_RATE,
         min_confirmations: 1,
     };
     let missing_link_right_res = reqwest::Client::new()
-        .post(format!("http://{node_addr}/assetlink/create"))
+        .post(format!("http://{node_addr}/assetlink"))
         .json(&missing_link_right_payload)
         .send()
         .await
@@ -99,8 +99,6 @@ async fn asset_link_create_uses_rgb_link_state_and_is_idempotent() {
         .as_deref()
         .is_some_and(|txid| !txid.is_empty()));
     assert!(asset_link.created_at.is_some());
-
-    assert!(asset_link.link_right_outpoint.is_none());
 
     let duplicate = asset_link_create(
         node_addr,
@@ -128,14 +126,14 @@ async fn asset_link_create_uses_rgb_link_state_and_is_idempotent() {
     )
     .await
     .asset_id;
-    let conflict_payload = AssetLinkCreateRequest {
+    let conflict_payload = AssetLinkRequest {
         parent_asset_id: asset_link.parent_asset_id.clone(),
         child_asset_id: conflicting_linked_asset_id,
         fee_rate: FEE_RATE,
         min_confirmations: 1,
     };
     let conflict_res = reqwest::Client::new()
-        .post(format!("http://{node_addr}/assetlink/create"))
+        .post(format!("http://{node_addr}/assetlink"))
         .json(&conflict_payload)
         .send()
         .await

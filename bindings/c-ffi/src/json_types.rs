@@ -14,26 +14,27 @@ use std::str::FromStr;
 use hex::DisplayHex;
 use hex::FromHex;
 use rgb_lightning_node::{
-    AddressInfo, AssetBalanceInfo, AssetCfa, AssetIfa, AssetMediaResponse, AssetMetadataInfo,
-    AssetNia, AssetRecipients, AssetUda, AssignmentKind, BlockTime, BtcBalance, BtcBalanceInfo,
-    CancelHodlInvoiceRequest, Channel, ChannelId, ChannelStatus, CheckIndexerUrlResponse,
-    ClaimHodlInvoiceRequest, ClaimHodlInvoiceResponse, ContractId, DecodeLnInvoiceResponse,
-    DecodeRgbInvoiceResponse, EmbeddedMedia, EstimateFeeResponse, HtlcStatus, IfaIssuanceType,
-    InflateRequest, InflateResponse, InvoiceStatus, ListAssetsResponse, LnInvoiceRequest,
-    LnInvoiceResponse, Media, MediaAttachment, NetworkInfo, NodeInfo, Payment, PaymentHash,
-    PaymentType, Peer, ProofOfReserves, PublicKey, RecipientId, RgbAllocation, RgbOutpoint,
-    RgbRecipient, SdkCloseChannelRequest, SdkCreateUtxosRequest, SdkDisconnectPeerRequest,
-    SdkExternalSignerBootstrap, SdkFailTransfersRequest, SdkFailTransfersResponse, SdkInitRequest,
-    SdkIssueAssetCfaRequest, SdkIssueAssetIfaRequest, SdkIssueAssetNiaRequest,
-    SdkIssueAssetUdaRequest, SdkKeysendRequest, SdkKeysendResponse, SdkMakerExecuteRequest,
-    SdkMakerInitRequest, SdkMakerInitResponse, SdkOpenChannelRequest, SdkOpenChannelResponse,
-    SdkPostAssetMediaRequest, SdkPostAssetMediaResponse, SdkRefreshTransfersRequest,
-    SdkRgbInvoiceRequest, SdkRgbInvoiceResponse, SdkSendBtcRequest, SdkSendBtcResponse,
-    SdkSendOnionMessageRequest, SdkSendPaymentRequest, SdkSendPaymentResponse, SdkTakerRequest,
-    SdkUnlockRequest, SdkVssClearFenceRequest, SendRgbRequest, SendRgbResponse,
-    SignMessageResponse, Swap, SwapList, SwapStatus, Token, TokenLight, Transaction,
-    TransactionType, Transfer, TransferTransportEndpoint, TransportEndpoint, Txid, Unspent, Utxo,
-    VerifyMessageResponse, WitnessData,
+    AddressInfo, AssetBalanceInfo, AssetCfa, AssetIfa, AssetLinkRecord, AssetMediaResponse,
+    AssetMetadataInfo, AssetNia, AssetRecipients, AssetUda, AssignmentKind, BlockTime, BtcBalance,
+    BtcBalanceInfo, CancelHodlInvoiceRequest, Channel, ChannelId, ChannelStatus,
+    CheckIndexerUrlResponse, ClaimHodlInvoiceRequest, ClaimHodlInvoiceResponse, ContractId,
+    DecodeLnInvoiceResponse, DecodeRgbInvoiceResponse, EmbeddedMedia, EstimateFeeResponse,
+    HtlcStatus, IfaIssuanceType, InflateRequest, InflateResponse, InvoiceStatus,
+    ListAssetsResponse, LnInvoiceRequest, LnInvoiceResponse, Media, MediaAttachment, NetworkInfo,
+    NodeInfo, Payment, PaymentHash, PaymentType, Peer, ProofOfReserves, PublicKey, RecipientId,
+    RgbAllocation, RgbOutpoint, RgbRecipient, SdkAssetLinkRequest, SdkCloseChannelRequest,
+    SdkCreateUtxosRequest, SdkDisconnectPeerRequest, SdkExternalSignerBootstrap,
+    SdkFailTransfersRequest, SdkFailTransfersResponse, SdkInitRequest, SdkIssueAssetCfaRequest,
+    SdkIssueAssetIfaRequest, SdkIssueAssetNiaRequest, SdkIssueAssetUdaRequest, SdkKeysendRequest,
+    SdkKeysendResponse, SdkMakerExecuteRequest, SdkMakerInitRequest, SdkMakerInitResponse,
+    SdkOpenChannelRequest, SdkOpenChannelResponse, SdkPostAssetMediaRequest,
+    SdkPostAssetMediaResponse, SdkRefreshTransfersRequest, SdkRgbInvoiceRequest,
+    SdkRgbInvoiceResponse, SdkSendBtcRequest, SdkSendBtcResponse, SdkSendOnionMessageRequest,
+    SdkSendPaymentRequest, SdkSendPaymentResponse, SdkTakerRequest, SdkUnlockRequest,
+    SdkVssClearFenceRequest, SendRgbRequest, SendRgbResponse, SignMessageResponse, Swap, SwapList,
+    SwapStatus, Token, TokenLight, Transaction, TransactionType, Transfer,
+    TransferTransportEndpoint, TransportEndpoint, Txid, Unspent, Utxo, VerifyMessageResponse,
+    WitnessData,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1055,8 +1056,48 @@ impl From<InflateResponse> for JsonInflateResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Asset issuance
+// Asset issuance and contract linking
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct JsonAssetLinkRequest {
+    pub parent_asset_id: String,
+    pub child_asset_id: String,
+    pub fee_rate: u64,
+    pub min_confirmations: u8,
+}
+
+impl TryFrom<JsonAssetLinkRequest> for SdkAssetLinkRequest {
+    type Error = Error;
+
+    fn try_from(j: JsonAssetLinkRequest) -> Result<Self, Self::Error> {
+        Ok(Self {
+            parent_asset_id: parse_contract_id(&j.parent_asset_id)?,
+            child_asset_id: parse_contract_id(&j.child_asset_id)?,
+            fee_rate: j.fee_rate,
+            min_confirmations: j.min_confirmations,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct JsonAssetLinkRecord {
+    pub parent_asset_id: String,
+    pub child_asset_id: Option<String>,
+    pub created_at: Option<u64>,
+    pub txid: Option<String>,
+}
+
+impl From<AssetLinkRecord> for JsonAssetLinkRecord {
+    fn from(link: AssetLinkRecord) -> Self {
+        Self {
+            parent_asset_id: fmt_contract_id(&link.parent_asset_id),
+            child_asset_id: link.child_asset_id.map(|id| fmt_contract_id(&id)),
+            created_at: link.created_at,
+            txid: link.txid.map(|txid| fmt_txid(&txid)),
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct JsonIssueAssetNiaRequest {

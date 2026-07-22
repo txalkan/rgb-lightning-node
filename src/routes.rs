@@ -72,12 +72,14 @@ use tokio::{
 };
 
 use crate::asset_link::{
-    find_linked_asset_channel, has_sufficient_asset_channel, send_linked_asset_payment,
+    create_asset_link, find_linked_asset_channel, has_sufficient_asset_channel,
+    send_linked_asset_payment,
 };
 use crate::async_order::{
     write_async_payments_next_hash_index, AsyncOrderNewResultWire,
     AsyncOrderOutboundInvoiceResultWire,
 };
+use crate::core_types::asset_link::{AssetLinkRequest, AssetLinkResponse};
 use crate::core_types::async_order::{
     AsyncOrderNewRequest, AsyncOrderNewResponse, AsyncOrderOutboundInvoiceRequest,
     AsyncOrderOutboundInvoiceResponse,
@@ -217,28 +219,6 @@ impl From<RgbLibAssetIFA> for AssetIFA {
             linked_to_asset_id: value.linked_to_asset_id,
         }
     }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct AssetLink {
-    pub(crate) parent_asset_id: String,
-    pub(crate) child_asset_id: Option<String>,
-    pub(crate) created_at: Option<u64>,
-    pub(crate) link_right_outpoint: Option<RgbLibOutpoint>,
-    pub(crate) txid: Option<String>,
-}
-
-#[derive(Deserialize, Serialize)]
-pub(crate) struct AssetLinkCreateRequest {
-    pub(crate) parent_asset_id: String,
-    pub(crate) child_asset_id: String,
-    pub(crate) fee_rate: u64,
-    pub(crate) min_confirmations: u8,
-}
-
-#[derive(Deserialize, Serialize)]
-pub(crate) struct AssetLinkCreateResponse {
-    pub(crate) asset_link: AssetLink,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1853,111 +1833,16 @@ pub(crate) async fn asset_balance(
     }))
 }
 
-pub(crate) async fn asset_link_create(
+pub(crate) async fn asset_link(
     State(state): State<Arc<AppState>>,
-    WithRejection(Json(payload), _): WithRejection<Json<AssetLinkCreateRequest>, APIError>,
-) -> Result<Json<AssetLinkCreateResponse>, APIError> {
+    WithRejection(Json(payload), _): WithRejection<Json<AssetLinkRequest>, APIError>,
+) -> Result<Json<AssetLinkResponse>, APIError> {
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
-        if unlocked_state.external_signer_mode {
-            return Err(APIError::UnsupportedInExternalSignerMode(
-                "asset linking is not supported in external signer mode".to_string(),
-            ));
-        }
+        let asset_link = create_asset_link(unlocked_state, payload)?;
 
-        let parent_id = payload.parent_asset_id.trim().to_string();
-        let child_id = payload.child_asset_id.trim().to_string();
-
-        let parent_contract_id = ContractId::from_str(&parent_id)
-            .map_err(|_| APIError::InvalidAssetID(parent_id.clone()))?;
-        let child_contract_id = ContractId::from_str(&child_id)
-            .map_err(|_| APIError::InvalidAssetID(child_id.clone()))?;
-
-        if parent_contract_id == child_contract_id {
-            return Err(APIError::InvalidRequest(
-                "parent and child contracts must be different".to_string(),
-            ));
-        }
-
-        let parent_metadata = unlocked_state.rgb_get_asset_metadata(parent_contract_id)?;
-        let child_metadata = unlocked_state.rgb_get_asset_metadata(child_contract_id)?;
-
-        if parent_metadata.asset_schema != RgbLibAssetSchema::Ifa
-            || child_metadata.asset_schema != RgbLibAssetSchema::Ifa
-        {
-            return Err(APIError::InvalidContractLink(
-                "asset linking is only supported for IFA assets".to_string(),
-            ));
-        }
-
-        match child_metadata.linked_from_asset_id.as_deref() {
-            Some(existing_parent_id) if existing_parent_id == parent_id => {}
-            Some(existing_parent_id) => {
-                return Err(APIError::InvalidContractLink(format!(
-                    "child_asset_id {child_id} is already linked from {existing_parent_id}"
-                )));
-            }
-            None => {
-                return Err(APIError::InvalidContractLink(format!(
-                    "child_asset_id {child_id} does not declare parent_asset_id {parent_id} as its parent"
-                )));
-            }
-        }
-
-        match parent_metadata.linked_to_asset_id.as_deref() {
-            Some(existing_linked_asset_id) if existing_linked_asset_id == child_id => {
-                let link_transfer = unlocked_state.rgb_find_link_transfer(parent_contract_id)?;
-                let created_at = link_transfer
-                    .as_ref()
-                    .map(|transfer| transfer.created_at.max(0) as u64)
-                    .unwrap_or_else(get_current_timestamp);
-                let asset_link = AssetLink {
-                    parent_asset_id: parent_id.clone(),
-                    child_asset_id: Some(child_id),
-                    created_at: Some(created_at),
-                    link_right_outpoint: None,
-                    txid: link_transfer.and_then(|transfer| transfer.txid),
-                };
-                return Ok(Json(AssetLinkCreateResponse { asset_link }));
-            }
-            Some(existing_linked_asset_id) => {
-                return Err(APIError::InvalidContractLink(format!(
-                    "parent_asset_id {parent_id} is already linked to {existing_linked_asset_id}"
-                )));
-            }
-            None => {}
-        }
-
-        let link_right_outpoint = unlocked_state
-            .rgb_find_link_right_outpoint(parent_contract_id)?
-            .ok_or_else(|| {
-                APIError::InvalidRequest(format!(
-                    "missing link_right_outpoint for parent_asset_id {parent_id}"
-                ))
-            })?;
-
-        let link_ifa = unlocked_state.rgb_link_ifa(
-            parent_id.clone(),
-            child_id.clone(),
-            link_right_outpoint,
-            payload.fee_rate,
-            payload.min_confirmations,
-        )?;
-        let link_transfer = unlocked_state.rgb_find_link_transfer(parent_contract_id)?;
-        let created_at = link_transfer
-            .as_ref()
-            .map(|transfer| transfer.created_at.max(0) as u64)
-            .unwrap_or_else(get_current_timestamp);
-        let asset_link = AssetLink {
-            parent_asset_id: parent_id.clone(),
-            child_asset_id: Some(child_id),
-            created_at: Some(created_at),
-            link_right_outpoint: None,
-            txid: Some(link_ifa.txid),
-        };
-
-        Ok(Json(AssetLinkCreateResponse { asset_link }))
+        Ok(Json(asset_link))
     })
     .await
 }

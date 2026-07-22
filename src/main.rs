@@ -65,7 +65,7 @@ use crate::ldk::stop_ldk;
 #[cfg(feature = "remote-signer")]
 use crate::routes::init_external_signer;
 use crate::routes::{
-    address, asset_balance, asset_link_create, asset_metadata, async_order_new,
+    address, asset_balance, asset_link, asset_metadata, async_order_new,
     async_order_outbound_invoice, backup, btc_balance, cancel_hodl_invoice, change_password,
     check_indexer_url, check_proxy_endpoint, claim_hodl_invoice, close_channel, connect_peer,
     create_utxos, decode_ln_invoice, decode_rgb_invoice, decode_swapstring, disconnect_peer,
@@ -135,7 +135,7 @@ pub(crate) async fn app(args: UserArgs) -> Result<(Router, Arc<AppState>), AppEr
         .route("/apay/new", post(async_order_new))
         .route("/apay/outboundinvoice", post(async_order_outbound_invoice))
         .route("/assetbalance", post(asset_balance))
-        .route("/assetlink/create", post(asset_link_create))
+        .route("/assetlink", post(asset_link))
         .route("/assetmetadata", post(asset_metadata))
         .route("/backup", post(backup))
         .route("/btcbalance", post(btc_balance))

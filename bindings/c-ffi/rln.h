@@ -37,6 +37,9 @@ struct CResultString rln_address(const struct COpaqueStruct *node);
 
 struct CResultString rln_asset_balance(const struct COpaqueStruct *node, const char *asset_id);
 
+struct CResultString rln_asset_link_create(const struct COpaqueStruct *node,
+                                           const char *request_json);
+
 struct CResultString rln_asset_metadata(const struct COpaqueStruct *node, const char *asset_id);
 
 struct CResultString rln_btc_balance(const struct COpaqueStruct *node, bool skip_sync);

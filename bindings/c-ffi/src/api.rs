@@ -386,13 +386,15 @@ pub(crate) fn list_transfers_by_txid(
 ) -> Result<String, Error> {
     let node = require_handle(node)?;
     let transfers = node.list_transfers_by_txid(ptr_to_string(txid))?;
-    json(transfers.into_iter().map(JsonTransfer::from).collect::<Vec<_>>())
+    json(
+        transfers
+            .into_iter()
+            .map(JsonTransfer::from)
+            .collect::<Vec<_>>(),
+    )
 }
 
-pub(crate) fn list_unspents(
-    node: &COpaqueStruct,
-    skip_sync: bool,
-) -> Result<String, Error> {
+pub(crate) fn list_unspents(node: &COpaqueStruct, skip_sync: bool) -> Result<String, Error> {
     let node = require_handle(node)?;
     let unspents = node.list_unspents(skip_sync)?;
     json(
@@ -484,6 +486,16 @@ pub(crate) fn asset_balance(
     let asset_id = parse_contract_id(&ptr_to_string(asset_id))?;
     let resp = node.asset_balance(asset_id)?;
     json(JsonAssetBalanceInfo::from(resp))
+}
+
+pub(crate) fn asset_link_create(
+    node: &COpaqueStruct,
+    request_json: *const c_char,
+) -> Result<String, Error> {
+    let node = require_handle(node)?;
+    let req: JsonAssetLinkRequest = parse_req(request_json)?;
+    let asset_link = node.asset_link(req.try_into()?)?;
+    json(JsonAssetLinkRecord::from(asset_link))
 }
 
 pub(crate) fn asset_metadata(
@@ -604,7 +616,11 @@ pub(crate) fn list_transactions_by_txid(
 ) -> Result<String, Error> {
     let node = require_handle(node)?;
     let txs = node.list_transactions_by_txid(ptr_to_string(txid), skip_sync)?;
-    json(txs.into_iter().map(JsonTransaction::from).collect::<Vec<_>>())
+    json(
+        txs.into_iter()
+            .map(JsonTransaction::from)
+            .collect::<Vec<_>>(),
+    )
 }
 
 pub(crate) fn sync(node: &COpaqueStruct) -> Result<String, Error> {

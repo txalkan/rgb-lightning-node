@@ -245,6 +245,13 @@ pub struct AssetBalanceInfo {
     pub offchain_inbound: u64,
 }
 
+pub struct AssetLinkRecord {
+    pub parent_asset_id: ContractId,
+    pub child_asset_id: Option<ContractId>,
+    pub created_at: Option<u64>,
+    pub txid: Option<Txid>,
+}
+
 pub struct AssetMetadataInfo {
     pub asset_schema: String,
     pub initial_supply: u64,
@@ -607,6 +614,13 @@ pub enum IfaIssuanceType {
         contract_id: ContractId,
         request_link_right: bool,
     },
+}
+
+pub struct SdkAssetLinkRequest {
+    pub parent_asset_id: ContractId,
+    pub child_asset_id: ContractId,
+    pub fee_rate: u64,
+    pub min_confirmations: u8,
 }
 
 pub struct SdkIssueAssetUdaRequest {

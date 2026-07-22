@@ -1,10 +1,12 @@
 // NOTE: This module mirrors core behavior from `src/routes.rs` for SDK consumers.
 // If route-level business logic changes, keep SDK equivalents in sync.
 
+use crate::asset_link::create_asset_link;
 use crate::async_order::{
     write_async_payments_next_hash_index, AsyncOrderNewResultWire,
     AsyncOrderOutboundInvoiceResultWire,
 };
+use crate::core_types::asset_link::{AssetLinkRequest, AssetLinkResponse};
 use crate::core_types::async_order::{
     AsyncOrderNewRequest, AsyncOrderNewResponse, AsyncOrderOutboundInvoiceRequest,
     AsyncOrderOutboundInvoiceResponse,
@@ -1577,6 +1579,15 @@ pub(crate) async fn asset_balance(
         offchain_outbound,
         offchain_inbound,
     })
+}
+
+pub(crate) async fn asset_link(
+    state: Arc<AppState>,
+    params: AssetLinkRequest,
+) -> Result<AssetLinkResponse, APIError> {
+    let guard = check_unlocked(&state).await?;
+    let unlocked_state = guard.as_ref().unwrap();
+    create_asset_link(unlocked_state, params)
 }
 
 pub(crate) async fn asset_metadata(

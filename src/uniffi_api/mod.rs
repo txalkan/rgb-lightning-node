@@ -4,6 +4,7 @@ pub(crate) mod state;
 mod types;
 
 use crate::async_order::AsyncOrderNewHashWire;
+use crate::core_types::asset_link::{AssetLinkRequest, AssetLinkResponse};
 use crate::core_types::async_order::{AsyncOrderNewRequest, AsyncOrderNewResponse};
 use crate::sdk;
 use crate::{NodeConfig, NodeHandle};
@@ -254,6 +255,21 @@ fn map_asset_balance(data: crate::sdk::AssetBalance) -> AssetBalanceInfo {
         offchain_outbound: data.offchain_outbound,
         offchain_inbound: data.offchain_inbound,
     }
+}
+
+fn map_asset_link(data: AssetLinkResponse) -> Result<AssetLinkRecord, RlnError> {
+    Ok(AssetLinkRecord {
+        parent_asset_id: ContractId::from_str(&data.parent_asset_id).map_err(RlnError::internal)?,
+        child_asset_id: data
+            .child_asset_id
+            .map(|asset_id| ContractId::from_str(&asset_id).map_err(RlnError::internal))
+            .transpose()?,
+        created_at: data.created_at,
+        txid: data
+            .txid
+            .map(|txid| Txid::from_str(&txid).map_err(RlnError::internal))
+            .transpose()?,
+    })
 }
 
 fn map_media(data: crate::sdk::Media) -> Media {
@@ -615,6 +631,20 @@ impl SdkNode {
                 reserves: t.reserves,
             }),
         })
+    }
+
+    pub fn asset_link(&self, request: SdkAssetLinkRequest) -> Result<AssetLinkRecord, RlnError> {
+        let state = self.handle.app_state();
+        let asset_link = block_on_sdk(sdk::asset_link(
+            state,
+            AssetLinkRequest {
+                parent_asset_id: request.parent_asset_id.to_string(),
+                child_asset_id: request.child_asset_id.to_string(),
+                fee_rate: request.fee_rate,
+                min_confirmations: request.min_confirmations,
+            },
+        ))?;
+        map_asset_link(asset_link)
     }
 
     pub fn postassetmedia(
