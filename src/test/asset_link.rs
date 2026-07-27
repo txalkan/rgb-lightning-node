@@ -2,6 +2,23 @@ use super::*;
 
 const TEST_DIR_BASE: &str = "tmp/asset_link/";
 
+async fn wait_for_link_transfer_settled(node_addr: SocketAddr, asset_id: &str) {
+    let t_0 = OffsetDateTime::now_utc();
+    loop {
+        refresh_transfers(node_addr).await;
+        let transfers = list_transfers(node_addr, asset_id).await;
+        if transfers.iter().any(|transfer| {
+            transfer.kind == TransferKind::Link && transfer.status == TransferStatus::Settled
+        }) {
+            break;
+        }
+        if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 70.0 {
+            panic!("link transfer for asset {asset_id} did not settle");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
 #[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[traced_test]
@@ -13,14 +30,14 @@ async fn asset_link_create_uses_rgb_link_state_and_is_idempotent() {
     fund_and_create_utxos(node_addr, Some(12)).await;
 
     let legacy_asset = issue_asset_ifa(node_addr).await;
-    assert_eq!(legacy_asset.link_right_outpoint, None);
+    assert_eq!(legacy_asset.issuance_link_right_outpoint, None);
     let legacy_asset_id = legacy_asset.asset_id;
 
     let parent_asset =
         issue_asset_ifa_with_type(node_addr, Some(IfaIssuanceType::LinkRightOnly)).await;
     let parent_asset_id = parent_asset.asset_id;
-    let _link_right_outpoint = parent_asset
-        .link_right_outpoint
+    let issuance_link_right_outpoint = parent_asset
+        .issuance_link_right_outpoint
         .expect("link-right outpoint");
     let child_asset = issue_asset_ifa_with_type(
         node_addr,
@@ -30,10 +47,14 @@ async fn asset_link_create_uses_rgb_link_state_and_is_idempotent() {
         }),
     )
     .await;
-    assert_eq!(child_asset.link_right_outpoint, None);
+    assert_eq!(child_asset.issuance_link_right_outpoint, None);
     let child_asset_id = child_asset.asset_id;
 
     let parent_metadata = asset_metadata(node_addr, &parent_asset_id).await;
+    assert_eq!(
+        parent_metadata.unspent_link_right_outpoint,
+        Some(issuance_link_right_outpoint)
+    );
     assert_eq!(parent_metadata.linked_from_asset_id, None);
     assert_eq!(parent_metadata.linked_to_asset_id, None);
     let child_metadata = asset_metadata(node_addr, &child_asset_id).await;
@@ -42,11 +63,11 @@ async fn asset_link_create_uses_rgb_link_state_and_is_idempotent() {
         Some(parent_asset_id.clone())
     );
     assert_eq!(child_metadata.linked_to_asset_id, None);
+    assert_eq!(child_metadata.unspent_link_right_outpoint, None);
 
     let invalid_link_payload = AssetLinkRequest {
         parent_asset_id: parent_asset_id.clone(),
         child_asset_id: legacy_asset_id.clone(),
-        fee_rate: FEE_RATE,
         min_confirmations: 1,
     };
     let invalid_link_res = reqwest::Client::new()
@@ -74,7 +95,6 @@ async fn asset_link_create_uses_rgb_link_state_and_is_idempotent() {
     let missing_link_right_payload = AssetLinkRequest {
         parent_asset_id: legacy_asset_id.clone(),
         child_asset_id: missing_link_right_child.asset_id.clone(),
-        fee_rate: FEE_RATE,
         min_confirmations: 1,
     };
     let missing_link_right_res = reqwest::Client::new()
@@ -86,7 +106,7 @@ async fn asset_link_create_uses_rgb_link_state_and_is_idempotent() {
     check_response_is_nok(
         missing_link_right_res,
         StatusCode::BAD_REQUEST,
-        "missing link_right_outpoint",
+        "missing unspent_link_right_outpoint",
         "InvalidRequest",
     )
     .await;
@@ -100,6 +120,25 @@ async fn asset_link_create_uses_rgb_link_state_and_is_idempotent() {
         .is_some_and(|txid| !txid.is_empty()));
     assert!(asset_link.created_at.is_some());
 
+    // the link transaction consumes the link right allocation in the UTXO,
+    // so it must be non-existent after the RGB transition
+    mine(false);
+    wait_for_link_transfer_settled(node_addr, &parent_asset_id).await;
+    let unspents = list_settled_unspents(node_addr).await;
+    assert!(!unspents.iter().any(|unspent| {
+        unspent.rgb_allocations.iter().any(|allocation| {
+            allocation.asset_id.as_deref() == Some(parent_asset_id.as_str())
+                && allocation.assignment == Assignment::LinkRight
+        })
+    }));
+    assert_eq!(
+        asset_metadata(node_addr, &parent_asset_id)
+            .await
+            .unspent_link_right_outpoint,
+        None
+    );
+
+    // the link transition should be idempotent
     let duplicate = asset_link_create(
         node_addr,
         &asset_link.parent_asset_id,
@@ -129,7 +168,6 @@ async fn asset_link_create_uses_rgb_link_state_and_is_idempotent() {
     let conflict_payload = AssetLinkRequest {
         parent_asset_id: asset_link.parent_asset_id.clone(),
         child_asset_id: conflicting_linked_asset_id,
-        fee_rate: FEE_RATE,
         min_confirmations: 1,
     };
     let conflict_res = reqwest::Client::new()
@@ -237,7 +275,7 @@ async fn asset_link_send_payment_uses_linked_asset_when_invoice_asset_liquidity_
         issue_asset_ifa_with_type(host_addr, Some(IfaIssuanceType::LinkRightOnly)).await;
     let asset_r = asset_r_data.asset_id;
     let _link_right_outpoint = asset_r_data
-        .link_right_outpoint
+        .issuance_link_right_outpoint
         .expect("link-right outpoint");
     let asset_v = issue_asset_ifa_with_type(
         host_addr,
@@ -249,6 +287,8 @@ async fn asset_link_send_payment_uses_linked_asset_when_invoice_asset_liquidity_
     .await
     .asset_id;
     asset_link_create(host_addr, &asset_r, &asset_v).await;
+    mine(false);
+    wait_for_link_transfer_settled(host_addr, &asset_r).await;
 
     let payer_info = node_info(payer_addr).await;
     open_virtual_channel(

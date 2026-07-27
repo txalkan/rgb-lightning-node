@@ -293,17 +293,10 @@ impl UnlockedAppState {
         &self,
         contract_id: ContractId,
     ) -> Result<Option<Outpoint>, RgbLibError> {
-        let contract_id = contract_id.to_string();
+        self.rgb_list_unspents(false, false)?;
         Ok(self
-            .rgb_list_unspents(false, false)?
-            .into_iter()
-            .find_map(|unspent| {
-                let has_link_right = unspent.rgb_allocations.iter().any(|allocation| {
-                    allocation.asset_id.as_deref() == Some(contract_id.as_str())
-                        && allocation.assignment == Assignment::LinkRight
-                });
-                has_link_right.then_some(unspent.utxo.outpoint)
-            }))
+            .rgb_get_asset_metadata(contract_id)?
+            .unspent_link_right_outpoint)
     }
 
     pub(crate) fn rgb_find_link_transfer(

@@ -370,6 +370,7 @@ fn map_transfer(t: crate::sdk::TransferData) -> Result<Transfer, RlnError> {
         kind: format!("{:?}", t.kind),
         txid,
         recipient_id: t.recipient_id,
+        proxy_recipient_id: t.proxy_recipient_id,
         receive_utxo: t.receive_utxo,
         change_utxo: t.change_utxo,
         expiration: t.expiration,
@@ -584,7 +585,7 @@ impl SdkNode {
             balance: map_asset_balance(asset.balance),
             media: asset.media.map(map_media),
             reject_list_url: asset.reject_list_url,
-            link_right_outpoint: asset.link_right_outpoint.map(map_rgb_outpoint),
+            issuance_link_right_outpoint: asset.issuance_link_right_outpoint.map(map_rgb_outpoint),
             linked_from_asset_id: asset.linked_from_asset_id,
             linked_to_asset_id: asset.linked_to_asset_id,
         })
@@ -640,7 +641,6 @@ impl SdkNode {
             AssetLinkRequest {
                 parent_asset_id: request.parent_asset_id.to_string(),
                 child_asset_id: request.child_asset_id.to_string(),
-                fee_rate: request.fee_rate,
                 min_confirmations: request.min_confirmations,
             },
         ))?;
@@ -1187,6 +1187,7 @@ impl SdkNode {
             ticker: resp.ticker,
             details: resp.details,
             token: resp.token.map(map_token),
+            unspent_link_right_outpoint: resp.unspent_link_right_outpoint.map(map_rgb_outpoint),
             linked_from_asset_id: resp.linked_from_asset_id,
             linked_to_asset_id: resp.linked_to_asset_id,
         })
@@ -1318,7 +1319,9 @@ impl SdkNode {
                             balance: map_asset_balance(a.balance),
                             media: a.media.map(map_media),
                             reject_list_url: a.reject_list_url,
-                            link_right_outpoint: a.link_right_outpoint.map(map_rgb_outpoint),
+                            issuance_link_right_outpoint: a
+                                .issuance_link_right_outpoint
+                                .map(map_rgb_outpoint),
                             linked_from_asset_id: a.linked_from_asset_id,
                             linked_to_asset_id: a.linked_to_asset_id,
                         })
@@ -1372,6 +1375,7 @@ impl SdkNode {
             .transpose()?;
         Ok(DecodeRgbInvoiceResponse {
             recipient_id: resp.recipient_id,
+            proxy_recipient_id: resp.proxy_recipient_id,
             recipient_type: format!("{:?}", resp.recipient_type),
             asset_schema: resp.asset_schema.map(|s| format!("{:?}", s)),
             asset_id,

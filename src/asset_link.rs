@@ -486,14 +486,14 @@ pub(crate) fn create_asset_link(
         .rgb_find_link_right_outpoint(parent_contract_id)?
         .ok_or_else(|| {
             APIError::InvalidRequest(format!(
-                "missing link_right_outpoint for parent_asset_id {parent_id}"
+                "missing unspent_link_right_outpoint for parent_asset_id {parent_id}"
             ))
         })?;
     let link_ifa = unlocked_state.rgb_link_ifa(
         parent_id.clone(),
         child_id.clone(),
         link_right_outpoint,
-        params.fee_rate,
+        unlocked_state.config.rgb.fee_rate_sat_vb,
         params.min_confirmations,
     )?;
     let link_transfer = unlocked_state.rgb_find_link_transfer(parent_contract_id)?;
@@ -518,6 +518,49 @@ pub(crate) fn find_linked_asset_channel(
     recipient_pubkey: PublicKey,
 ) -> Option<(ContractId, PublicKey)> {
     let asset_id = contract_id.to_string();
+    let validate_locally_discoverable_asset_link = |linked_contract_id: ContractId| -> Option<()> {
+        let linked_metadata = unlocked_state
+            .rgb_get_asset_metadata(linked_contract_id)
+            .ok()?;
+        if linked_metadata.asset_schema != RgbLibAssetSchema::Ifa {
+            return None;
+        }
+
+        let linked_asset_id = linked_contract_id.to_string();
+        if linked_metadata.linked_from_asset_id.as_deref() == Some(asset_id.as_str()) {
+            if let Ok(parent_metadata) = unlocked_state.rgb_get_asset_metadata(contract_id) {
+                if parent_metadata.linked_to_asset_id.as_deref() != Some(linked_asset_id.as_str()) {
+                    return None;
+                }
+                let is_link_settled = unlocked_state
+                    .rgb_find_link_transfer(contract_id)
+                    .ok()?
+                    .is_some_and(|transfer| transfer.status == rgb_lib::TransferStatus::Settled);
+                if !is_link_settled {
+                    return None;
+                }
+            }
+        } else if linked_metadata.linked_to_asset_id.as_deref() == Some(asset_id.as_str()) {
+            if let Ok(child_metadata) = unlocked_state.rgb_get_asset_metadata(contract_id) {
+                if child_metadata.linked_from_asset_id.as_deref() != Some(linked_asset_id.as_str())
+                {
+                    return None;
+                }
+            }
+            let is_link_settled = unlocked_state
+                .rgb_find_link_transfer(linked_contract_id)
+                .ok()?
+                .is_some_and(|transfer| transfer.status == rgb_lib::TransferStatus::Settled);
+            if !is_link_settled {
+                return None;
+            }
+        } else {
+            return None;
+        }
+
+        Some(())
+    };
+
     unlocked_state
         .channel_manager
         .list_usable_channels()
@@ -539,16 +582,9 @@ pub(crate) fn find_linked_asset_channel(
                 return None;
             }
 
-            let metadata = unlocked_state
-                .rgb_get_asset_metadata(rgb_info.contract_id)
-                .ok()?;
-            if metadata.asset_schema != RgbLibAssetSchema::Ifa {
-                return None;
-            }
+            validate_locally_discoverable_asset_link(rgb_info.contract_id)?;
 
-            let is_linked = metadata.linked_from_asset_id.as_deref() == Some(asset_id.as_str())
-                || metadata.linked_to_asset_id.as_deref() == Some(asset_id.as_str());
-            is_linked.then_some((
+            Some((
                 rgb_info.contract_id,
                 channel.counterparty.node_id,
                 rgb_info.local_rgb_amount,

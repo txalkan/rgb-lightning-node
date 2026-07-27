@@ -350,6 +350,7 @@ dictionary AssetMetadataInfo {
     string? ticker;
     string? details;
     Token? token;
+    RgbOutpoint? unspent_link_right_outpoint;
     string? linked_from_asset_id;
     string? linked_to_asset_id;
 };
@@ -452,7 +453,7 @@ dictionary AssetIfa {
     AssetBalanceInfo balance;
     Media? media;
     string? reject_list_url;
-    RgbOutpoint? link_right_outpoint;
+    RgbOutpoint? issuance_link_right_outpoint;
     string? linked_from_asset_id;
     string? linked_to_asset_id;
 };
@@ -484,6 +485,7 @@ dictionary DecodeLnInvoiceResponse {
 
 dictionary DecodeRgbInvoiceResponse {
     string recipient_id;
+    string proxy_recipient_id;
     string recipient_type;
     string? asset_schema;
     ContractId? asset_id;
@@ -519,6 +521,7 @@ dictionary Transfer {
     string kind;
     Txid? txid;
     string? recipient_id;
+    string? proxy_recipient_id;
     string? receive_utxo;
     string? change_utxo;
     i64? expiration;
@@ -710,7 +713,6 @@ interface IfaIssuanceType {
 dictionary SdkAssetLinkRequest {
     ContractId parent_asset_id;
     ContractId child_asset_id;
-    u64 fee_rate;
     u8 min_confirmations;
 };
 

@@ -170,6 +170,9 @@ pub enum APIError {
     #[error("Invalid contract link: {0}")]
     InvalidContractLink(String),
 
+    #[error("Invalid right outpoint: {0}")]
+    InvalidRightOutpoint(String),
+
     #[error("Invalid description hash: {0}")]
     InvalidDescriptionHash(String),
 
@@ -347,6 +350,9 @@ pub enum APIError {
     #[error("Unexpected error: {0}")]
     Unexpected(String),
 
+    #[error("Restored VSS backup is inconsistent: {0}")]
+    RestoredBackupInconsistent(String),
+
     #[error("Unknown channel ID")]
     UnknownChannelId,
 
@@ -444,6 +450,9 @@ impl From<RgbLibError> for APIError {
             RgbLibError::InvalidAssignment => APIError::InvalidAssignment,
             RgbLibError::InvalidAttachments { details } => APIError::InvalidAttachments(details),
             RgbLibError::InvalidContractLink { details } => APIError::InvalidContractLink(details),
+            RgbLibError::InvalidRightOutpoint { details } => {
+                APIError::InvalidRightOutpoint(details)
+            }
             RgbLibError::InvalidDetails { details } => APIError::InvalidDetails(details),
             RgbLibError::InvalidElectrum { details } => APIError::InvalidIndexer(details),
             RgbLibError::InvalidEstimationBlocks => APIError::InvalidEstimationBlocks,
@@ -483,6 +492,9 @@ impl From<RgbLibError> for APIError {
             RgbLibError::OutputBelowDustLimit => APIError::OutputBelowDustLimit,
             RgbLibError::Proxy { details } => APIError::Network(format!("proxy err: {details}")),
             RgbLibError::RecipientIDAlreadyUsed => APIError::RecipientIDAlreadyUsed,
+            RgbLibError::RestoredBackupInconsistent { details } => {
+                APIError::RestoredBackupInconsistent(details)
+            }
             RgbLibError::TooHighInflationAmounts => {
                 APIError::InvalidAmount(s!("inflation amount exceeds the max possible supply"))
             }
@@ -516,6 +528,7 @@ impl IntoResponse for APIError {
             | APIError::FailedPeerDisconnection(_)
             | APIError::FailedSendingOnionMessage(_)
             | APIError::IO(_)
+            | APIError::RestoredBackupInconsistent(_)
             | APIError::Unexpected(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 self.to_string(),
@@ -536,6 +549,7 @@ impl IntoResponse for APIError {
             | APIError::InvalidBiscuitToken
             | APIError::InvalidChannelID
             | APIError::InvalidContractLink(_)
+            | APIError::InvalidRightOutpoint(_)
             | APIError::InvalidDescriptionHash(_)
             | APIError::InvalidDetails(_)
             | APIError::InvalidEstimationBlocks

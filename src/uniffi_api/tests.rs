@@ -381,6 +381,18 @@ mod uniffi_smoke_tests {
         let err = super::super::state::map_api_error(crate::error::APIError::LockedNode);
         assert!(matches!(err, RlnError::NotInitialized(_)));
         assert!(err.to_string().contains("unlock"));
+
+        let err = super::super::state::map_api_error(crate::error::APIError::InvalidRightOutpoint(
+            "stale outpoint".to_string(),
+        ));
+        assert!(matches!(err, RlnError::InvalidRequest(_)));
+        assert!(err.to_string().contains("stale outpoint"));
+
+        let err = super::super::state::map_api_error(
+            crate::error::APIError::RestoredBackupInconsistent("backup gap".to_string()),
+        );
+        assert!(matches!(err, RlnError::Internal(_)));
+        assert!(err.to_string().contains("backup gap"));
     }
 
     #[cfg(feature = "vss")]

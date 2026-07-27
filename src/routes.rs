@@ -193,7 +193,7 @@ pub(crate) struct AssetIFA {
     pub(crate) balance: AssetBalanceResponse,
     pub(crate) media: Option<Media>,
     pub(crate) reject_list_url: Option<String>,
-    pub(crate) link_right_outpoint: Option<RgbLibOutpoint>,
+    pub(crate) issuance_link_right_outpoint: Option<RgbLibOutpoint>,
     pub(crate) linked_from_asset_id: Option<String>,
     pub(crate) linked_to_asset_id: Option<String>,
 }
@@ -214,7 +214,7 @@ impl From<RgbLibAssetIFA> for AssetIFA {
             balance: value.balance.into(),
             media: value.media.map(|m| m.into()),
             reject_list_url: value.reject_list_url,
-            link_right_outpoint: value.link_right_outpoint,
+            issuance_link_right_outpoint: value.issuance_link_right_outpoint,
             linked_from_asset_id: value.linked_from_asset_id,
             linked_to_asset_id: value.linked_to_asset_id,
         }
@@ -238,6 +238,7 @@ pub(crate) struct AssetMetadataResponse {
     pub(crate) ticker: Option<String>,
     pub(crate) details: Option<String>,
     pub(crate) token: Option<Token>,
+    pub(crate) unspent_link_right_outpoint: Option<RgbLibOutpoint>,
     pub(crate) linked_from_asset_id: Option<String>,
     pub(crate) linked_to_asset_id: Option<String>,
 }
@@ -548,6 +549,7 @@ pub(crate) struct DecodeRGBInvoiceRequest {
 #[derive(Deserialize, Serialize)]
 pub(crate) struct DecodeRGBInvoiceResponse {
     pub(crate) recipient_id: String,
+    pub(crate) proxy_recipient_id: String,
     pub(crate) recipient_type: RecipientType,
     pub(crate) asset_schema: Option<AssetSchema>,
     pub(crate) asset_id: Option<String>,
@@ -1427,6 +1429,7 @@ pub(crate) struct Transfer {
     pub(crate) kind: TransferKind,
     pub(crate) txid: Option<String>,
     pub(crate) recipient_id: Option<String>,
+    pub(crate) proxy_recipient_id: Option<String>,
     pub(crate) receive_utxo: Option<String>,
     pub(crate) change_utxo: Option<String>,
     pub(crate) expiration_timestamp: Option<u64>,
@@ -1872,6 +1875,7 @@ pub(crate) async fn asset_metadata(
         ticker: metadata.ticker,
         details: metadata.details,
         token: metadata.token.map(|t| t.into()),
+        unspent_link_right_outpoint: metadata.unspent_link_right_outpoint,
         linked_from_asset_id: metadata.linked_from_asset_id,
         linked_to_asset_id: metadata.linked_to_asset_id,
     }))
@@ -2378,6 +2382,7 @@ pub(crate) async fn decode_rgb_invoice(
 
     Ok(Json(DecodeRGBInvoiceResponse {
         recipient_id: invoice_data.recipient_id,
+        proxy_recipient_id: invoice_data.proxy_recipient_id,
         recipient_type: recipient_info.recipient_type.into(),
         asset_schema: invoice_data.asset_schema.map(|s| s.into()),
         asset_id: invoice_data.asset_id,
@@ -3500,6 +3505,7 @@ pub(crate) async fn list_transfers(
             },
             txid: transfer.txid,
             recipient_id: transfer.recipient_id,
+            proxy_recipient_id: transfer.proxy_recipient_id,
             receive_utxo: transfer.receive_utxo.map(|u| u.to_string()),
             change_utxo: transfer.change_utxo.map(|u| u.to_string()),
             expiration_timestamp: transfer.expiration_timestamp,
@@ -5318,6 +5324,7 @@ pub(crate) async fn vss_backup_info(
         "backup_exists": info.backup_exists,
         "server_version": info.server_version,
         "backup_required": info.backup_required,
+        "last_auto_backup_error": info.last_auto_backup_error,
         "pending_kv_writes": pending_kv_writes,
     })))
 }

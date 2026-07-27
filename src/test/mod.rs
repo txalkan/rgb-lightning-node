@@ -65,7 +65,8 @@ use crate::routes::{
     PaymentDirection, PaymentType, Peer, PostAssetMediaResponse, Recipient, RefreshRequest,
     RestoreRequest, RevokeTokenRequest, RgbInvoiceRequest, RgbInvoiceResponse, SendBtcRequest,
     SendBtcResponse, SendPaymentRequest, SendPaymentResponse, SendRgbRequest, SendRgbResponse,
-    Swap, TakerRequest, Transaction, Transfer, TransferStatus, UnlockRequest, Unspent, WitnessData,
+    Swap, TakerRequest, Transaction, Transfer, TransferKind, TransferStatus, UnlockRequest,
+    Unspent, WitnessData,
 };
 use crate::utils::{
     get_db_path, hex_str, hex_str_to_vec, validate_and_parse_payment_hash, AppState,
@@ -601,7 +602,6 @@ async fn asset_link_create(
     let payload = AssetLinkRequest {
         parent_asset_id: parent_asset_id.to_string(),
         child_asset_id: child_asset_id.to_string(),
-        fee_rate: FEE_RATE,
         min_confirmations: 1,
     };
     let res = reqwest::Client::new()
@@ -1533,6 +1533,27 @@ async fn list_transactions_by_txid(node_address: SocketAddr, txid: &str) -> Vec<
 
 async fn list_unspents(node_address: SocketAddr) -> Vec<Unspent> {
     list_unspents_full(node_address, None, None).await.unspents
+}
+
+async fn list_settled_unspents(node_address: SocketAddr) -> Vec<Unspent> {
+    let payload = ListUnspentsRequest {
+        settled_only: true,
+        skip_sync: false,
+        index_offset: None,
+        max_unspents: None,
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/listunspents"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    check_response_is_ok(res)
+        .await
+        .json::<ListUnspentsResponse>()
+        .await
+        .unwrap()
+        .unspents
 }
 
 async fn list_unspents_full(

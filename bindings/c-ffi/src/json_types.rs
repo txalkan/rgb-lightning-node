@@ -789,6 +789,7 @@ impl From<DecodeLnInvoiceResponse> for JsonDecodeLnInvoiceResponse {
 #[derive(Debug, Serialize)]
 pub(crate) struct JsonDecodeRgbInvoiceResponse {
     pub recipient_id: String,
+    pub proxy_recipient_id: String,
     pub recipient_type: String,
     pub asset_schema: Option<String>,
     pub asset_id: Option<String>,
@@ -802,6 +803,7 @@ impl From<DecodeRgbInvoiceResponse> for JsonDecodeRgbInvoiceResponse {
     fn from(r: DecodeRgbInvoiceResponse) -> Self {
         JsonDecodeRgbInvoiceResponse {
             recipient_id: r.recipient_id,
+            proxy_recipient_id: r.proxy_recipient_id,
             recipient_type: r.recipient_type,
             asset_schema: r.asset_schema,
             asset_id: r.asset_id.as_ref().map(fmt_contract_id),
@@ -1063,7 +1065,6 @@ impl From<InflateResponse> for JsonInflateResponse {
 pub(crate) struct JsonAssetLinkRequest {
     pub parent_asset_id: String,
     pub child_asset_id: String,
-    pub fee_rate: u64,
     pub min_confirmations: u8,
 }
 
@@ -1074,7 +1075,6 @@ impl TryFrom<JsonAssetLinkRequest> for SdkAssetLinkRequest {
         Ok(Self {
             parent_asset_id: parse_contract_id(&j.parent_asset_id)?,
             child_asset_id: parse_contract_id(&j.child_asset_id)?,
-            fee_rate: j.fee_rate,
             min_confirmations: j.min_confirmations,
         })
     }
@@ -1435,7 +1435,7 @@ pub(crate) struct JsonAssetIfa {
     pub balance: JsonAssetBalanceInfo,
     pub media: Option<JsonMedia>,
     pub reject_list_url: Option<String>,
-    pub link_right_outpoint: Option<JsonRgbOutpoint>,
+    pub issuance_link_right_outpoint: Option<JsonRgbOutpoint>,
     pub linked_from_asset_id: Option<String>,
     pub linked_to_asset_id: Option<String>,
 }
@@ -1471,7 +1471,7 @@ impl From<AssetIfa> for JsonAssetIfa {
             balance: a.balance.into(),
             media: a.media.map(Into::into),
             reject_list_url: a.reject_list_url,
-            link_right_outpoint: a.link_right_outpoint.map(Into::into),
+            issuance_link_right_outpoint: a.issuance_link_right_outpoint.map(Into::into),
             linked_from_asset_id: a.linked_from_asset_id,
             linked_to_asset_id: a.linked_to_asset_id,
         }
@@ -1538,6 +1538,7 @@ pub(crate) struct JsonAssetMetadataInfo {
     pub ticker: Option<String>,
     pub details: Option<String>,
     pub token: Option<JsonToken>,
+    pub unspent_link_right_outpoint: Option<JsonRgbOutpoint>,
     pub linked_from_asset_id: Option<String>,
     pub linked_to_asset_id: Option<String>,
 }
@@ -1555,6 +1556,7 @@ impl From<AssetMetadataInfo> for JsonAssetMetadataInfo {
             ticker: a.ticker,
             details: a.details,
             token: a.token.map(Into::into),
+            unspent_link_right_outpoint: a.unspent_link_right_outpoint.map(Into::into),
             linked_from_asset_id: a.linked_from_asset_id,
             linked_to_asset_id: a.linked_to_asset_id,
         }
@@ -1885,6 +1887,7 @@ pub(crate) struct JsonTransfer {
     pub kind: String,
     pub txid: Option<String>,
     pub recipient_id: Option<String>,
+    pub proxy_recipient_id: Option<String>,
     pub receive_utxo: Option<String>,
     pub change_utxo: Option<String>,
     pub expiration: Option<i64>,
@@ -1903,6 +1906,7 @@ impl From<Transfer> for JsonTransfer {
             kind: t.kind,
             txid: t.txid.as_ref().map(fmt_txid),
             recipient_id: t.recipient_id,
+            proxy_recipient_id: t.proxy_recipient_id,
             receive_utxo: t.receive_utxo,
             change_utxo: t.change_utxo,
             expiration: t.expiration,

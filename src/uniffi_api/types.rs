@@ -263,6 +263,7 @@ pub struct AssetMetadataInfo {
     pub ticker: Option<String>,
     pub details: Option<String>,
     pub token: Option<Token>,
+    pub unspent_link_right_outpoint: Option<RgbOutpoint>,
     pub linked_from_asset_id: Option<String>,
     pub linked_to_asset_id: Option<String>,
 }
@@ -365,7 +366,7 @@ pub struct AssetIfa {
     pub balance: AssetBalanceInfo,
     pub media: Option<Media>,
     pub reject_list_url: Option<String>,
-    pub link_right_outpoint: Option<RgbOutpoint>,
+    pub issuance_link_right_outpoint: Option<RgbOutpoint>,
     pub linked_from_asset_id: Option<String>,
     pub linked_to_asset_id: Option<String>,
 }
@@ -397,6 +398,7 @@ pub struct DecodeLnInvoiceResponse {
 
 pub struct DecodeRgbInvoiceResponse {
     pub recipient_id: String,
+    pub proxy_recipient_id: String,
     pub recipient_type: String,
     pub asset_schema: Option<String>,
     pub asset_id: Option<ContractId>,
@@ -432,6 +434,7 @@ pub struct Transfer {
     pub kind: String,
     pub txid: Option<Txid>,
     pub recipient_id: Option<String>,
+    pub proxy_recipient_id: Option<String>,
     pub receive_utxo: Option<String>,
     pub change_utxo: Option<String>,
     pub expiration: Option<i64>,
@@ -619,7 +622,6 @@ pub enum IfaIssuanceType {
 pub struct SdkAssetLinkRequest {
     pub parent_asset_id: ContractId,
     pub child_asset_id: ContractId,
-    pub fee_rate: u64,
     pub min_confirmations: u8,
 }
 

@@ -23,7 +23,6 @@ pub mod asset_link {
     pub(crate) struct AssetLinkRequest {
         pub(crate) parent_asset_id: String,
         pub(crate) child_asset_id: String,
-        pub(crate) fee_rate: u64,
         pub(crate) min_confirmations: u8,
     }
 

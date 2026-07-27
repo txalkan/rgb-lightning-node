@@ -101,7 +101,7 @@ use rgb_lib::{
         Wallet as RgbLibWallet, WalletData, WitnessData,
     },
     AssetSchema, Assignment, BitcoinNetwork, ConsignmentExt, ContractId, Error as RgbLibError,
-    Fascia, FileContent, RgbTransfer, RgbTxid, WitnessOrd,
+    Fascia, FileContent, RgbTransfer, RgbTxid, TransferStatus, WitnessOrd,
 };
 use std::collections::HashMap;
 #[cfg(feature = "vss")]
@@ -1292,13 +1292,37 @@ impl AssetLinkAuthorizer for NodeAssetLinkAuthorizer {
             && asset_metadata.linked_from_asset_id.as_deref()
                 == Some(params.linked_asset_id.as_str());
 
-        let contracts_are_linked =
-            asset_is_parent_of_linked_asset || linked_asset_is_parent_of_asset;
+        let parent_contract_id = if asset_is_parent_of_linked_asset {
+            Some(asset_contract_id)
+        } else if linked_asset_is_parent_of_asset {
+            Some(linked_contract_id)
+        } else {
+            None
+        };
+
+        let Some(parent_contract_id) = parent_contract_id else {
+            return Err(JsonRpcErrorWire::application_error(
+                ASSET_LINK_ERROR_UNKNOWN_LINK,
+                "unknown_link",
+            ));
+        };
 
         if asset_metadata.asset_schema != AssetSchema::Ifa
             || linked_asset_metadata.asset_schema != AssetSchema::Ifa
-            || !contracts_are_linked
         {
+            return Err(JsonRpcErrorWire::application_error(
+                ASSET_LINK_ERROR_UNKNOWN_LINK,
+                "unknown_link",
+            ));
+        }
+
+        let link_is_settled = unlocked_state
+            .rgb_find_link_transfer(parent_contract_id)
+            .map_err(|_| {
+                JsonRpcErrorWire::application_error(ASSET_LINK_ERROR_UNKNOWN_LINK, "unknown_link")
+            })?
+            .is_some_and(|transfer| transfer.status == TransferStatus::Settled);
+        if !link_is_settled {
             return Err(JsonRpcErrorWire::application_error(
                 ASSET_LINK_ERROR_UNKNOWN_LINK,
                 "unknown_link",
@@ -1332,13 +1356,18 @@ impl AssetLinkAuthorizer for NodeAssetLinkAuthorizer {
         let expiry_sec = params
             .expiry_sec
             .min(ASSET_LINK_SWAP_AUTHORIZATION_MAX_EXPIRY_SECS);
+        let one_to_one_redemption_amount = params.amount;
         let swap_info = SwapInfo {
-            qty_from: params.amount,
-            qty_to: params.amount,
+            qty_from: one_to_one_redemption_amount,
+            qty_to: one_to_one_redemption_amount,
             from_asset: Some(asset_contract_id),
             to_asset: Some(linked_contract_id),
             expiry: authorization_time.saturating_add(expiry_sec),
         };
+        assert_eq!(
+            swap_info.qty_from, swap_info.qty_to,
+            "linked-asset redemption must remain 1:1"
+        );
         let mut swap_data = SwapData::create_from_swap_info(&swap_info);
         swap_data.authorized_peer = Some(sender_node_id);
         taker_swaps.swaps.insert(payment_hash, swap_data);

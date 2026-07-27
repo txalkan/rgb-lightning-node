@@ -1275,6 +1275,11 @@ paths:
                     description: >
                       True if the local wallet has changes since the last
                       successful upload (i.e. a manual backup is needed).
+                  last_auto_backup_error:
+                    type:
+                      - string
+                      - 'null'
+                    description: Most recent automatic VSS backup error, if any.
                   pending_kv_writes:
                     type: integer
                     description: >
@@ -1611,12 +1616,23 @@ components:
             - string
             - 'null'
           example: https://some.domain/someasset/rejectlist
+        issuance_link_right_outpoint:
+          oneOf:
+            - $ref: '#/components/schemas/Outpoint'
+            - type: 'null'
+        linked_from_asset_id:
+          type:
+            - string
+            - 'null'
+        linked_to_asset_id:
+          type:
+            - string
+            - 'null'
     AssetLinkRequest:
       type: object
       required:
         - parent_asset_id
         - child_asset_id
-        - fee_rate
         - min_confirmations
       properties:
         parent_asset_id:
@@ -1625,9 +1641,6 @@ components:
         child_asset_id:
           type: string
           example: rgb:CJkb4YZw-jRiz2sk-~PARPio-wtVYI1c-XAEYCqO-wTfvRZ9
-        fee_rate:
-          type: integer
-          example: 5
         min_confirmations:
           type: integer
           example: 1
@@ -1709,6 +1722,18 @@ components:
         token:
           oneOf:
             - $ref: '#/components/schemas/Token'
+            - type: 'null'
+        linked_from_asset_id:
+          type:
+            - string
+            - 'null'
+        linked_to_asset_id:
+          type:
+            - string
+            - 'null'
+        unspent_link_right_outpoint:
+          oneOf:
+            - $ref: '#/components/schemas/Outpoint'
             - type: 'null'
     AssetNIA:
       type: object
@@ -1879,6 +1904,19 @@ components:
         - Signet
         - SignetCustom
         - Regtest
+    Outpoint:
+      type: object
+      required:
+        - txid
+        - vout
+      properties:
+        txid:
+          type: string
+          example: 4b0d1f2c0d8a4e8d7e5e3f8f5a6b7c8d9e0f102132435465768798a9b0c1d2e3
+        vout:
+          type: integer
+          format: int32
+          example: 0
     BlockTime:
       type: object
       required:
@@ -2198,6 +2236,7 @@ components:
       type: object
       required:
         - recipient_id
+        - proxy_recipient_id
         - recipient_type
         - assignment
         - network
@@ -2206,6 +2245,9 @@ components:
         recipient_id:
           type: string
           example: bcrt:utxob:cbgHUJ4e-7QyKY4U-Jsj5AZw-oI0gxZh-7fxQY2_-tFFUAZN-4CgpX
+        proxy_recipient_id:
+          type: string
+          example: bcrt:utxob:cbgHUJ4e-7QyKY4U-Jsj5AZw-oI0gxZh-7fxQY2_-tFFUAZN-4CgpY
         recipient_type:
           $ref: '#/components/schemas/RecipientType'
         asset_schema:
@@ -3897,6 +3939,11 @@ components:
             - string
             - 'null'
           example: 61qsVbWtkNmU54F2i6qtB9uSmEGsPoaeypCi5uC5uctZ
+        proxy_recipient_id:
+          type:
+            - string
+            - 'null'
+          example: 61qsVbWtkNmU54F2i6qtB9uSmEGsPoaeypCi5uC5ucX
         receive_utxo:
           type:
             - string
