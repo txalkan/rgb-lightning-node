@@ -953,9 +953,9 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "camino"
-version = "1.2.4"
+version = "1.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f2d30e4173c4026932d51d31d6b0613b1fd3014bf3f9f8943d4ba139c437ba0"
+checksum = "bb1307f12aa967b5a58416e87b3653360e0fd614a016b6e970db08fecbb1b80d"
 dependencies = [
  "serde_core",
 ]
@@ -4269,7 +4269,7 @@ dependencies = [
 [[package]]
 name = "rgb-lib"
 version = "0.3.0-beta.6"
-source = "git+https://github.com/txalkan/rgb-lib.git?branch=feat%2Fasset-link#684db9aeb862e4457bd3d246c055b0c57d67f071"
+source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.31#4450094e6fe046a8ea68cded4f1813f6ec72d815"
 dependencies = [
  "amplify",
  "base64 0.22.1",
@@ -4314,7 +4314,7 @@ dependencies = [
 [[package]]
 name = "rgb-lib-migration"
 version = "0.3.0-beta.4"
-source = "git+https://github.com/txalkan/rgb-lib.git?branch=feat%2Fasset-link#684db9aeb862e4457bd3d246c055b0c57d67f071"
+source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.31#4450094e6fe046a8ea68cded4f1813f6ec72d815"
 dependencies = [
  "sea-orm-migration",
  "tokio",

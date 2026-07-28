@@ -2605,6 +2605,10 @@ components:
             - string
             - 'null'
           example: https://some.domain/someasset/rejectlist
+        issuance_type:
+          oneOf:
+            - $ref: '#/components/schemas/IfaIssuanceType'
+            - type: 'null'
     IssueAssetIFAResponse:
       type: object
       required:
@@ -2612,6 +2616,33 @@ components:
       properties:
         asset:
           $ref: '#/components/schemas/AssetIFA'
+    IfaIssuanceType:
+      oneOf:
+        - $ref: '#/components/schemas/IfaIssuanceTypeLegacy'
+        - $ref: '#/components/schemas/IfaIssuanceTypeLinkRightOnly'
+        - $ref: '#/components/schemas/IfaIssuanceTypeLinkedFromParent'
+    IfaIssuanceTypeLegacy:
+      type: string
+      enum: [legacy]
+    IfaIssuanceTypeLinkRightOnly:
+      type: string
+      enum: [linkRightOnly]
+    IfaIssuanceTypeLinkedFromParent:
+      type: object
+      required:
+        - linkedFromParent
+      properties:
+        linkedFromParent:
+          type: object
+          required:
+            - contractId
+          properties:
+            contractId:
+              type: string
+              example: rgb:CJkb4YZw-jRiz2sk-~PARPio-wtVYI1c-XAEYCqO-wTfvRZ8
+            requestLinkRight:
+              type: boolean
+              example: true
     IssueAssetNIARequest:
       type: object
       required:
