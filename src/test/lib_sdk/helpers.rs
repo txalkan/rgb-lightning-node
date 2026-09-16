@@ -85,7 +85,37 @@ fn run_regtest(args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-fn get_txout(txid: &str) -> String {
+fn get_raw_transaction(txid: &str) -> String {
+    let output = Command::new("docker")
+        .args([
+            "compose",
+            "exec",
+            "-u",
+            "blits",
+            "bitcoind",
+            "bitcoin-cli",
+            "-regtest",
+            "-rpcwallet=miner",
+            "getrawtransaction",
+            txid,
+            "true",
+        ])
+        .current_dir(repo_root())
+        .output()
+        .expect("failed to run getrawtransaction");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() || stderr.contains("No such mempool or blockchain transaction"),
+        "`docker compose exec ... getrawtransaction` failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        stderr
+    );
+
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+fn get_txout(txid: &str, vout: usize) -> String {
     let output = Command::new("docker")
         .args([
             "compose",
@@ -98,20 +128,37 @@ fn get_txout(txid: &str) -> String {
             "-rpcwallet=miner",
             "gettxout",
             txid,
-            "0",
+            &vout.to_string(),
         ])
         .current_dir(repo_root())
         .output()
         .expect("failed to run gettxout");
 
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.status.success(),
+        output.status.success() || stderr.contains("No such mempool or blockchain transaction"),
         "`docker compose exec ... gettxout` failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        stderr
     );
 
     String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+fn funding_tx_is_available(txid: &str) -> bool {
+    let raw = get_raw_transaction(txid);
+    let Ok(transaction) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let Some(outputs) = transaction["vout"].as_array() else {
+        return false;
+    };
+
+    outputs.iter().enumerate().any(|(vout, _)| {
+        let txout = get_txout(txid, vout);
+        let txout = txout.trim();
+        !txout.is_empty() && txout != "null"
+    })
 }
 
 pub(crate) fn mine(blocks: u32) {
@@ -330,12 +377,19 @@ fn make_node_inner(
 }
 
 pub(crate) fn unlock_request(password: &str) -> SdkUnlockRequest {
+    unlock_request_with_host(password, "127.0.0.1")
+}
+
+pub(crate) fn unlock_request_with_host(
+    password: &str,
+    bitcoind_rpc_host: &str,
+) -> SdkUnlockRequest {
     SdkUnlockRequest {
         password: password.to_string(),
         ldk_chain_sync: SdkLdkChainSync::BlockSync {
             bitcoind_rpc_username: "user".to_string(),
             bitcoind_rpc_password: "password".to_string(),
-            bitcoind_rpc_host: "localhost".to_string(),
+            bitcoind_rpc_host: bitcoind_rpc_host.to_string(),
             bitcoind_rpc_port: 18443,
         },
         indexer_url: Some("127.0.0.1:50001".to_string()),
@@ -465,16 +519,20 @@ pub(crate) fn wait_for_channel_funding_tx(
             .sync()
             .expect("node B sync while waiting for funding tx");
 
-        let funding_seen = node_a
+        let funding_txid = node_a
             .list_channels()
             .expect("node A list_channels while waiting for funding tx")
             .into_iter()
-            .any(|channel| {
-                channel.asset_id.as_ref() == Some(asset_id) && channel.funding_txid.is_some()
+            .find_map(|channel| {
+                (channel.asset_id.as_ref() == Some(asset_id))
+                    .then_some(channel.funding_txid)
+                    .flatten()
             });
 
-        if funding_seen {
-            return;
+        if let Some(txid) = funding_txid {
+            if funding_tx_is_available(&txid.to_string()) {
+                return;
+            }
         }
 
         assert!(
@@ -506,7 +564,7 @@ where
             .find(|channel| matcher(channel) && !channel.ready)
         {
             if let Some(txid) = &channel.funding_txid {
-                if !get_txout(&txid.to_string()).trim().is_empty() {
+                if funding_tx_is_available(&txid.to_string()) {
                     mine(OPEN_CHANNEL_CONFIRM_BLOCKS);
                     break channel.channel_id;
                 }
